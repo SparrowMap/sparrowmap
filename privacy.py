@@ -186,6 +186,46 @@ def audit_ip(ip: str) -> str:
     return "ip:" + hmac.new(key, f"{day}|{ip}".encode(), blake2b).hexdigest()[:16]
 
 
+# --------------------------------------------------------------------------
+# Per-day plate-hash alias mapping
+#
+# Moved from hub.py in Stage 2B so route modules that need to resolve a
+# client-supplied alias back to a real plate hash (e.g. /api/track/<hash>)
+# can do so without importing hub. This is the SAME dict/list objects hub.py
+# used to own directly - hub.py now aliases them rather than keeping a
+# second, disjoint copy, exactly like the microcache/admission/tiles pattern
+# from Stage 1B.
+# --------------------------------------------------------------------------
+
+ALIAS: dict[str, str] = {}
+ALIAS_DAY = [0]
+
+
+def alias_map(rows: list[dict]) -> None:
+    """Record which per-day aliases (see redact()) map back to real hashes."""
+    day = int(now() // 86400)
+    if day != ALIAS_DAY[0]:
+        ALIAS.clear()
+        ALIAS_DAY[0] = day
+    for r in rows:
+        red = redact(r, "anon")
+        # `or ""` matters: plate_hash is NULL for a pass with no readable
+        # plate, and dict.get's default does not fire on a present-but-None key.
+        if (red.get("plate_hash") or "").startswith("a:") and r.get("plate_hash"):
+            ALIAS[red["plate_hash"]] = r["plate_hash"]
+
+
+def resolve_hash(h: str) -> str:
+    """Turn a client-supplied alias back into the real hash, if we minted it."""
+    return ALIAS.get(h, h)
+
+
+def public_rows(rows: list[dict]) -> list[dict]:
+    """Anonymized/redacted view of `rows`, with alias bookkeeping recorded."""
+    alias_map(rows)
+    return [redact(r, "anon") for r in rows]
+
+
 def redact(row: dict, viewer: str = "anon") -> dict:
     """Strip anything the given viewer is not entitled to see.
 

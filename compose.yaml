@@ -1,0 +1,19 @@
+services:
+  ravenmap-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: ravenmap-devtest
+
+    environment:
+      SPARROW_BIND: 0.0.0.0
+
+    ports:
+      - "127.0.0.1:8150:8150"
+
+    volumes:
+      - ./devtest/config.json:/app/config.json:ro
+      - ./devtest/data:/app/data
+
+    restart: unless-stopped

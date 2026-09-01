@@ -9,10 +9,10 @@
 # See docs/EMBERFM_MOVE_PLAN.md.
 #
 # Run FROM the old box:
-#     bash deploy/emberfm-youtube-newbox.sh <new-box-ip> [--cutover]
+#     bash deploy/project-stream-newbox.sh <new-box-ip> [--cutover]
 #
 # Without --cutover it installs and stops, changing nothing that is live. The
-# cutover is separate and deliberate because YouTube accepts one stream per key,
+# cutover is separate and deliberate because the upstream accepts one stream per key,
 # so the old encoder must stop before the new one starts and the channel has a
 # short gap. That is a moment to choose, not a side effect of an install.
 
@@ -20,11 +20,11 @@ set -euo pipefail
 
 NEW="${1:-}"
 CUTOVER="${2:-}"
-SRC=/home/ember/emberfm
+SRC=/srv/ravenmap/streamer
 # The new box reads the audio over the public stream instead of localhost. This
 # is the only functional change, and it is why the migration is small: the
 # encoder's only real dependency is a URL that is already public and live.
-AUDIO_URL="https://fm.emberaudio.net/ember.mp3"
+AUDIO_URL="https://example-stream.example.local/ember.mp3"
 
 [ -n "$NEW" ] || { echo "usage: $0 <new-box-ip> [--cutover]"; exit 2; }
 
@@ -46,46 +46,46 @@ case "$code" in 200|206) echo "audio stream OK ($code)";;
 
 say "3. installing packages on the new box"
 ssh "root@$NEW" 'apt-get update -qq && apt-get install -y -qq ffmpeg python3-venv python3-pip curl \
-    && (id ember >/dev/null 2>&1 || useradd -m -s /bin/bash ember) && echo packages ok'
+&& (id ravenmap >/dev/null 2>&1 || useradd -m -s /bin/bash ravenmap) && echo packages ok'
 
 say "4. copying the encoder"
 # ⚠️ THE STREAM KEY IS INSIDE youtube_stream.py. It goes over ssh directly and
 # must never be committed, pasted, or written anywhere a repo can reach.
-ssh "root@$NEW" 'mkdir -p /home/ember/emberfm/logs && chown -R ember:ember /home/ember/emberfm'
+ssh "root@$NEW" 'mkdir -p /srv/ravenmap/streamer/logs && chown -R ravenmap:ravenmap /srv/ravenmap/streamer'
 tar -C "$SRC" -cf - youtube_stream.py pngs \
-    | ssh "root@$NEW" 'tar -C /home/ember/emberfm -xf - && chown -R ember:ember /home/ember/emberfm'
-[ -f "$SRC/requirements.txt" ] && scp "$SRC/requirements.txt" "root@$NEW:/home/ember/emberfm/" || true
+| ssh "root@$NEW" 'tar -C /srv/ravenmap/streamer -xf - && chown -R ravenmap:ravenmap /srv/ravenmap/streamer'
+[ -f "$SRC/requirements.txt" ] && scp "$SRC/requirements.txt" "root@$NEW:/srv/ravenmap/streamer/" || true
 
 say "5. python env on the new box"
-ssh "root@$NEW" 'cd /home/ember/emberfm && sudo -u ember python3 -m venv .venv \
-    && sudo -u ember .venv/bin/pip install -q --upgrade pip \
-    && { [ -f requirements.txt ] && sudo -u ember .venv/bin/pip install -q -r requirements.txt || true; } \
+ssh "root@$NEW" 'cd /srv/ravenmap/streamer && sudo -u ravenmap python3 -m venv .venv \
+&& sudo -u ravenmap .venv/bin/pip install -q --upgrade pip \
+&& { [ -f requirements.txt ] && sudo -u ravenmap .venv/bin/pip install -q -r requirements.txt || true; } \
     && echo venv ok'
 
 say "6. pointing the encoder at the public stream"
 # Set as an environment variable in the unit rather than editing the script, so
 # the file stays byte-identical to the one on the old box and a rollback is a
 # straight copy back rather than a reverse-edit.
-ssh "root@$NEW" "cat > /etc/systemd/system/emberfm-youtube.service <<'UNIT'
+ssh "root@$NEW" "cat > /etc/systemd/system/ravenmap-stream.service <<'UNIT'
 [Unit]
-Description=Ember FM -> YouTube 24/7 stream (libx264, 720p24)
+Description=Project audio -> YouTube 24/7 stream (libx264, 720p24)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=ember
-WorkingDirectory=/home/ember/emberfm
-Environment=EMBER_BASE=/home/ember/emberfm
-# Reads audio from the public stream; icecast lives on the other box now.
+User=ravenmap
+WorkingDirectory=/srv/ravenmap/streamer
+Environment=EMBER_BASE=/srv/ravenmap/streamer
+# Reads audio from the public stream; the upstream remains elsewhere now.
 Environment=EMBER_STREAM_URL=$AUDIO_URL
-ExecStart=/home/ember/emberfm/.venv/bin/python /home/ember/emberfm/youtube_stream.py
+ExecStart=/srv/ravenmap/streamer/.venv/bin/python /srv/ravenmap/streamer/youtube_stream.py
 Restart=always
 RestartSec=10
-# No Nice= here. On the old box it yielded to SparrowMap; on this box the
+# No Nice= here. On the old box it yielded to the service; on this box the
 # encoder IS the workload and there is nothing to yield to.
-StandardOutput=append:/home/ember/emberfm/logs/youtube.log
-StandardError=append:/home/ember/emberfm/logs/youtube.log
+StandardOutput=append:/srv/ravenmap/streamer/logs/youtube.log
+StandardError=append:/srv/ravenmap/streamer/logs/youtube.log
 
 [Install]
 WantedBy=multi-user.target
@@ -115,22 +115,22 @@ When you are ready:
     bash $0 $NEW --cutover
 
 Rollback at any point:
-    ssh root@$NEW systemctl stop emberfm-youtube
-    systemctl start emberfm-youtube      # on this box
+    ssh root@$NEW systemctl stop project-stream
+    systemctl start project-stream      # on this box
 EOF
     exit 0
 fi
 
 say "8. CUTOVER - stopping the old encoder"
-systemctl stop emberfm-youtube
+systemctl stop project-stream
 echo "old encoder stopped at $(date -Is)"
 
 say "9. starting the new encoder"
-ssh "root@$NEW" 'systemctl enable --now emberfm-youtube && sleep 8 && systemctl is-active emberfm-youtube'
+ssh "root@$NEW" 'systemctl enable --now project-stream && sleep 8 && systemctl is-active project-stream'
 
 say "10. did it actually take?"
 sleep 20
-ssh "root@$NEW" 'echo "--- last log lines ---"; tail -15 /home/ember/emberfm/logs/youtube.log; \
+ssh "root@$NEW" 'echo "--- last log lines ---"; tail -15 /srv/ravenmap/streamer/logs/youtube.log; \
     echo "--- encoder cpu ---"; ps -eo %cpu,etimes,comm --sort=-%cpu | grep ffmpeg | head -3'
 cat <<EOF
 
@@ -139,12 +139,12 @@ running is not the same as YouTube receiving - a bad key fails at the far end
 and looks fine here.
 
 If it is not live:
-    ssh root@$NEW systemctl stop emberfm-youtube
-    systemctl start emberfm-youtube
+    ssh root@$NEW systemctl stop project-stream
+    systemctl start project-stream
 
 Once it IS live, retire the old one so a reboot cannot start two encoders on one
 key:
-    systemctl disable emberfm-youtube      # on this box
+    systemctl disable project-stream      # on this box
 
 Then watch SparrowMap recover the core:
     curl -s https://map.sparrowmap.com/api/health
