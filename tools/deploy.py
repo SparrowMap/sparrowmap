@@ -325,12 +325,48 @@ def main() -> None:
     target = git("rev-parse", "--short", "HEAD")
     if before == target:
         say(" ok ", "box already at this commit")
-    changed = ssh(f"cd {REMOTE} && sudo -u sparrow git fetch --quiet origin && "
-                  f"sudo -u sparrow git diff --name-only HEAD origin/main").stdout.split()
-    if changed:
-        say("info", f"{len(changed)} file(s) will change: "
-                    + ", ".join(changed[:6]) + ("…" if len(changed) > 6 else ""))
-    needs_restart = any(f.endswith(RESTART_TRIGGERS) for f in changed)
+    # 🚨 THE FETCH AND THE DIFF USED TO BE ONE `A && B`, AND THAT SHIPPED STALE
+    # CODE TO PRODUCTION ON 2026-09-02.
+    #
+    # When the fetch fails, `&&` short-circuits, stdout is empty, and `changed`
+    # is []. An empty list does not read as "I could not find out" - it reads as
+    # "nothing changed", so `needs_restart` came out False and step 6 skipped
+    # the restart. The deploy then reported success at every step: the pull
+    # worked, the box tree matched origin/main, the site answered 200. Only the
+    # PROCESS was old. `grep` found the fix in snapshot.py on disk while `ps`
+    # showed the hub had been up 15h43m - serving the fix from disk and the bug
+    # from memory.
+    #
+    # (What made the fetch fail is worth knowing too: GitHub answered
+    # `www-authenticate: Basic realm="GitHub"` to this box's protocol-v2
+    # negotiation on a PUBLIC repo. Pinned with `git config --local
+    # protocol.version 0` in /opt/sparrowmap. Anonymous curl of the same
+    # info/refs endpoint returned 200 throughout, which is what proved it was
+    # neither permissions nor the network.)
+    #
+    # 📌 THE RULE: a check that cannot answer must not answer "no". Fetch and
+    # diff are now separate, both exit codes are looked at, and an unknown
+    # answer means RESTART - the wrong guess there costs a few seconds of
+    # downtime, while the other wrong guess costs a silently stale server.
+    fetched = ssh(f"cd {REMOTE} && sudo -u sparrow git fetch origin 2>&1")
+    if fetched.returncode != 0:
+        say("fail", "the box could not FETCH from origin - it cannot know what "
+                    "is about to change, so this deploy is not safe")
+        print((fetched.stdout or "").strip()[-400:])
+        sys.exit("\n⛔ refusing to deploy")
+    r = ssh(f"cd {REMOTE} && sudo -u sparrow git diff --name-only HEAD origin/main")
+    if r.returncode != 0:
+        say("info", "could not list what will change - assuming a restart is "
+                    "needed rather than assuming it is not")
+        changed, needs_restart = [], True
+    else:
+        changed = r.stdout.split()
+        needs_restart = any(f.endswith(RESTART_TRIGGERS) for f in changed)
+        if changed:
+            say("info", f"{len(changed)} file(s) will change: "
+                        + ", ".join(changed[:6]) + ("…" if len(changed) > 6 else ""))
+        else:
+            say("info", "no file differences against origin/main")
     say("info", "restart needed: " + ("YES (python changed)" if needs_restart
                                       else "no (static files only)"))
 
@@ -361,6 +397,42 @@ def main() -> None:
     else:
         print("\n6. restart")
         say("skip", "not needed" if not needs_restart else "--no-restart given")
+
+    # 🚨 ASK THE PROCESS HOW OLD IT IS, BECAUSE EVERY OTHER CHECK HERE PASSES
+    # WHEN THE SERVER IS STALE.
+    #
+    # Steps 5 and 7 look at the FILES and at whether the site answers. Both were
+    # green on 2026-09-02 while the hub had been running for 15h43m against code
+    # from the previous commit. Nothing in a green deploy distinguished "the fix
+    # is live" from "the fix is on disk and nobody has read it" - which is the
+    # only thing a deploy is FOR.
+    #
+    # So this is not another restart, it is the audit: if the process is older
+    # than the commit it is supposed to be running, say so loudly. It runs
+    # whether or not a restart was thought necessary, because the case that hurt
+    # is exactly the one where the tool decided it was not.
+    print("\n6b. is the RUNNING process actually the new code?")
+    age = ssh("systemctl show -p ActiveEnterTimestampMonotonic --value "
+              f"{SERVICE}; awk '{{print $1}}' /proc/uptime")
+    try:
+        started_mono, uptime = age.stdout.split()
+        # Both are monotonic seconds since boot, so the difference is how long
+        # the unit has been up without any clock or timezone in the way.
+        running_for = float(uptime) - float(started_mono) / 1_000_000
+    except Exception:
+        say("info", "could not read the service start time - check it by hand")
+        running_for = None
+    if running_for is not None:
+        if not needs_restart:
+            say("info", f"{SERVICE} has been up {running_for / 3600:.1f}h "
+                        f"(no python changed, so that is expected)")
+        elif running_for > 120:
+            say("fail", f"{SERVICE} has been up {running_for / 3600:.1f}h but "
+                        f"python changed in this deploy - THE FIX IS ON DISK "
+                        f"AND NOT RUNNING. Restart it.")
+        else:
+            say(" ok ", f"{SERVICE} restarted {running_for:.0f}s ago, so it "
+                        f"loaded this commit")
 
     print("\n7. is it actually up?")
     import json

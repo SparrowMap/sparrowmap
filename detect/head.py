@@ -43,6 +43,7 @@ back to zero-shot rather than guessing.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -55,8 +56,62 @@ MODEL = DATA / "models" / "vehicle_head.npz"
 _STATE: dict = {"loaded": False, "ok": False, "why": ""}
 
 
+#: How often to ask the filesystem whether the weights changed. The check is one
+#: stat() and the caller is already about to run CLIP, so this is free in
+#: context; it exists only so a hot loop does not stat on every single crop.
+_RECHECK_S = 30.0
+
+
+def _stale() -> bool:
+    """Has the head on disk been replaced since we loaded it?
+
+    🚨 THIS EXISTS BECAUSE A RETRAINED HEAD DID NOTHING UNTIL SOMEBODY
+    REMEMBERED TO RESTART box_puller.
+
+    `_STATE` was filled once and never revisited, so the weights a process used
+    were whichever ones existed when it started. On 2026-09-02 two box_puller
+    copies had been running since 25 August, both holding a head from the 18th -
+    so retraining wrote a better classifier to disk and the queue went on being
+    gated by a two-week-old one. Nothing was wrong with the model, the file, or
+    the code that reads it. The fix simply was not RUNNING, which is the failure
+    this project keeps meeting from a new direction each time.
+
+    Restarting is the obvious answer and it is the fragile one: it depends on a
+    human doing it at the right moment, every time, forever. Noticing is
+    cheaper. The training run is the thing that knows something changed, and it
+    announces it by writing the file - so read that.
+    """
+    try:
+        st = MODEL.stat()
+    except OSError:
+        # The file has gone. Keep serving what is already loaded rather than
+        # silently disabling the head mid-run; `available()` still reports.
+        return False
+    return (st.st_mtime_ns, st.st_size) != _STATE.get("stamp")
+
+
+def _fresh() -> None:
+    """Reload if the weights on disk have been replaced. Cheap and throttled."""
+    now = time.monotonic()
+    if now - _STATE.get("checked_at", -1e9) < _RECHECK_S:
+        return
+    _STATE["checked_at"] = now
+    if _STATE.get("loaded") and _stale():
+        was = _STATE.get("threshold")
+        _load()
+        print(f"[head] weights changed on disk - reloaded "
+              f"(threshold {was} -> {_STATE.get('threshold')}, "
+              f"ok={_STATE.get('ok')})")
+
+
 def _load() -> None:
     _STATE["loaded"] = True
+    _STATE["checked_at"] = time.monotonic()
+    try:
+        st = MODEL.stat()
+        _STATE["stamp"] = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        _STATE["stamp"] = None
     if not MODEL.exists():
         _STATE["why"] = f"no head at {MODEL}"
         return
@@ -87,6 +142,8 @@ def _load() -> None:
 def available() -> bool:
     if not _STATE["loaded"]:
         _load()
+    else:
+        _fresh()
     return bool(_STATE["ok"])
 
 

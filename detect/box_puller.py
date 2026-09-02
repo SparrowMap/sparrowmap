@@ -421,6 +421,19 @@ def main() -> None:
         from core import DATA
         DATA.mkdir(parents=True, exist_ok=True)
         _lock = open(DATA / "box_puller.lock", "a+b")
+        # 🚨 SEEK FIRST. msvcrt.locking() locks a byte range starting at the
+        # CURRENT FILE POSITION, and this file is opened in append mode, where
+        # the position is the end of the file. Two copies that disagree about
+        # where the end is - or a file that has grown between them - lock two
+        # DIFFERENT bytes and both believe they are alone.
+        #
+        # On 2026-09-02 two copies had been running side by side since 25
+        # August, one under D:\LLM\.venv and one under the system Python312,
+        # both passing --singleton. Both held a head from the 18th, so a
+        # retrained classifier changed nothing about what reached the queue.
+        # Byte 0 is the only position both copies can agree on without having
+        # to agree on anything else.
+        _lock.seek(0)
         try:
             if os.name == "nt":
                 import msvcrt
