@@ -198,7 +198,17 @@ class VehicleIdentifier:
 
     @staticmethod
     def gov_call(r: dict) -> dict:
-        """Does this crop read as a government vehicle, and how strongly.
+        """Does this crop read as a POLICE UNIT, and how strongly.
+
+        ⚠️ THE NAME IS HISTORICAL. It answered "is it government" until
+        2026-09-02, when the head was refitted police-only (see
+        train/fit_local.POSITIVE and detect/head.py). The `gov` key in the
+        returned dict means "publishable police unit" now. The zero-shot
+        FALLBACK below still admits gov_dot and emergency, and that is
+        deliberate: it only runs when there is no head at all, where being
+        broader is the safer failure - but it is not what decides anything on a
+        machine that has the weights.
+
 
         🚨 ONE IMPLEMENTATION, THREE CONSUMERS. The published tier, the live
         overlay on the camera page, and the confirm popup each used to work

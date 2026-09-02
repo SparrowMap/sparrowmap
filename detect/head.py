@@ -1,5 +1,16 @@
 """The trained head, at inference time.
 
+🚨 SINCE 2026-09-02 THIS HEAD ANSWERS "IS IT A POLICE UNIT", NOT "IS IT
+GOVERNMENT". The function names below and `VehicleIdentifier.gov_call` still say
+gov because renaming them across six callers is churn with a real chance of
+missing one - but the QUESTION changed, and reading them as government-vs-not is
+how a fire truck gets back into the review queue. See fit_local.POSITIVE for
+why: buses, ambulances, fire trucks and municipal works trucks are all genuinely
+government, so a government head fired on them correctly and they filled the pen
+while the map published none of them (2,161 public sightings, all `police`,
+zero `gov`).
+
+
 This is the thing the operator's labelling has been building toward. Until now his
 1,400+ judgements changed individual sightings and filled a training set, but
 they did not change how the next vehicle was READ - `classify.py` ran CLIP

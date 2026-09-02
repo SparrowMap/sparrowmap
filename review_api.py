@@ -729,7 +729,15 @@ def _publish(sid: int, reviewer: dict, force_vclass: Optional[str] = None,
                            ts=meta.get("ts"),
                            node_name=meta.get("node_name") or "a camera",
                            vclass=vclass,
-                           stamp=not meta.get("reported"))
+                           # 🚨 A REPORTED ITEM'S PEN CROP IS THE PUBLISHED FILE
+                           # ITSELF (park_reported -> subres_from_stored), so it
+                           # has already been stamped AND already had its
+                           # background stripped. Neither is idempotent: the
+                           # caption lands on top of the caption, and the strip
+                           # keeps a rectangle of a rectangle. Both had to be
+                           # suppressed on the same condition, and only one was.
+                           stamp=not meta.get("reported"),
+                           isolate=not meta.get("reported"))
     _delete_pen(sid)
 
 
@@ -737,7 +745,8 @@ def attach_confirmed_photo(sid: int, row: Optional[dict], crop: Optional[bytes],
                            *, ts: Optional[float] = None,
                            node_name: str = "a camera",
                            vclass: str = "police",
-                           stamp: bool = True) -> Optional[str]:
+                           stamp: bool = True,
+                           isolate: bool = True) -> Optional[str]:
     """Make ``crop`` the published photograph of an already-public sighting.
 
     🚨 ONE PUBLISH-A-PHOTO, BECAUSE THERE ARE NOW TWO HUMANS WHO CAN SAY YES.
@@ -774,7 +783,7 @@ def attach_confirmed_photo(sid: int, row: Optional[dict], crop: Optional[bytes],
             "ts": ts or time.time(), "node_id": "review",
             "node_name": node_name,
             "tier": "public", "vclass": vclass, "watermark": "CONFIRMED"},
-            stamp=stamp)
+            stamp=stamp, isolate=isolate)
     except Exception:
         # 🚨 THE FALLBACK MUST STILL PROVE IT IS AN IMAGE.
         # It wrote whatever it was handed straight into SNAPS, which was

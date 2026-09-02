@@ -197,7 +197,8 @@ def redact_plate(img: Image.Image, plate_box: tuple) -> Image.Image:
 def store_crop(frame: Image.Image, bbox: Optional[tuple], meta: dict,
                plate_box: Optional[tuple] = None,
                plate_boxes: Optional[list] = None,
-               stamp: bool = True) -> tuple[str, str]:
+               stamp: bool = True,
+               isolate: bool = True) -> tuple[str, str]:
     """Crop to the vehicle, redact if private, stamp it, write it.
 
     ``bbox`` is the vehicle box (x0, y0, x1, y1) in frame pixels.
@@ -205,6 +206,16 @@ def store_crop(frame: Image.Image, bbox: Optional[tuple], meta: dict,
     required whenever the sighting is private tier; passing None there raises,
     because silently storing a readable plate is the failure this whole module
     exists to prevent.
+
+    🚨 ``isolate=False`` FOR AN IMAGE WHOSE BACKGROUND IS ALREADY GONE.
+    Same shape as ``stamp=False`` below and reachable on the same path. The
+    strip is not idempotent: it keeps a rectangle and destroys the rest, so
+    running it on its own output keeps a rectangle OF a rectangle. A publicly
+    flagged photo goes back into the review pen via ``subres_from_stored``,
+    which takes the STORED file - already masked when it was first stored - and
+    confirming it comes back through here. Every trip round the report-confirm
+    loop ate another slice of the photograph, and because the loop ends in a
+    picture that still looks like a picture, nothing said so.
 
     🚨 ``stamp=False`` FOR AN IMAGE THAT IS ALREADY STAMPED.
     The caption and watermark are drawn at a position and size derived from the
@@ -252,7 +263,7 @@ def store_crop(frame: Image.Image, bbox: Optional[tuple], meta: dict,
         #
         # Done AFTER the crop: segmentation runs on a much smaller image, and
         # the vehicle of interest is by construction the one in the middle.
-        if CONFIG.get("strip_snapshot_background", True):
+        if isolate and CONFIG.get("strip_snapshot_background", True):
             # 🚨 COMPUTED BEFORE THE TRY, BECAUSE THE FALLBACK NEEDS IT.
             # Only the instance in the middle of the crop - a street scene holds
             # several vehicles and this snapshot is about one of them. It used
@@ -262,13 +273,47 @@ def store_crop(frame: Image.Image, bbox: Optional[tuple], meta: dict,
             # silent failure it was written to remove.
             w2, h2 = img.width, img.height
             centre = (w2 * 0.18, h2 * 0.18, w2 * 0.82, h2 * 0.82)
+            # 🚨 THE GEOMETRIC FALLBACK NEEDS ITS OWN BOX, AND `centre` WAS THE
+            # WRONG ONE. It is an INSTANCE-SELECTION box - "which of the several
+            # vehicles in this street scene is the subject" - and 0.18 is right
+            # for that. Using the same rectangle to decide what SURVIVES made
+            # every published photograph the middle 64% of itself with a flat
+            # border painted round it.
+            #
+            # Measured on the live map 2026-09-02: 18 of 18 published police
+            # snaps carried a ~16% backdrop border on all four sides and were
+            # ~58% backdrop, while the pen crop the reviewer approved was 1.7%.
+            # That is his report - "after review and they post they are cropped
+            # tighter and sometimes makes it hard to tell it was even a cop
+            # sighting" - and it is not a matter of taste:
+            #
+            # 🚨 THE BLANKED TOP BAND IS WHERE THE LIGHT BAR LIVES. CROP_PAD_TOP
+            # is 0.28 and asymmetric for exactly one reason (see the constant):
+            # a roof light bar sits OUTSIDE the detector's box, so the crop
+            # reaches above it to keep the single most diagnostic feature on a
+            # marked vehicle. A blind 18% top inset covers 0.245/0.28 = 87% of
+            # that pad, so the fallback was deleting the evidence the pad was
+            # widened to capture. Two rules in this file, pulling opposite ways,
+            # and the later one silently won.
+            #
+            # So the fallback box is DERIVED FROM THE PADS instead of guessed:
+            # trim the side and bottom pads (kerb, pavement, the neighbours'
+            # parked cars - what isolate.py is actually written to remove) and
+            # keep the top pad whole. Keeps 78% of the picture instead of 64%,
+            # and keeps the roofline.
+            #
+            # ⚠️ IF THE PAD CONSTANTS CHANGE, THIS FOLLOWS THEM. That is the
+            # point of deriving it - the same coupling that made 0.18 wrong.
+            fx = CROP_PAD / (1 + 2 * CROP_PAD)
+            fy1 = 1 - CROP_PAD_BOTTOM / (1 + CROP_PAD_TOP + CROP_PAD_BOTTOM)
+            frame = (w2 * fx, 0.0, w2 * (1 - fx), h2 * fy1)
             try:
                 import cv2
                 import numpy as np
 
                 import isolate
                 arr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                arr, method = isolate.strip(arr, centre)
+                arr, method = isolate.strip(arr, centre, fallback=frame)
                 img = Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
                 meta["_isolation"] = method
                 if method != "segment":
@@ -306,7 +351,7 @@ def store_crop(frame: Image.Image, bbox: Optional[tuple], meta: dict,
                 # and never assumed. A "none" result is still a refusal, because
                 # an image nothing was done to must not be stored.
                 import isolate_pil
-                img, method = isolate_pil.strip_box(img, centre)
+                img, method = isolate_pil.strip_box(img, frame)
                 meta["_isolation"] = method
                 if method == "none":
                     raise ValueError(
@@ -530,7 +575,8 @@ def downscale_to_subres(data_url: str) -> bytes:
     return buf.getvalue()
 
 
-def store_confirmed(data_url: str, meta: dict, stamp: bool = True) -> str:
+def store_confirmed(data_url: str, meta: dict, stamp: bool = True,
+                    isolate: bool = True) -> str:
     """Store the photograph a REVIEWER has just vouched for.
 
     🚨 THIS EXISTS BECAUSE `_publish` USED `store_subresolution`, WHICH REFUSES
@@ -551,7 +597,7 @@ def store_confirmed(data_url: str, meta: dict, stamp: bool = True) -> str:
     """
     img = decode_upload(data_url)
     name, _sha = store_crop(img, (0, 0, img.width, img.height), meta,
-                            stamp=stamp)
+                            stamp=stamp, isolate=isolate)
     return name
 
 

@@ -28,6 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import isolate                    # noqa: E402
+import snapshot                   # noqa: E402  - for the crop pad constants
 from core import SNAPS            # noqa: E402
 
 
@@ -67,10 +68,17 @@ def main() -> None:
     for f in todo:
         img = cv2.imread(str(f))
         h, w = img.shape[:2]
-        # Same centre-box rule as the live path: the snapshot is about the
-        # vehicle it was framed on, not everything else in shot.
+        # Same rule as the live path, and the SAME TWO BOXES - see
+        # snapshot.store_crop. `centre` picks which instance is the subject;
+        # `frame` is what survives if there is no mask, and it is derived from
+        # the crop pads so the roof band (where the light bar is) is never the
+        # part that gets painted over.
         centre = (w * 0.18, h * 0.18, w * 0.82, h * 0.82)
-        out, method = isolate.strip(img, centre)
+        fx = snapshot.CROP_PAD / (1 + 2 * snapshot.CROP_PAD)
+        fy1 = 1 - snapshot.CROP_PAD_BOTTOM / (
+            1 + snapshot.CROP_PAD_TOP + snapshot.CROP_PAD_BOTTOM)
+        out, method = isolate.strip(img, centre,
+                                    fallback=(w * fx, 0.0, w * (1 - fx), h * fy1))
         if method == "none":
             failed += 1
             print(f"  ! no vehicle found in {f.name} - left alone, review it")

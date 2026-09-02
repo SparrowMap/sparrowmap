@@ -53,6 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import labelbank   # noqa: E402  - for LABEL_VOCAB; see the POSITIVE note below
 from core import DATA   # noqa: E402
 from sklearn.metrics import average_precision_score   # noqa: E402
 
@@ -74,7 +75,40 @@ MODEL_OUT = DATA / "models" / "vehicle_head.npz"
 # side-on shots teach a boundary that does not hold at a window at 45 degrees
 # in motion blur. train/README.md predicted that domain gap; it turns out to
 # outweigh the value of the extra positives rather than merely dilute it.
-C_BEST = 0.5
+# 🚨 RE-MEASURED 2026-09-02 AND MOVED 0.5 -> 0.001, A FACTOR OF 500.
+#
+# The numbers above were taken on 590 held-out rows with 10 positives. The set
+# is now 12,848 rows and the held-out slice is 10,028 with 23 positives, because
+# 9,048 `review_public` labels arrived - and 0.5 does not survive that. A
+# regularisation strength is a statement about HOW MUCH DATA THERE IS, not a
+# constant of the problem, so a value baked in at one dataset size silently
+# answers "is the head any good" at the wrong setting forever after. It nearly
+# cost the retrained head: at C=0.5 it measured WORSE than the zero-shot it
+# replaces (AP 0.501 vs 0.568) and read as "the retarget failed".
+#
+# Out-of-fold, 10 seeds, recall at >=95% precision / average precision:
+#
+#   C=2.0     30%      AP 0.468        ← 0/3 splits
+#   C=0.5     33% ± 9% AP 0.501        ← what was deployed, WORSE than zero-shot
+#   CLIP zero-shot 35% AP 0.568          (the thing it has to beat)
+#   C=0.1     43%      AP 0.533        ← better recall, ranking REGRESSED
+#   C=0.02    41% ± 2% AP 0.569
+#   C=0.005   43% ± 0% AP 0.582
+#   C=0.002   43% ± 2% AP 0.592 ± 0.005  10/10 splits
+#   C=0.001   43% ± 1% AP 0.592 ± 0.004  10/10 splits   ← HERE
+#   C=0.0005  43% ± 0% AP 0.585
+#   C=0.0002  42% ± 2% AP 0.582
+#
+# 📌 IT IS A PLATEAU, NOT A PEAK, AND THAT IS WHY IT IS TRUSTWORTHY. Every value
+# from 0.0002 to 0.01 - a 50x range - beats zero-shot on both metrics on every
+# split. 0.001 and 0.002 are indistinguishable (0.592 both); 0.001 is taken for
+# the tighter spread and the lower operating point (0.979 vs 0.984), which
+# queues marginally more at the same measured precision. Do not read anything
+# into 42% vs 43%: that is ONE positive out of 23 and the set cannot resolve it.
+#
+# ⚠️ RE-MEASURE THIS WHENEVER THE LABEL COUNT CHANGES BY MUCH. That is the whole
+# lesson - `--C` is a flag now so it costs one command, not an edit.
+C_BEST = 0.001
 # ⚠️ "CAMERA ONLY" MEANS EXCLUDE HANDHELD, NOT "REVIEW MODE ONLY".
 #
 # The first version trained on review-mode rows alone, which quietly discarded
@@ -145,17 +179,35 @@ def _trainable(src):
     import numpy as np
     return np.isin(src, list(APPROVED_FOR_TRAINING))
 
-# Label -> is this a publicly owned vehicle we would publish?
+# Label -> is this a POLICE UNIT we would publish?
 #
-# ⚠️ `gov` IS A POSITIVE HERE AND THAT IS NOT A WIDENING. Until 2026-08-10 the
-# label set had one government key, `police`, and the button read "Government" -
-# so every crop in this set already mixes marked patrol cars with municipal
-# pickups. Adding the new key to POSITIVE keeps this head measuring exactly what
-# it has always measured: government vs not. Telling police from gov is a
-# DIFFERENT head, and it cannot be fitted until `split` mode has produced enough
-# distinct passes on each side (tools\class_census.py prints both counts).
-POSITIVE = {"police", "gov"}
-NEGATIVE = {"civilian", "fleet"}       # fleet is commercial, not government
+# 🚨 THIS HEAD ANSWERS "IS IT A COP", NOT "IS IT GOVERNMENT" (his call,
+# 2026-09-02). It used to be POSITIVE = {"police", "gov"}, and that was correct
+# for what it was built to do - but it is not what the review queue asks.
+#
+# A city bus, a fire truck, an ambulance and a municipal works pickup are all
+# genuinely government vehicles, so a government head fires on them CORRECTLY
+# and they filled the review pen. Nothing publishes them - the map carries
+# patrol units - so every one of those cards cost a human judgement and
+# produced nothing. His words: "we aren't putting the gov vehicles that aren't
+# cops on the map anyways so its kind of pointless for those to ever show up in
+# review".
+#
+# 🚨 AND `gov` MOVES TO THE NEGATIVE SIDE, WHICH IS THE POINT. 36 passes is not
+# many, but they are the exact confusions this head keeps making - the bus, the
+# ambulance, the amber-beacon works truck - so they are worth more per row than
+# any ordinary civilian car. As `split` mode produces more, this gets stronger
+# on its own.
+#
+# ⚠️ A vocab-1 `police` LABEL IS NOT A POLICE LABEL. See labelbank.LABEL_VOCAB:
+# until 2026-08-10 the label set had one government key and the button read
+# "Government", so a municipal pickup and a marked patrol car were both clicked
+# `police`. Narrowing the target WITHOUT excluding those would quietly teach
+# this head that a bin lorry is a patrol car - the precise failure it is being
+# retargeted to remove. They are dropped in `load()`, not reinterpreted:
+# `split` mode exists to have a human resolve them, and nothing is inferred.
+POSITIVE = {"police"}
+NEGATIVE = {"civilian", "fleet", "gov"}   # gov = government, but not a cop
 
 
 # A vehicle crossing the frame breaks into several tracker tracks, so ONE car
@@ -211,6 +263,15 @@ def load() -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
         # dataset, so "the number moved" can be attributed to the labels that
         # arrived rather than guessed at. Unset in normal use.
         if _CUTOFF and float(d.get("labelled_at") or 0) > _CUTOFF:
+            continue
+        # 🚨 DROP THE AMBIGUOUS POSITIVES. A `police` label written under
+        # vocab 1 means "government vehicle" - the button said Government and
+        # there was no way to say "government, not police" (labelbank.VALID).
+        # Reading it as a police label is exactly how a fire truck becomes a
+        # training positive for a police head. The NEGATIVE keys are unaffected:
+        # `civilian` and `fleet` meant the same thing under both vocabularies,
+        # so their 1,440 vocab-1 rows still train.
+        if lab in POSITIVE and int(d.get("label_vocab") or 1) < labelbank.LABEL_VOCAB:
             continue
         if lab in POSITIVE:
             y.append(1)
@@ -325,6 +386,17 @@ def main() -> None:
     # run that exists to ANSWER A QUESTION can now decline to touch the live
     # head at all. Default behaviour is unchanged, so deploying still works the
     # way it always did.
+    # 🚨 C=0.5 WAS TUNED ON 1,548 ROWS AND THE SET IS NOW 12,848.
+    # A regularisation strength is not a constant of nature, it is a statement
+    # about how much data there is. Leaving it baked in meant every later run
+    # silently answered "is the head better" at a setting chosen for a training
+    # set eight times smaller. Sweep it instead of trusting it.
+    ap.add_argument("--C", type=float, default=C_BEST,
+                    help=f"inverse regularisation strength (default {C_BEST})")
+    ap.add_argument("--promote-anyway", action="store_true",
+                    help="save even if the head did NOT beat zero-shot. For a "
+                         "deliberate retarget whose old numbers are not "
+                         "comparable - never to get past a bad measurement.")
     ap.add_argument("--no-save", action="store_true",
                     help="evaluate and report, but do NOT write the head. Use "
                          "this for every ablation and comparison run.")
@@ -392,7 +464,7 @@ def main() -> None:
         # zero-shot for the first time. The features were always there to be
         # used - the regulariser was throwing them away.
         sc = StandardScaler().fit(X[train_rows])
-        clf = LogisticRegression(max_iter=5000, C=C_BEST,
+        clf = LogisticRegression(max_iter=5000, C=args.C,
                                  class_weight="balanced")
         clf.fit(sc.transform(X[train_rows]), y[train_rows])
         oof_head[test_rows] = clf.predict_proba(sc.transform(X[test_rows]))[:, 1]
@@ -412,12 +484,49 @@ def main() -> None:
           f"{args.seeds} fold splits.\n")
 
     def recall_at(s):
-        """Best recall reachable at or above the required precision."""
-        for t_ in sorted(set(np.round(s, 4))):
-            p_, r_, *_ = pr(s, yt, t_)
-            if not np.isnan(p_) and p_ >= args.min_precision:
-                return r_, t_
-        return 0.0, None
+        """Best recall at a threshold precision NEVER drops below, going up.
+
+        🚨 THIS USED TO SCAN UPWARDS AND RETURN THE FIRST CROSSING, AND THAT IS
+        HOW THE LIVE HEAD ENDED UP OPERATING AT 0.45475.
+
+        First-crossing is a MINIMUM STATISTIC. On a held-out set with 36
+        positives it only takes one fold where the few negatives above some low
+        score happen to be scarce for precision to touch the target there, and
+        that fluke - not the model - sets the operating point for everything
+        downstream. The median across seeds does not save it: every seed is
+        reporting its own minimum, so the median is a median of flukes.
+
+        Measured 2026-09-02 on 9,358 randomly-drawn labelled crops, which is
+        the distribution the pen actually draws from:
+
+            head score      crops   actually government
+            0.455 - 0.60      10          0
+            0.60  - 0.80      16          0
+            0.80  - 0.90       7          2
+            >= 0.95           23         23
+
+        So the deployed threshold opened a band containing ZERO true positives
+        and 26 false ones - better than half of everything a human was asked to
+        judge. The band is not noise the model is unsure about; it is a region
+        it is confidently wrong in, and a rule that stops at its lower edge
+        cannot see that because it never looks any higher.
+
+        Scanning DOWN from the strictest threshold and stopping at the first
+        break gives the lowest threshold above which precision holds all the
+        way up - a property of the whole tail rather than of one point in it.
+        A single unlucky point can now only make the answer STRICTER, which is
+        the safe direction for a decision that ends in a public accusation.
+        """
+        best = None
+        for t_ in sorted(set(np.round(s, 4)), reverse=True):
+            p_, r_, tp_, *_ = pr(s, yt, t_)
+            if np.isnan(p_):
+                continue           # nothing predicted at all yet; keep going
+            if p_ < args.min_precision:
+                break              # precision has broken - everything below is
+                                   # unreachable, whatever it scores in isolation
+            best = (r_, t_)
+        return best or (0.0, None)
 
     clip_s = oof_clip[cam]
     clip_r, clip_t = recall_at(clip_s)
@@ -429,7 +538,7 @@ def main() -> None:
 
     recs = np.array([recall_at(s)[0] for s in seed_scores])
     aps = np.array([average_precision_score(yt, s) for s in seed_scores])
-    print(f"  trained head  (C={C_BEST}, trained on every camera-view row, "
+    print(f"  trained head  (C={args.C}, trained on every camera-view row, "
           f"handheld excluded)")
     print(f"    recall @>={args.min_precision:.0%} precision : "
           f"{recs.mean():.0%} ± {recs.std():.0%}   "
@@ -440,10 +549,36 @@ def main() -> None:
     print(f"    beats zero-shot on AP      : {int((aps > clip_ap).sum())}"
           f"/{len(aps)} splits\n")
 
-    better_ap = aps.mean() > clip_ap
-    better_op = recs.mean() > clip_r
+    # 🚨 A MEAN THAT WINS BY LESS THAN ITS OWN SPREAD HAS NOT WON.
+    #
+    # `better_ap` was `aps.mean() > clip_ap`, and on 2026-09-02 that turned
+    # AP 0.569 ± 0.013 against zero-shot's 0.568 into "✅ Better on both. Wire
+    # it in." - a one-thousandth difference, thirteen times smaller than the
+    # seed-to-seed spread, while the per-split count printed directly above it
+    # said the head won 1 split out of 3. The verdict and the evidence for the
+    # verdict were on adjacent lines and disagreed.
+    #
+    # This file already knows the lesson - "a single fold split reported 9/10
+    # for a model that averages 69%" - and applied it to the SEEDS while
+    # leaving the COMPARISON on a bare mean. So:
+    #
+    #   ranking       must not REGRESS beyond one standard deviation. Equal is
+    #                 fine: a head that ranks like zero-shot but converts it
+    #                 into a better yes/no is exactly what a head is for.
+    #   the operating point   must improve on a MAJORITY OF SPLITS, not just on
+    #                 average. This is the number the review pen actually uses,
+    #                 so it is the one that has to be robust rather than lucky.
+    ap_regressed = aps.mean() < clip_ap - aps.std()
+    op_splits = float((recs > clip_r).mean())
+    better_ap = not ap_regressed
+    better_op = recs.mean() > clip_r and op_splits > 0.5
     if better_ap and better_op:
-        print("  ✅ Better on both. Wire it in.")
+        print(f"  ✅ Better where it counts: the operating point improves on "
+              f"{op_splits:.0%} of splits and ranking has not regressed.")
+    elif better_ap and recs.mean() > clip_r:
+        print(f"  ⚖️  Better ON AVERAGE at the operating point but only on "
+              f"{op_splits:.0%} of splits - that is a lucky partition, not a "
+              f"better model. More camera-view positives should settle it.")
     elif better_ap:
         print("  ⚖️  Better at RANKING, not at the publish decision.")
         print("     It has learned something real - it orders vehicles better -")
@@ -455,6 +590,31 @@ def main() -> None:
 
     # A single split can and did report 9/10 for a model that averages 69%.
     oof_head[cam] = seed_scores[0]
+
+    # 🚨 "LEAVE ZERO-SHOT IN PLACE" USED TO BE ADVICE THIS SCRIPT THEN IGNORED.
+    #
+    # It printed the verdict and saved the head anyway, so the ONLY thing
+    # standing between a measured-worse model and the live classifier was a
+    # human reading the output and having remembered to pass --no-save. On
+    # 2026-09-02 a police-only refit measured AP 0.501 against zero-shot's
+    # 0.568 - beaten on 10 splits out of 10 - and would have been installed on
+    # the strength of having been the most recent run.
+    #
+    # The failure this file already documents twice (an ablation overwriting
+    # production, a threshold silently becoming 0.98885) is the same one: a
+    # saved file looks exactly like a good one, and nothing downstream re-asks
+    # the question. So the verdict now GATES the write instead of narrating it.
+    #
+    # --promote-anyway exists because "worse on this measurement" is not always
+    # "worse" - the honest case is a deliberate retarget whose old numbers are
+    # not comparable - but it has to be typed, by someone who has read why.
+    if not (better_ap and better_op) and not args.promote_anyway:
+        print()
+        print("🛑 NOT SAVED. This head did not beat what it replaces, and a")
+        print("   worse classifier installed by default is how the last two")
+        print("   regressions shipped. Re-run with --promote-anyway if you have")
+        print("   a reason this measurement does not apply.")
+        return
 
     # 🚨 AN ABLATION MUST NEVER OVERWRITE THE DEPLOYED MODEL.
     # SPARROW_NO_CLIP_FEATURES exists to reproduce the old behaviour for
@@ -479,7 +639,7 @@ def main() -> None:
     # mean what the report said. Whatever transform the evaluation used has to
     # travel with the weights.
     scaler = StandardScaler().fit(X[fit_rows])
-    clf = LogisticRegression(max_iter=5000, C=C_BEST, class_weight="balanced")
+    clf = LogisticRegression(max_iter=5000, C=args.C, class_weight="balanced")
     clf.fit(scaler.transform(X[fit_rows]), y[fit_rows])
     thrs = [recall_at(s)[1] for s in seed_scores]
     thrs = [x for x in thrs if x is not None]

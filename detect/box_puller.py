@@ -11,7 +11,12 @@ runs on the HOME node, where CLIP lives:
     delete every pulled crop from the mirror either way
 
 WHY MARKED-ONLY, AND NOT THE TRAINED HEAD.
-The head answers is-it-government, trained on the home camera's catches. It
+⚠️ WRITTEN WHEN THE HEAD ANSWERED IS-IT-GOVERNMENT. Since 2026-09-02 it is
+fitted police-only (train/fit_local.POSITIVE), which removes the buses, fire
+trucks, ambulances and works trucks that used to reach the pen - they were
+correct answers to the wrong question. The Escalade argument below is about
+UNMARKED vehicles and still stands unchanged.
+The head answered is-it-government, trained on the home camera's catches. It
 learned to fire on unmarked black SUVs - it scored a civilian Cadillac Escalade
 0.98 and put it on the public map. Measured on the real crops: an Escalade
 false-positive reached CLIP police conf 0.923, HIGHER than two genuine patrol

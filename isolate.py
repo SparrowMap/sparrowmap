@@ -138,13 +138,28 @@ def _overlaps(a, b, min_iou: float = 0.10) -> bool:
 
 
 def strip(img: np.ndarray, box: Optional[tuple] = None,
-          feather: int = 3) -> tuple[np.ndarray, str]:
+          feather: int = 3,
+          fallback: Optional[tuple] = None) -> tuple[np.ndarray, str]:
     """Remove everything that is not the vehicle. Returns (image, method).
 
     `method` is 'segment', 'box' or 'none', and the caller is expected to look
     at it: a deployment that will not publish a partially-masked image needs to
     be able to tell the difference, and a function that silently downgrades its
     own privacy guarantee is the failure this whole file exists to correct.
+
+    🚨 `box` AND `fallback` ARE TWO DIFFERENT QUESTIONS AND USED TO BE ONE
+    ARGUMENT. `box` asks WHICH INSTANCE is the subject - a street scene holds
+    several vehicles and only one of them is this sighting - so it wants to be
+    tight, and a caller with no detector box passes the middle of the frame.
+    `fallback` asks WHAT SURVIVES when there is no mask at all, and that wants
+    to be generous, because anything outside it is destroyed.
+
+    Answering both with the tight box is what published every crop as its own
+    middle 64%, with the roof light bar - which sits above the vehicle box on
+    purpose - inside the part that got painted over. When `fallback` is not
+    given the old behaviour stands, so a caller that genuinely has the vehicle's
+    real box (and therefore wants it used for both) passes one argument as
+    before.
     """
     out = np.full_like(img, BACKDROP, dtype=np.uint8)
     mask = vehicle_mask(img, box)
@@ -162,8 +177,9 @@ def strip(img: np.ndarray, box: Optional[tuple] = None,
                np.array(BACKDROP, np.float32) * (1 - a)).astype(np.uint8)
         return out, "segment"
 
-    if box is not None:
-        x0, y0, x1, y1 = (int(v) for v in box)
+    keep_box = fallback if fallback is not None else box
+    if keep_box is not None:
+        x0, y0, x1, y1 = (int(v) for v in keep_box)
         h, w = img.shape[:2]
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(w, x1), min(h, y1)
