@@ -193,6 +193,27 @@ def _ps(cmd: str) -> str:
                           errors="replace").stdout.strip()
 
 
+# 🚨 `pythonw.exe` IS A PYTHON PROCESS AND THIS TOOL COULD NOT SEE IT.
+#
+# Every process query here matched `Name='python.exe'` exactly. run_box_puller.bat
+# launches **pythonw.exe** (no console window), so for that service:
+#
+#   * the STOP matched nothing, so the old copy was never killed;
+#   * the launcher then started a fresh copy, which found the singleton lock
+#     still held by the copy that was never killed, and exited quietly by
+#     design;
+#   * and _came_up() looked for python.exe, found none, and reported
+#     "was stopped and did NOT come back".
+#
+# So the message was wrong twice over - it was never stopped, and a copy WAS
+# running - and every deploy printed it, which is what made it read as a known
+# cosmetic wart instead of a fault. Meanwhile the process it could not see went
+# on running: box_puller had been up since 25 August holding a head from the
+# 18th, so retraining the classifier changed nothing about what reached the
+# review queue. That is the whole reason the stale head survived.
+#
+# 📌 A PROCESS FILTER THAT NAMES ONE EXECUTABLE IS A FILTER THAT LIES ABOUT THE
+# OTHER ONE. `Name LIKE '%python%'` covers python.exe and pythonw.exe both.
 def _came_up(name: str, spec: dict, wait_s: int = 12) -> bool:
     """Did the thing we just started actually start?
 
@@ -206,7 +227,7 @@ def _came_up(name: str, spec: dict, wait_s: int = 12) -> bool:
     deadline = time.time() + wait_s
     seen_proc = False
     while time.time() < deadline:
-        got = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+        got = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
                   f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
                   f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
                   f"Measure-Object).Count")
@@ -259,7 +280,7 @@ def sync_local(a) -> None:
         if spec.get("bat"):
             # Stop it, then let its own launcher start it again. The launcher
             # holds the credentials and the flags; this only decides WHEN.
-            _ps(f"Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+            _ps(f"Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
                 f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
                 f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
                 f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
@@ -284,7 +305,7 @@ def sync_local(a) -> None:
         # The running process already knows the right answer, so ask it before
         # stopping it. sys.executable stays only as the fallback for a service
         # that was not running to begin with.
-        cmd = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+        cmd = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
                   f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
                   f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
                   f"Select-Object -First 1).CommandLine")
@@ -299,7 +320,7 @@ def sync_local(a) -> None:
             args = cmd.split(".exe", 1)[1].strip()
         # STOP FIRST. The launcher refuses a second detector for the same node,
         # so start-then-stop leaves the OLD one running and looks like success.
-        _ps(f"Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+        _ps(f"Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
             f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
             f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
             f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
