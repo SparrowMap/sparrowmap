@@ -97,6 +97,68 @@ def ssh(cmd: str, timeout: int = 180) -> subprocess.CompletedProcess:
         capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
+def scp(local: Path, remote: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["scp", "-i", KEY, "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
+         "-o", "StrictHostKeyChecking=accept-new", str(local), f"{BOX}:{remote}"],
+        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+BUNDLE_REMOTE = "/tmp/sparrowmap-deploy.bundle"
+
+
+def deliver_by_bundle(box_head: str) -> bool:
+    """Hand the box the commits over SSH, because GitHub will not give them to it.
+
+    🚨 THE BOX CANNOT FETCH OBJECTS FROM GITHUB ANY MORE, AND THIS IS NOT A
+    PERMISSIONS PROBLEM.
+
+    Traced 2026-09-02 with GIT_CURL_VERBOSE on a PUBLIC repo:
+
+        GET  /SparrowMap/sparrowmap.git/info/refs?service=git-upload-pack -> 200
+        POST /SparrowMap/sparrowmap.git/git-upload-pack                   -> 401
+             www-authenticate: Basic realm="GitHub"
+
+    The ref advertisement is served anonymously and the object download is
+    challenged, so `git ls-remote` succeeds and `git fetch` fails - which is
+    exactly the shape that makes this so confusing to diagnose by hand. It is
+    also not flaky: five fetches in a row got 401, while a pull earlier the same
+    evening had worked, so GitHub is throttling this host rather than refusing
+    it. There is no key to fix: the `sparrow` user has no ~/.ssh at all and the
+    `stage_pull` deploy key is rejected.
+
+    📌 SO STOP DEPENDING ON IT. The desktop can reach GitHub and already holds
+    an SSH channel to the box, so the objects travel that way instead - a thin
+    bundle of exactly the commits the box is missing. Nothing about the trust
+    model changes: the bundle is built from the local `main`, which step 1 has
+    already proven identical to origin/main, and step 5 still verifies the box
+    ends up at origin/main's commit with a matching tree. The box advances only
+    to a commit that exists in origin, the same as before.
+    """
+    tmp = ROOT / ".deploy.bundle"
+    try:
+        r = _run(["git", "bundle", "create", str(tmp), f"{box_head}..main"])
+        if r.returncode != 0 or not tmp.exists():
+            say("fail", "could not build the bundle: " + (r.stderr or "")[-200:])
+            return False
+        size = tmp.stat().st_size
+        s = scp(tmp, BUNDLE_REMOTE)
+        if s.returncode != 0:
+            say("fail", "could not send the bundle: " + (s.stderr or "")[-200:])
+            return False
+        # sparrow does the git work, so sparrow has to be able to read it.
+        v = ssh(f"chmod 644 {BUNDLE_REMOTE} && cd {REMOTE} && "
+                f"sudo -u sparrow git bundle verify {BUNDLE_REMOTE} 2>&1")
+        if v.returncode != 0:
+            say("fail", "the box rejected the bundle: " + (v.stdout or "")[-300:])
+            return False
+        say(" ok ", f"delivered {size / 1024:.0f} KB of objects over SSH "
+                    f"(GitHub refused the box)")
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 
 # What runs HERE, and how to start it again. The box is not the only place that
 # can drift: the local hub, the detector and camctl all import modules at
@@ -348,12 +410,29 @@ def main() -> None:
     # diff are now separate, both exit codes are looked at, and an unknown
     # answer means RESTART - the wrong guess there costs a few seconds of
     # downtime, while the other wrong guess costs a silently stale server.
+    via_bundle = False
     fetched = ssh(f"cd {REMOTE} && sudo -u sparrow git fetch origin 2>&1")
     if fetched.returncode != 0:
-        say("fail", "the box could not FETCH from origin - it cannot know what "
-                    "is about to change, so this deploy is not safe")
-        print((fetched.stdout or "").strip()[-400:])
-        sys.exit("\n⛔ refusing to deploy")
+        say("info", "the box could not fetch from GitHub - falling back to "
+                    "delivering the objects over SSH")
+        full_head = ssh(f"cd {REMOTE} && sudo -u sparrow "
+                        f"git rev-parse HEAD").stdout.strip()
+        if not full_head or not deliver_by_bundle(full_head):
+            say("fail", "the box could not get the new commits at all - it "
+                        "cannot know what is about to change, so this deploy "
+                        "is not safe")
+            print((fetched.stdout or "").strip()[-400:])
+            sys.exit("\n⛔ refusing to deploy")
+        via_bundle = True
+        # Point the box's own origin/main at what the bundle carried, so every
+        # check below (and the ff-only merge) compares against the same thing it
+        # always did rather than a special case.
+        upd = ssh(f"cd {REMOTE} && sudo -u sparrow git fetch {BUNDLE_REMOTE} "
+                  f"refs/heads/main:refs/remotes/origin/main 2>&1")
+        if upd.returncode != 0:
+            say("fail", "the bundle verified but would not fetch: "
+                        + (upd.stdout or "")[-300:])
+            sys.exit("\n⛔ refusing to deploy")
     r = ssh(f"cd {REMOTE} && sudo -u sparrow git diff --name-only HEAD origin/main")
     if r.returncode != 0:
         say("info", "could not list what will change - assuming a restart is "
@@ -375,13 +454,28 @@ def main() -> None:
         return
 
     print("\n4. pull (--ff-only: cannot silently rewrite the box)")
-    r = ssh(f"cd {REMOTE} && sudo -u sparrow git pull --ff-only origin main 2>&1")
+    # ⚠️ WHEN THE OBJECTS CAME BY BUNDLE, DO NOT REACH FOR GITHUB AGAIN.
+    # `git pull origin main` re-runs the very fetch that just failed. The box
+    # already has the commits and its own origin/main already points at them, so
+    # the merge is purely local - and it is still --ff-only, so it still cannot
+    # rewrite anything.
+    if via_bundle:
+        r = ssh(f"cd {REMOTE} && sudo -u sparrow "
+                f"git merge --ff-only origin/main 2>&1")
+    else:
+        r = ssh(f"cd {REMOTE} && sudo -u sparrow git pull --ff-only origin main 2>&1")
     out = (r.stdout or "").strip()
     if r.returncode != 0 or "error" in out.lower() or "fatal" in out.lower():
         print(out[-600:])
         sys.exit("\n⛔ the box could not fast-forward. It has diverged - go and "
                  "look BEFORE forcing anything.")
     say(" ok ", out.splitlines()[-1] if out else "up to date")
+
+    # Don't leave a copy of the repository's objects sitting in /tmp. It is not
+    # a secret - the repo is public - but a deploy artefact that outlives the
+    # deploy is how a later run ends up merging a stale one.
+    if via_bundle:
+        ssh(f"rm -f {BUNDLE_REMOTE}")
 
     print("\n5. verify the box matches origin/main exactly")
     head = ssh(f"cd {REMOTE} && sudo -u sparrow git rev-parse --short HEAD").stdout.strip()
