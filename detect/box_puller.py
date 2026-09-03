@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -88,6 +89,58 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 
 # and nothing publishes unattended except a clearly-marked patrol car.
 MARKED_CLASSES = {"police"}
 MIN_CONF, MIN_MARGIN = 0.96, 0.90
+
+# 🚨 THE SAME CROP WAS BEING SCORED UP TO FOUR TIMES.
+#
+# Measured 2026-09-03 over one run: 10,449 of 90,687 sightings were scored more
+# than once, ~11% of all CLIP inference wasted. Every repeat was exactly one
+# pull after the last, in contiguous blocks of sighting ids.
+#
+# The cause is not a failed delete and not two pullers racing (checked both: the
+# box reported the discards, and of the two box_puller processes one is a venv
+# launcher shim with 0.1s of CPU against the worker's 1,948s). It is
+# `mirror.quarantine_write`, which names the inbox entry after the SIGHTING:
+#
+#     (INBOX / f"{sighting_id}.jpg").write_bytes(crop_bytes)
+#
+# A vehicle that stays in a traffic camera's view posts again under the same
+# sighting id, so the file this cycle deleted is written back before the next
+# pull tars the directory. Nothing is broken - the mirror is right to keep the
+# freshest crop for a sighting - the puller was simply paying full price to
+# rediscover an answer it already had.
+#
+# 📌 SKIP ONLY WHEN THE BYTES ARE IDENTICAL. The obvious fix - "don't score a
+# sighting twice" - would be wrong: a second crop of the same vehicle can be a
+# BETTER crop (closer, less motion blur, a clearer angle), and refusing to look
+# at it would cost exactly the recall the head exists to provide. Hashing the
+# image means a genuinely new picture is always scored and only a byte-for-byte
+# repeat is answered from cache, so this cannot change any verdict.
+_SEEN_MAX, _SEEN_TTL_S = 8000, 3600.0
+_seen: dict[int, tuple] = {}          # sid -> (sha256, verdict, when)
+
+
+def _remember(sid: int, digest: str, verdict) -> None:
+    """Cache one decision, and keep the cache bounded and fresh."""
+    now = time.time()
+    _seen[sid] = (digest, verdict, now)
+    if len(_seen) > _SEEN_MAX:
+        # Drop expired first, then the oldest, so a busy hour cannot grow this
+        # without limit on a machine that also holds CLIP.
+        for k, v in [(k, v) for k, v in _seen.items() if now - v[2] > _SEEN_TTL_S]:
+            _seen.pop(k, None)
+        while len(_seen) > _SEEN_MAX:
+            _seen.pop(min(_seen, key=lambda k: _seen[k][2]), None)
+
+
+def _recall(sid: int, digest: str):
+    """The verdict we already reached for these exact bytes, or None."""
+    hit = _seen.get(sid)
+    if not hit:
+        return None
+    seen_digest, verdict, when = hit
+    if seen_digest != digest or time.time() - when > _SEEN_TTL_S:
+        return None
+    return verdict
 
 
 # --------------------------------------------------------------------------
@@ -194,10 +247,35 @@ def apply_verdict(args, publish: list[dict], review: list[dict],
 
 
 def run_once(vid: VehicleIdentifier, args) -> dict:
+    """One pull-score-verdict cycle.
+
+    🚨 THE SCRATCH DIRECTORY HAS TO GO AT THE END, AND FOR YEARS IT DID NOT.
+    `pull()` makes a fresh mkdtemp every cycle and this ran every two seconds,
+    so %TEMP% held **157,487** `box_inbox_*` directories by 2026-09-03. Nothing
+    failed and nothing said so - it is the quietest kind of leak, one directory
+    at a time, and it costs inodes and makes every %TEMP% listing slower.
+
+    ⚠️ ONLY WHEN IT IS OURS. `--inbox` points `pull()` at a REAL mirror inbox
+    and returns is_local=True; deleting that would destroy every contributor's
+    crop that had not been processed yet. The flag is the whole guard, which is
+    why the cleanup is keyed off it rather than off the path looking temporary.
+    """
     import cv2
     import numpy as np
 
     src, is_local = pull(args)
+    try:
+        return _run_once(vid, args, src, is_local)
+    finally:
+        if not is_local:
+            import shutil
+            shutil.rmtree(src, ignore_errors=True)
+
+
+def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
+    import cv2
+    import numpy as np
+
     metas = sorted(src.glob("*.json"))
     if args.limit:
         metas = metas[:args.limit]
@@ -205,6 +283,8 @@ def run_once(vid: VehicleIdentifier, args) -> dict:
     publish, review, discard = [], [], []
     # Crops that arrived corrupt. Counted, never destroyed - see below.
     undecodable = 0
+    # Byte-identical re-arrivals answered from cache instead of from CLIP.
+    repeats = 0
     for jm in metas:
         stem = jm.stem
         jpg_path = jm.with_suffix(".jpg")
@@ -219,7 +299,22 @@ def run_once(vid: VehicleIdentifier, args) -> dict:
         except (TypeError, ValueError):
             continue
 
-        img = cv2.imdecode(np.frombuffer(jpg_path.read_bytes(), np.uint8),
+        # Answer a byte-identical re-arrival from cache. The verdict still has
+        # to be RE-SENT, not merely skipped: the whole reason this crop is here
+        # again is that the box has a fresh copy of the file, and only a verdict
+        # clears it. Skipping silently would leave it to be re-pulled forever.
+        raw = jpg_path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        cached = _recall(sid, digest)
+        if cached is not None:
+            if cached == "discard":
+                discard.append(sid)
+            else:
+                review.append(cached)
+            repeats += 1
+            continue
+
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8),
                            cv2.IMREAD_COLOR)
         if img is None:
             # ⚠️ DO NOT DISCARD. `discard` is permanent - box_publish.reject_one
@@ -339,9 +434,11 @@ def run_once(vid: VehicleIdentifier, args) -> dict:
                         + (f", head {hc:.2f}" if hc is not None else "")
                         + " - needs a human")})
             tag = "  -> REVIEW (strong)" if marked else "  -> REVIEW"
+            _remember(sid, digest, review[-1])
         else:
             discard.append(sid)
             tag = ""
+            _remember(sid, digest, "discard")
 
         print(f"  #{sid}: {r['vclass']} conf={r['conf']:.2f} "
               f"margin={r['margin']:.2f}"
@@ -351,12 +448,12 @@ def run_once(vid: VehicleIdentifier, args) -> dict:
     if args.dry_run:
         return {"pulled": len(metas), "marked": len(publish),
                 "review": len(review), "discarded": len(discard),
-                "undecodable": undecodable, "dry": True}
+                "undecodable": undecodable, "repeats": repeats, "dry": True}
 
     res = apply_verdict(args, publish, review, discard, src, is_local)
     return {"pulled": len(metas), "marked": len(publish),
             "review": len(review), "discarded": len(discard),
-            "undecodable": undecodable, "box": res}
+            "undecodable": undecodable, "repeats": repeats, "box": res}
 
 
 def main() -> None:
@@ -481,6 +578,12 @@ def main() -> None:
                      f"queued {box.get('reviewed', '?')} for review, "
                      f"discarded {box.get('discarded', '?')}"
                      + (f", ERRORS {box['errors']}" if box.get("errors") else ""))
+        if s.get("repeats"):
+            # Not a fault - see _SEEN_MAX. A number that stays near the pull
+            # size means the mirror is re-quarantining almost everything, which
+            # would be worth looking at; a modest fraction is just vehicles
+            # staying in frame across two cycles.
+            extra += f", {s['repeats']} identical re-arrivals answered from cache"
         if s.get("undecodable"):
             # Corrupt crops are left on the box to be re-pulled, so a number
             # that keeps growing means the transfer is damaging them.
