@@ -161,6 +161,18 @@ def main() -> int:
         check("what ingest stored is pen resolution (this IS the bug)",
               max(size) <= snapshot.SUBRES_MAX_EDGE, str(size))
 
+    # --- another node's credentials must not label THIS sighting --------
+    st, nd2 = post("/api/enroll", {"name": "route test drive other", "lat": 42.5,
+                                   "lon": -83.7, "kind": "phone"})
+    nid2, tok2 = nd2["id"], nd2["token"]
+    db.connect().execute("UPDATE nodes SET status='active' WHERE id=?", (nid2,))
+    db.connect().commit()
+    st, out = post("/api/node/label", {
+        "node_id": nid2, "sighting_id": sid, "label": "police"}, token=tok2)
+    check("labeling another node's sighting -> 403 not your camera's sighting",
+          st == 403 and out.get("error") == "not your camera's sighting",
+          f"{st} {out}")
+
     # --- answer "yes, police" WITH the phone's full-res copy ------------
     st, out = post("/api/node/label", {
         "node_id": nid, "sighting_id": sid, "label": "police",

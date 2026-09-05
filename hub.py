@@ -25,25 +25,53 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-import bugs
-import classify
+import admission
+import community
 import db
+import ingest_decisions
+import ingest_media
+import ingest_persistence
+import ingest_record
+import mapdata
+import microcache
 import mirror
+import node_auth
+import node_credentials
 import node_label
+import node_lifecycle
+import node_self
+import operator_admin
 import operator_auth
+import operator_bugs
+import ownership
+import pages
 import qr
 import nodes as node_mod
 import privacy
+import ratelimit
+import response_policy
 import review_api
 import review_auth
+import reviewer_mutation
+import reviewer_read
 import send_relay
 import send_push
 import air_relay
 import snapshot
+import static
+import tiles
+import transport
 from core import CONFIG, DATA, PUBLIC, SNAPS, is_operator_addr, now
+from ratelimit import RATE, rate_ok
 
 # --------------------------------------------------------------------------
 # Basemap tiles
+#
+# Moved to tiles.py in Stage 1B (tile substage). TILES/TILE_UPSTREAM/
+# TILE_SUBDOMAINS/TILE_MAX_ZOOM/TILE_CACHE_MAX/_tile_count/_tile_prune_lock/
+# _tile_prune/_TILE_FETCH are now aliases to the same objects in tiles.py -
+# not copies - so existing tooling that reaches into hub.TILES / hub._TILE_FETCH
+# / hub._tile_prune still observes/mutates the real shared state.
 #
 # 🚨 THE MAP HAD NO BASEMAP AT ALL AND NOTHING SAID SO.
 # The tile layer pointed straight at basemaps.cartocdn.com while the CSP said
@@ -61,6 +89,11 @@ from core import CONFIG, DATA, PUBLIC, SNAPS, is_operator_addr, now
 # project that jitters its own volunteers' positions should not hand that over.
 #
 # The cache means upstream sees each tile once, not once per viewer.
+TILES = tiles.TILES
+TILE_UPSTREAM = tiles.TILE_UPSTREAM
+TILE_SUBDOMAINS = tiles.TILE_SUBDOMAINS
+TILE_MAX_ZOOM = tiles.TILE_MAX_ZOOM
+TILE_CACHE_MAX = tiles.TILE_CACHE_MAX
 TILES = DATA / "tiles"
 
 # US police-station points [lat, lon, name], fetched from OpenStreetMap on the
@@ -271,69 +304,12 @@ _tile_prune_lock = threading.Lock()
 
 
 def _tile_prune() -> None:
-    """Keep the tile cache bounded, without stat-ing the tree on every hit.
+    """Moved to tiles._tile_prune in Stage 1B (tile substage)."""
+    return tiles._tile_prune()
 
-    The count is held in memory and only recounted when it is unknown (first
-    write after start) or when the cap is reached. Walking the cache on every
-    tile would turn a 2 ms disk read into a directory crawl at exactly the
-    moment a viewer is dragging the map.
-
-    🚨 THAT IS EXACTLY WHAT IT DID, AND IT MELTED THE BOX.
-    Two faults, and they compounded. The prune walked and STAT-ED the whole
-    tree - sorted(rglob(...), key=st_mtime) over 20,000 files - and it ran
-    under no lock, so every tile thread that arrived while the cache sat at
-    capacity started its own full walk. Then it set the count back to None, so
-    the next write recounted the tree as well.
-
-    Measured mid-incident: the hub at 147% CPU with ONE request in flight, the
-    CPU 60% SYSTEM time (that is the stat() storm, not computation), load above
-    90, and the map timing out. Purging the CDN cache is what set it off: a cold
-    edge turns every tile into a MISS, every MISS into a write, and every write
-    into two directory crawls.
-
-    ⚠️ A CACHE JANITOR MUST NEVER COST MORE THAN THE CACHE SAVES. One thread
-    prunes and the rest carry on, the count is corrected in place instead of
-    being thrown away, and the pruning is amortised - it drops to a low-water
-    mark so the next few thousand writes cost nothing at all.
-    """
-    global _tile_count
-    with _tile_prune_lock:
-        if _tile_count is None:
-            _tile_count = sum(1 for _ in TILES.rglob("*.png"))
-        else:
-            _tile_count += 1
-        if _tile_count <= TILE_CACHE_MAX:
-            return
-
-    # Only ONE pruner. Everyone else returns immediately and keeps serving:
-    # being slightly over the cap for a few seconds costs nothing, while a
-    # dozen concurrent tree walks costs the whole machine.
-    if not _tile_prune_lock.acquire(blocking=False):
-        return
-    try:
-        # Oldest first. Tiles are interchangeable and cheap to refetch, so there
-        # is no cleverness to buy here - unlike the crop bank, which prunes by
-        # whole DAYS because dropping the oldest crops first would bias the
-        # training set toward one time of day.
-        files = sorted(TILES.rglob("*.png"), key=lambda f: f.stat().st_mtime)
-        # Down to a LOW-WATER MARK, not to the cap. Trimming to exactly the cap
-        # leaves the next write over it again, which is how one expensive walk
-        # became an expensive walk per tile.
-        target = max(0, len(files) - int(TILE_CACHE_MAX * 0.8))
-        removed = 0
-        for f in files[:target]:
-            try:
-                f.unlink()
-                removed += 1
-            except OSError:
-                pass
-        # Corrected in place. Setting it to None forced a full recount on the
-        # very next write - a second crawl for every prune.
-        _tile_count = len(files) - removed
-    finally:
-        _tile_prune_lock.release()
 
 VERSION = "0.1.0"
+
 
 # High-water marks for /api/health, and when this process started. Kept in
 # memory on purpose: they describe THIS process, they cost nothing, and a file
@@ -343,151 +319,23 @@ VERSION = "0.1.0"
 _STARTED = time.time()
 _PEAK = {"fd_pct": 0.0, "threads": 0}
 
-# How many requests may be BEING SERVED at once. See Handler._INFLIGHT for why
-# this counts requests rather than connections - the two earlier attempts
-# counted connections and locked real visitors out of an idle box twice.
-#
-# 🚨 RAISED FROM 32 AFTER IT REFUSED REAL VISITORS A THIRD TIME, AND THE NUMBER
-# IS NOT THE LESSON. Three times now this gate has been set against a quantity I
-# had not measured: connections instead of requests, then 250 connections when
-# the steady state was already 32-64, then 32 requests while tile proxying held
-# permits for fifteen seconds each. Every time, the symptom was a 503 on an idle
-# box and every time I reasoned about the number instead of instrumenting it.
-#
-# So this is deliberately loose enough that it cannot be the thing that breaks
-# the site, and /api/health now PUBLISHES how many permits are in use and which
-# paths hold them (see _INFLIGHT_PATHS). Tune it from that, never from argument.
 # The window `since` timestamps are rounded to for caching. Must match
 # CACHE_BUCKET_S in public/app.js: the frontend rounds so its polls share a URL,
 # and the server rounds so a client that DOESN'T round cannot mint a new cache
 # key per request. Protection that depends on the client cooperating is not
 # protection.
-CACHE_BUCKET_S = 4
+#
+# Moved to microcache.py in Stage 1B (step 3). Aliased here, unchanged.
+CACHE_BUCKET_S = microcache.CACHE_BUCKET_S
 
-MAX_REQUESTS = 200
+# Admission/semaphore accounting (MAX_REQUESTS, MAX_HEAVY, MAX_INGEST,
+# HEAVY_ROUTES, INGEST_ROUTES, *_WAIT_S and the semaphores themselves) moved
+# to admission.py in Stage 1B (step 2). Aliased here, unchanged, because
+# /api/health below reads MAX_REQUESTS/MAX_HEAVY/MAX_INGEST by these names.
+MAX_REQUESTS = admission.MAX_REQUESTS
+MAX_HEAVY = admission.MAX_HEAVY
+MAX_INGEST = admission.MAX_INGEST
 
-# 🚨 A SECOND CAP, BECAUSE MAX_REQUESTS COUNTS THE WRONG NOUN AND THE KERNEL
-# KILLED US FOR IT.
-#
-# MAX_REQUESTS bounds how many requests may run at once. It says nothing about
-# how BIG they are, and that was fine while the largest answer on this server
-# was ~90 kB. Then the traffic cameras landed and /api/nodes became 3.4 MB of
-# JSON, built from a list of dicts that costs several times that again while it
-# is being serialised. 200 permits therefore authorised something like 2-3 GB
-# of simultaneous allocation on a 3.8 GB box, and on 2026-08-16 the OOM killer
-# took the hub FOUR TIMES while every health check still answered 200, because
-# systemd restarted it within seconds each time.
-#
-# So the heavy routes - the ones that materialise the whole map - get their own
-# much smaller permit pool. Eight is not a memory limit dressed up as a number:
-# there are two cores and a GIL, so more than a handful of simultaneous builds
-# buys no throughput whatsoever, it only buys peak memory.
-#
-# ⚠️ ADD A ROUTE HERE THE DAY ITS ANSWER GETS BIG, not the day it falls over.
-# The test is the size of the body, not how often it is called.
-HEAVY_ROUTES = frozenset({"/api/nodes", "/api/sightings"})
-# ⚠️ RAISED 8 -> 12 ON MEASUREMENT. At 8, a cache-missing /api/nodes measured
-# 12.7s during a poll burst - it was queueing, not computing (heavy_free was 0).
-# 12 concurrent builds is ~180 MB of peak, affordable against the 620 MB the hub
-# now sits at, and a reader waiting 12s for the map is the failure this whole
-# exercise was meant to prevent.
-#
-# ⚠️ RAISED 12 -> 48 ON 2026-08-18, WHEN THE MACHINE UNDERNEATH CHANGED.
-# Both halves of the reasoning above were properties of the OLD box, and the
-# map moved: 2 cores and 3.8 GB became 8 cores and 31 GB. "There are two cores
-# and a GIL" is simply no longer true, and 180 MB of peak was frightening
-# against 3.8 GB in a way it is not against 31 GB with 27 GB free.
-#
-# The measurement that forced it: with 12 permits the pool sat at heavy_free=0
-# and readers got 503s - the map showed "reconnecting" and only aircraft. It
-# was not computing, it was queueing again, exactly as at 8.
-#
-# 🚨 THE PERMIT IS HELD ACROSS THE SINGLE-FLIGHT WAIT, NOT JUST THE BUILD.
-# That is why a bigger pool is the fix rather than a faster build. When a
-# cache-missing /api/nodes takes 15.6s cold, the leader builds and every
-# follower BLOCKS holding a heavy permit of its own, so one slow build pins
-# the entire pool even though only one build is running. The pool therefore
-# has to be sized for concurrent READERS of a cold key, not for concurrent
-# builds. 48 is ~720 MB of worst-case peak against 27 GB free.
-#
-# The better fix is to take the permit around the build alone and let
-# followers wait outside the pool. That is a change to the dispatch path of a
-# live site and it is not a thing to do at speed; this is the safe half.
-MAX_HEAVY = 48
-
-# How long a heavy request waits for a permit before giving up. Long enough to
-# outlast the leader it is almost certainly queued behind (a build is well
-# under a second), short enough that a wedged leader cannot pile up a queue
-# that outlives the reader's patience.
-HEAVY_WAIT_S = 12.0
-
-# 🚨 INGEST MUST NEVER BE ABLE TO SPEND EVERY PERMIT, AND ON 2026-08-16 IT DID.
-#
-# The two camera boxes poll with 96 and 80 workers, so they can open ~176
-# simultaneous POSTs into a server holding 200 permits. Add readers and the
-# pool is gone: the origin answered "busy - too many requests in flight" to
-# EVERYBODY, and the only reason the map stayed up is that Cloudflare fell back
-# to serving stale copies. Stopping the two pollers took the origin from
-# refusing everything to inflight 1/200 within seconds, which is the measurement
-# that identified this rather than the reader traffic I first blamed.
-#
-# Readers are the point of the site and cameras are replaceable - a pass missed
-# now is re-read on the next cycle. So ingest gets a minority of the pool and
-# readers keep the rest, permanently.
-# 🚨 ENROLMENT IS NOT INGEST, AND PUTTING IT HERE REFUSED A REAL PERSON.
-# /api/enroll was in this pool, so somebody registering a camera queued behind
-# 176 poller workers and got "busy - too many requests in flight". Measured at
-# the time: ingest 0/40 saturated while the general pool sat at 55/200 - there
-# was plenty of capacity, just not in the bucket a human had been put in.
-#
-# A person signing up is the single most valuable request this server handles
-# and it happens a few times an hour. It belongs in the general pool, where the
-# only thing that can refuse it is the box genuinely being full.
-INGEST_ROUTES = frozenset({"POST /api/sightings", "POST /api/heartbeat/bulk"})
-# ⚠️ LOWERED 60 -> 40 for the same measurement. Ingest held all 60 slots through
-# the burst while a reader waited. Ingest is not latency-sensitive - it queues,
-# and a missed pass is re-read on the next sweep - so it is the side that should
-# give way. This is the priority stated above, applied to a real number.
-#
-# ⚠️ RAISED 40 -> 96 ON 2026-08-19, AND THE PRIORITY ABOVE IS UNCHANGED.
-# 40 was chosen on the 2-core box, where ingest and readers genuinely competed
-# for the same scarce pool. On the machine the map runs on now they do not.
-#
-# Measured over 40 minutes across several publish bursts: the camera fleet had
-# 48.6% of its posts REFUSED - bursts of 700-917 in a single minute - while
-# `ingest_free` sat at 0 of 40 and `inflight` peaked at 48 of 200 with
-# `heavy_free` at 42-48 of 48. Ingest was starving while 150 general permits sat
-# idle and no reader was waiting for anything.
-#
-# A refused post is not a delayed post: there is no node outbox, so the camera
-# drops that sighting on the floor. Half the fleet's work was being thrown away
-# to protect readers from a contention that was not happening.
-#
-# 🚨 AND REVERTED, WITHIN THE HOUR, BECAUSE IT HURT READERS BADLY.
-# At 96 the refusals did fall, and inflight rose from a 48 peak to 105-114 -
-# and READER LATENCY COLLAPSED: 5 of 12 samples of /api/sightings took 19 to 34
-# SECONDS, against 0.4s when ingest was idle in the same run.
-#
-# The mistake was reading "150 permits are free" as "there is spare capacity".
-# Permits were never the scarce thing. CPU behind them is. Letting 96 posts
-# decode, classify and write at once starves the readers sharing that CPU, so
-# the free permits were free precisely BECAUSE ingest was capped, not evidence
-# that the cap was unnecessary.
-#
-# The 40 above is therefore correct on this box too, and the ~48% refusal rate
-# it causes is the intended trade rather than a bug: a refused pass is re-read
-# next cycle, a reader waiting 34 seconds is the failure this whole file exists
-# to prevent. Do not raise this again without measuring READER latency during a
-# publish burst - the ingest and inflight numbers alone will mislead you exactly
-# as they misled me.
-MAX_INGEST = 40
-
-# ⚠️ INGEST QUEUES RATHER THAN BEING REFUSED, because there is still no node
-# outbox: a node whose POST is refused DROPS that sighting on the floor. Waiting
-# a few seconds costs a camera nothing and saves the reading.
-INGEST_WAIT_S = 8.0
-
-# The most cameras one /api/heartbeat/bulk request may beat. Sized against
 # MAX_BODY rather than taste: an entry is a node id and a token, ~80 bytes of
 # JSON, so a thousand is ~80 KB and comfortably inside the body cap. The
 # 4,400-camera fleet therefore arrives as five requests instead of 4,400, and
@@ -497,7 +345,7 @@ BULK_BEAT_MAX = 1000
 # How coarsely a viewport box is snapped before it is used as a cache key or a
 # filter.
 #
-# 🚨 THIS IS A CACHE-KEY CARDINALITY KNOB, NOT AN ACCURACY KNOB, AND 0.1 COST
+# THIS IS A CACHE-KEY CARDINALITY KNOB, NOT AN ACCURACY KNOB, AND 0.1 COST
 # US THE BOX. At ~11 km, two people looking at the same city from slightly
 # different scroll positions produced DIFFERENT keys, so the single-flight
 # below collapsed almost nothing and the edge missed almost every time. During
@@ -509,23 +357,19 @@ BULK_BEAT_MAX = 1000
 # The cost is that the superset returned is larger, so a phone viewport carries
 # some points just off its edges. That is invisible on a map and cheap; the
 # alternative was measured and it was an out-of-memory kill.
-BOX_SNAP = 0.5
+#
+# Moved to microcache.py in Stage 1B (step 3). Aliased here, unchanged, because
+# _do_GET_inner below (application logic, not in scope for this stage) still
+# reads BOX_SNAP/_snap_box by these names.
+BOX_SNAP = microcache.BOX_SNAP
 
 
 def _snap_box(raw: str) -> str:
     """`S,W,N,E` snapped OUTWARD to the BOX_SNAP grid, or "" if unparseable.
 
-    🚨 OUTWARD, ALWAYS. This string is both the cache key and the filter, so
-    the snapped box must CONTAIN the caller's box - never merely approximate
-    it. Round-to-nearest would shrink some of them, and the symptom is rows
-    quietly missing at the edge of a viewport, only for whoever did not happen
-    to be the request that populated the cache.
+    Moved to microcache.snap_box in Stage 1B (step 3).
     """
-    import math
-    s, w, n, e = (float(x) for x in raw.split(","))
-    return "%g,%g,%g,%g" % (
-        math.floor(s / BOX_SNAP) * BOX_SNAP, math.floor(w / BOX_SNAP) * BOX_SNAP,
-        math.ceil(n / BOX_SNAP) * BOX_SNAP, math.ceil(e / BOX_SNAP) * BOX_SNAP)
+    return microcache.snap_box(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -565,13 +409,14 @@ FEED = Feed()
 # ---------------------------------------------------------------------------
 # Rate limiting
 #
-# The two routes a stranger can write to - enrolment and sighting submission -
-# had no limit at all. On a private tailnet that is fine; on sparrowmap.com it
-# is an invitation to fill the database overnight. Deliberately crude: a fixed
-# window per address, in memory, no dependency. It will not stop a distributed
-# flood, and it is not trying to - it stops the trivial script, which is the
-# actual threat to a small project on day one.
+# Moved to ratelimit.py in Stage 1B (step 1). `rate_ok`/`RATE` are imported
+# above for existing call sites within this file.
 # ---------------------------------------------------------------------------
+
+# The upstream-fetch concurrency bound moved to tiles.py in Stage 1B (tile
+# substage). `_TILE_FETCH` is aliased here (not copied) so existing tooling
+# reaching into hub._TILE_FETCH still observes the real semaphore.
+_TILE_FETCH = tiles._TILE_FETCH
 
 _HITS: dict = {}
 _HIT_LOCK = threading.Lock()
@@ -763,26 +608,26 @@ US_STATE_FIPS = {
 
 _GEO_CACHE: dict = {}
 
-_ALIAS: dict[str, str] = {}
-_ALIAS_DAY = [0]
+# Per-day plate-hash alias mapping used by /api/plate, /api/sightings,
+# /api/sighting/<id>, /api/track/<hash> and the SSE feed.
+#
+# Moved to privacy.py in Stage 2B so mapdata.py (which must not import hub)
+# can resolve/record aliases through the same shared state. Aliased here,
+# not copied, so any existing caller that reaches hub._ALIAS/hub._alias_map/
+# hub._resolve_hash still observes the SAME dict/list objects privacy.py now
+# owns.
+_ALIAS = privacy.ALIAS
+_ALIAS_DAY = privacy.ALIAS_DAY
 
 
 def _alias_map(rows: list[dict]) -> None:
-    day = int(now() // 86400)
-    if day != _ALIAS_DAY[0]:
-        _ALIAS.clear()
-        _ALIAS_DAY[0] = day
-    for r in rows:
-        red = privacy.redact(r, "anon")
-        # `or ""` matters: plate_hash is NULL for a pass with no readable
-        # plate, and dict.get's default does not fire on a present-but-None key.
-        if (red.get("plate_hash") or "").startswith("a:") and r.get("plate_hash"):
-            _ALIAS[red["plate_hash"]] = r["plate_hash"]
+    """Moved to privacy.alias_map in Stage 2B."""
+    return privacy.alias_map(rows)
 
 
 def _resolve_hash(h: str) -> str:
-    """Turn a client-supplied alias back into the real hash, if we minted it."""
-    return _ALIAS.get(h, h)
+    """Moved to privacy.resolve_hash in Stage 2B."""
+    return privacy.resolve_hash(h)
 
 
 
@@ -791,42 +636,23 @@ def _resolve_hash(h: str) -> str:
 # /IPCamera appears only when the asset really exists, so the page never offers
 # a download that 404s. Cached, because this is a third-party round trip on a
 # path a crowd may hit.
-DOWNLOAD_URL = CONFIG.get(
-    "download_url",
-    "https://github.com/SparrowMap/sparrowmap/releases/latest/download/SparrowMap4Biz.exe")
-_DL_CACHE = {"at": 0.0, "ok": False}
-_DL_TTL_S = 600.0
+#
+# Moved to pages.py in Stage 2A. Aliased here, not copied, so existing tooling
+# that reaches into hub.DOWNLOAD_URL / hub._DL_CACHE still observes the real
+# shared state.
+DOWNLOAD_URL = pages.DOWNLOAD_URL
+_DL_CACHE = pages._DL_CACHE
+_DL_TTL_S = pages._DL_TTL_S
 
 
 def _download_url():
-    """The URL if a build is actually published, else None."""
-    if not DOWNLOAD_URL:
-        return None
-    if now() - _DL_CACHE["at"] < _DL_TTL_S:
-        return DOWNLOAD_URL if _DL_CACHE["ok"] else None
-    ok = False
-    try:
-        # Imported here, not at module scope: this is the only outbound HTTP
-        # call the hub makes on a page path, and keeping it local makes that
-        # obvious to anyone auditing what this server talks to.
-        import urllib.request
-        req = urllib.request.Request(
-            DOWNLOAD_URL, method="HEAD",
-            # 🚨 A User-Agent is REQUIRED. GitHub refuses requests without one,
-            # and this project has already lost a whole ingest path to exactly
-            # that mistake behind Cloudflare.
-            headers={"User-Agent": "SparrowMap"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            ok = r.status == 200
-    except Exception:
-        ok = False
-    _DL_CACHE.update(at=now(), ok=ok)
-    return DOWNLOAD_URL if ok else None
+    """Moved to pages.download_url in Stage 2A."""
+    return pages.download_url()
 
 
 def _public_rows(rows: list[dict]) -> list[dict]:
-    _alias_map(rows)
-    return [privacy.redact(r, "anon") for r in rows]
+    """Moved to privacy.public_rows in Stage 2B."""
+    return privacy.public_rows(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -847,43 +673,20 @@ class Handler(BaseHTTPRequestHandler):
 
     # 🚨 THE ADMISSION GATE, AND IT COUNTS REQUESTS - NOT CONNECTIONS.
     #
-    # The first two attempts gated CONNECTIONS in the server (dualstack), and
-    # both refused real visitors while the box was idle: at a cap of 48 within
-    # minutes, and again at 250 as soon as Caddy's pool reached 250. Measured
-    # live the second time: 254 threads and /api/health answering "busy - too
-    # many connections" on a box at load 5 doing nothing.
-    #
-    # 📌 A connection is not work. With HTTP/1.1 keep-alive a proxy holds a pool
-    # of idle sockets open by design; each costs a thread and zero CPU. Counting
-    # them and calling it load meant the limiter was measuring the one thing that
-    # does not correlate with the resource it was protecting. Raising the number
-    # never fixes that - it just moves where it starts lying.
-    #
-    # Here, the permit is taken AFTER the request line has been read and released
-    # as soon as the response is written, so it measures exactly what it claims:
-    # requests being served at this instant. An idle keep-alive connection holds
-    # nothing and cannot lock anyone out.
-    #
-    # 32 is chosen against the machine, not the traffic: 2 vCPUs, shared. Beyond
-    # a couple of dozen concurrent handlers the GIL and the sqlite writer make
-    # every request slower without finishing any sooner - which is the collapse
-    # this exists to prevent. Refusing in single-digit milliseconds lets the
-    # proxy retry something that will work.
-    # Named, module-level, so tools/test_overload.py can size its flood off the
-    # real number instead of a copy that silently drifts out of step.
-    _INFLIGHT = threading.Semaphore(MAX_REQUESTS)
-    # The byte-shaped cap. See MAX_HEAVY.
-    _HEAVY = threading.Semaphore(MAX_HEAVY)
-    _HEAVY_ROUTES = HEAVY_ROUTES
-    # The keep-the-readers-alive cap. See MAX_INGEST.
-    _INGEST = threading.Semaphore(MAX_INGEST)
-    _INGEST_ROUTES = INGEST_ROUTES
-    # Who is holding a permit right now, and the worst hold time seen per path.
-    # Both are published by /api/health so the cap can be tuned from evidence.
-    _INFLIGHT_PATHS: dict = {}
-    _INFLIGHT_LOCK = threading.Lock()
-    _SLOW_HELD: dict = {}
-    _SLOW_S = 2.0
+    # Moved to admission.py in Stage 1B (step 2); aliased here so existing
+    # callers of Handler._INFLIGHT/_HEAVY/_INGEST/etc. (both inside this file
+    # and in tools/test_overload.py, tools/test_slowloris.py,
+    # tools/test_cache_key_leak.py) keep reaching the SAME semaphore/dict
+    # objects admission.py now owns - not fresh copies of them.
+    _INFLIGHT = admission.INFLIGHT
+    _HEAVY = admission.HEAVY
+    _HEAVY_ROUTES = admission.HEAVY_ROUTES
+    _INGEST = admission.INGEST
+    _INGEST_ROUTES = admission.INGEST_ROUTES
+    _INFLIGHT_PATHS = admission.INFLIGHT_PATHS
+    _INFLIGHT_LOCK = admission.INFLIGHT_LOCK
+    _SLOW_HELD = admission.SLOW_HELD
+    _SLOW_S = admission.SLOW_S
 
     def handle_one_request(self):
         # One handler instance serves every request on a keep-alive connection,
@@ -902,152 +705,29 @@ class Handler(BaseHTTPRequestHandler):
     def _drain_body(self) -> None:
         """Read and discard a request body we are about to refuse.
 
-        🚨 REFUSING WITHOUT READING DESYNCS A POOLED CONNECTION.
-        Caddy keeps upstream connections alive and reuses them. If a 503 or 429
-        is written while the request body is still unread, those bytes stay in
-        the socket and are parsed as the START of the next request on that same
-        connection - so the resulting 400 lands on some unrelated visitor's
-        request, and log_message is suppressed here so nothing records it.
-
-        The 429 paths matter more than the 503 one: a global 600/hour bucket is
-        far easier to trip than 200 concurrent requests.
+        Moved to transport.drain_body in Stage 1A; see that function's
+        docstring for the desync reasoning this preserves unchanged.
         """
-        # ⚠️ IDEMPOTENT, OR IT HANGS THE REQUEST. Handlers that read the body
-        # and THEN refuse are common (unknown node, bad token, bad json). A
-        # second read of an exhausted stream blocks waiting for bytes that have
-        # already been consumed - turning a tidy-up into a stall on the very
-        # path that is shedding load.
-        if getattr(self, "_body_done", False):
-            return
-        self._body_done = True
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError):
-            n = 0
-        if n <= 0:
-            # Nothing to drain. A GET has no body, and closing the connection
-            # here would make every refusal on a GET kill keep-alive - turning
-            # a fix for a desync into a much larger performance bug. Caught by
-            # tools/test_cache_key_leak.py, which reuses a connection after a
-            # 503 and started aborting.
-            return
-        if n > self.MAX_BODY:
-            # More than we are willing to read just to be polite. The bytes
-            # cannot be left in the socket, so closing is the honest option.
-            self.close_connection = True
-            return
-        try:
-            self.rfile.read(n)
-        except Exception:
-            self.close_connection = True
+        return transport.drain_body(self)
 
     def _too_busy(self) -> None:
-        self._drain_body()
-        body = b'{"error": "busy - too many requests in flight"}'
-        try:
-            self.send_response(503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Retry-After", "1")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-        except Exception:
-            pass
+        # Moved to admission.too_busy_response in Stage 1B.
+        return admission.too_busy_response(self)
 
     # Public read paths served IDENTICALLY to every anonymous viewer, so a short
     # shared cache collapses thousands of pollers into ~one origin fetch/window.
-    _CACHEABLE_API = frozenset({"/api/sightings", "/api/stats", "/api/policy",
-                                "/api/nodes", "/api/leaderboard", "/api/health",
-                                # Identical for every viewer and it changes only
-                                # when a camera is added, so it is the cheapest
-                                # thing on the map to cache.
-                                "/api/places",
-                                "/api/heat"})
+    #
+    # Moved to microcache.py in Stage 1B (step 3). Aliased here, unchanged,
+    # because _cache_control below reads _CACHEABLE_API by this name.
+    _CACHEABLE_API = microcache.CACHEABLE_API
 
     def _cache_control(self) -> str:
         """Per-path caching policy.
 
-        🚨 THIS IS WHAT LETS THE MAP SURVIVE A CROWD. The origin (a threaded
-        Python server) caps near 55 req/s on the map data - measured. But that
-        data is PUBLIC and identical for everyone, so it belongs on the edge:
-        with a short shared cache, thousands of viewers collapse to about one
-        origin fetch per window and the ceiling stops mattering.
-
-        Default stays no-store. It is opened up ONLY for things that are public
-        and the same for all viewers. The privacy reason no-store existed - not
-        keeping a record of who looked at which plate - lives on the SEARCH and
-        OPERATOR and per-user paths, which stay no-store below.
+        Moved to response_policy.cache_control in Stage 1B (step 4).
         """
-        p = urlparse(self.path).path
-        # 🚨 NEVER PUT A LONG TTL ON A FAILURE.
-        # This decided purely from the PATH, so a tile that 404d - an upstream
-        # blip, or the tile-fetch bound shedding under load - was stamped
-        # "public, max-age=604800" exactly like a real tile. That burns a blank
-        # square into that visitor's browser for a WEEK, for a transient error
-        # that would have resolved on the next request. The status is part of
-        # what is cacheable, not just the path.
-        if getattr(self, "_status", 200) >= 400:
-            return "no-store"
-        if p.startswith(("/vendor/", "/api/tile/")):
-            # PINNED content only: the vendored detector runtime (a 10 MB model
-            # + wasm + Leaflet) and basemap tiles. These do not change without a
-            # deliberate library swap, so a long cache saves re-downloading 10 MB
-            # on every visit. NOT `immutable` - if a library is ever replaced a
-            # 7-day revalidation is cheap insurance against serving a stale one.
-            return "public, max-age=604800"
-        if p.startswith("/static/"):
-            # 🚨 THE APP'S OWN CODE (app.js, sitenav.js, transparency.js). It
-            # MUST be able to change - marking it immutable froze every JS fix
-            # for a week on returning visitors. Short cache: still absorbs a
-            # launch spike (thousands of requests in a minute -> one origin hit)
-            # but a code change propagates within the minute. (A content-hashed
-            # filename would let this be immutable too - a later build step.)
-            return "public, max-age=60"
-        if p in self._CACHEABLE_API:
-            # The public map data. The frontend buckets its `since` timestamps
-            # so the URL is stable within the window and the cache actually hits.
-            #
-            # The live COUNTERS at the top of the map - cameras online, sightings
-            # today - get a very short window so the page feels live, while still
-            # collapsing a crowd into one origin hit every few seconds (stats and
-            # the node list are small, cheap queries). The heavier per-row
-            # sighting feed keeps a longer window; it is the expensive one.
-            if p in ("/api/stats", "/api/health"):
-                return "public, max-age=3"
-            # 🚨 /api/nodes IS NOT A LIVE COUNTER AND MUST NOT BE PRICED LIKE
-            # ONE. It sat on max-age=3 because it was grouped with the counters
-            # at the top of the map - but those are /api/stats, which is 252
-            # BYTES. This is the camera list: 13,637 rows and 4 MB, the single
-            # most expensive answer this server produces.
-            #
-            # A 3s edge window means a crowd re-fetches it twenty times a
-            # minute, and on 2026-08-18 that is what wedged the hub: 150
-            # concurrent readers measured a median of 20s and half of them were
-            # refused outright.
-            #
-            # What it actually contains changes when somebody ENROLS A CAMERA.
-            # Thirty seconds of lag on that is invisible, and it turns thousands
-            # of viewers into about one origin fetch per edge per window, which
-            # is the only way this scales at all. The live feel of the page
-            # comes from /api/sightings and /api/stats, both of which are cheap
-            # and both of which keep their short windows.
-            if p == "/api/nodes":
-                return "public, max-age=30"
-            # Town badges for the zoomed-out view. Derived from the same camera
-            # list, changes on the same event, and is read far less often.
-            if p == "/api/places":
-                return "public, max-age=60"
-            if p == "/api/sightings":
-                return "public, max-age=4"    # live map: fresh within a few s
-            return "public, max-age=15"
-        if p == "/" or p.endswith(".html") or p in (
-                "/about", "/transparency", "/status", "/IPCamera", "/app",
-                "/node", "/key", "/checksums", "/support", "/donate"):
-            return "public, max-age=60"        # page shells: reuse, revalidate
-        # /api/plate search, /api/track, /api/sighting/<id>, operator routes,
-        # /api/live, /api/audit - anything per-user or a lookup - is never cached.
-        return "no-store"
+        return response_policy.cache_control(self.path, getattr(self, "_status", 200))
+
 
     def _send(self, code: int, body: bytes, ctype: str = "application/json",
               extra: dict | None = None) -> None:
@@ -1083,14 +763,8 @@ class Handler(BaseHTTPRequestHandler):
         # /api/node/me, the one endpoint that returns a camera's TRUE position.
         key = self.__dict__.pop("_micro_key", None)
         if key and code == 200:
-            with Handler._MICRO_LOCK:
-                Handler._MICRO[key] = (time.time(), body)
-                # Bounded: the key includes the query string, and `since=` moves
-                # every few seconds, so an unbounded dict is a slow leak.
-                if len(Handler._MICRO) > 200:
-                    for k in sorted(Handler._MICRO,
-                                    key=lambda k: Handler._MICRO[k][0])[:80]:
-                        Handler._MICRO.pop(k, None)
+            # Moved to microcache.store in Stage 1B (step 3).
+            microcache.store(key, body)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1101,6 +775,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", self._cache_control())
 
         # ---- headers that protect the VISITOR ---------------------------
+        # Moved to response_policy.security_headers in Stage 1B (step 4).
+        for k, v in response_policy.security_headers(self._nonce):
+            self.send_header(k, v)
         # 🚨 REFERRER POLICY IS AN ANONYMITY CONTROL HERE, NOT A FORMALITY.
         # Without it, every outbound click - the OpenStreetMap attribution
         # link at the bottom of the map, for one - tells the destination that
@@ -1146,8 +823,9 @@ class Handler(BaseHTTPRequestHandler):
         # The public map is meant to be embeddable and mirrorable by anyone.
         # Operator JSON is not, and a wildcard on it is needless surface even
         # with a SameSite=Strict cookie in front.
-        if not self.path.startswith(("/api/review", "/api/operator",
-                                     "/api/purge", "/api/rv")):
+        #
+        # Moved to response_policy.cors_allowed in Stage 1B (step 4).
+        if response_policy.cors_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
@@ -1177,90 +855,14 @@ class Handler(BaseHTTPRequestHandler):
         Handled by running the ordinary GET path and dropping the body in
         _send, so a HEAD can never disagree with the GET it describes - the
         status, the headers and the Content-Length are all the real ones.
+
+        Moved to transport.handle_head in Stage 1A.
         """
-        self._head_only = True
-        try:
-            self.do_GET()
-        finally:
-            self._head_only = False
+        return transport.handle_head(self)
 
     def _tile(self, path: str) -> None:
-        """Serve one basemap tile, from disk if we already have it.
-
-        ⚠️ THE UPSTREAM URL IS BUILT FROM INTEGERS, NEVER FROM THE REQUEST.
-        A proxy that forwards a caller-supplied URL is an open proxy: it will
-        happily fetch `http://169.254.169.254/` or anything else the box can
-        reach, using the box's own network position. So z/x/y are parsed as
-        ints, range-checked against the zoom, and formatted into a fixed
-        template. There is no code path here that can be pointed somewhere
-        else. A proxy that accepts a request-supplied URL and guards it with a
-        prefix check may be acceptable on an operator-only LAN page; this one is
-        reachable by every viewer of a public map, so it takes no URL at all.
-        """
-        parts = path[len("/api/tile/"):].split("/")
-        if len(parts) != 3 or not parts[2].endswith(".png"):
-            return self._send(404, b"", "text/plain")
-        try:
-            z = int(parts[0]); x = int(parts[1]); y = int(parts[2][:-4])
-        except ValueError:
-            return self._send(404, b"", "text/plain")
-        # Reject anything outside the tile grid before it becomes a request.
-        if not (0 <= z <= TILE_MAX_ZOOM) or not (0 <= x < 2 ** z) or not (0 <= y < 2 ** z):
-            return self._send(404, b"", "text/plain")
-
-        cached = TILES / str(z) / str(x) / f"{y}.png"
-        if cached.exists():
-            return self._send(200, cached.read_bytes(), "image/png",
-                              {"Cache-Control": "public, max-age=604800"})
-
-        # Rate-limit only the UPSTREAM path - a cache hit above is cheap, but a
-        # miss makes this box fetch from the CDN and hold a thread up to 15s.
-        # That is the amplification lever, so the budget guards exactly it.
-        if not rate_ok("/api/tile", self.client_ip):
-            return self._send(429, b"", "text/plain")
-
-        # 🚨 BOUND THE CONCURRENT UPSTREAM FETCHES. THIS TOOK THE SITE DOWN.
-        #
-        # Tiles are exempt from the request gate, and correctly so: waiting on
-        # somebody else's CDN is not work this box does, and gating it meant a
-        # visitor panning the map consumed every permit for fifteen seconds a
-        # time. But exempting them removed the ONLY bound, which is a different
-        # mistake with the same outcome.
-        #
-        # It surfaced the moment the Cloudflare cache was purged: a cold edge
-        # makes every tile a MISS, each MISS becomes an origin request, each one
-        # opens an upstream fetch, and hundreds ran at once. Load 41 on 2 vCPUs,
-        # the accept queue backed up, and the map returned 502 while the box sat
-        # mostly idle waiting on the network.
-        #
-        # A cache HIT above never reaches here, so this bounds only the
-        # amplifying path. The wait is short and deliberate: most fetches finish
-        # well under a second, so a storm sheds rather than queues. A blank tile
-        # for one pan is nothing; Leaflet fills it on the next move, and it beats
-        # taking the whole site down to render one square of road.
-        if not _TILE_FETCH.acquire(timeout=2.0):
-            return self._send(404, b"", "text/plain")
-
-        import urllib.request
-        url = TILE_UPSTREAM.format(s=TILE_SUBDOMAINS[(x + y) % len(TILE_SUBDOMAINS)],
-                                   z=z, x=x, y=y)
-        try:
-            raw = urllib.request.urlopen(urllib.request.Request(
-                url, headers={"User-Agent": "SparrowMap/0.1 (+https://sparrowmap.com)"}),
-                timeout=15).read()
-        except Exception:
-            # A missing tile must not be an error page: Leaflet would draw the
-            # HTML as a broken image across the map. Fail as a 404 and let it
-            # leave that square blank.
-            return self._send(404, b"", "text/plain")
-        finally:
-            # ⚠️ RELEASED HERE, NOT AFTER THE DISK WRITE. The permit exists to
-            # bound UPSTREAM fetches; holding it through the local write would
-            # count disk time against a network budget, and a permit leaked on
-            # the 404 path would shrink the pool to nothing one failed tile at
-            # a time - a slow strangle that looks like a network problem.
-            _TILE_FETCH.release()
-
+        """Moved to tiles.serve in Stage 1B (tile substage)."""
+        return tiles.serve(self, path)
         # Never cache (or serve with a long TTL) Carto's "API KEY REQUIRED"
         # placeholder - drop it as a short-lived 404 so Leaflet leaves the square
         # blank and retries, and the real tile lands once Carto stops throttling.
@@ -1279,114 +881,33 @@ class Handler(BaseHTTPRequestHandler):
                           {"Cache-Control": "public, max-age=604800"})
 
     def _json(self, obj, code: int = 200) -> None:
-        self._send(code, json.dumps(obj, default=str).encode(), "application/json")
+        return transport.send_json(self, obj, code)
 
     def _err(self, code: int, msg: str) -> None:
-        # 🚨 DRAIN BEFORE REFUSING. Several refusals - every 429, the unknown
-        # node, the bad token - return BEFORE _body() has read the request, and
-        # Caddy reuses upstream connections. Unread bytes are then parsed as the
-        # start of the NEXT request on that connection, so the resulting 400
-        # lands on an unrelated visitor and log_message is suppressed here so
-        # nothing records it. Doing it in _err rather than at each call site
-        # means a refusal path added later cannot forget.
-        if code >= 400:
-            self._drain_body()
-        self._json({"error": msg}, code)
+        # Moved to transport.send_error in Stage 1A; see that function's
+        # docstring for the drain-before-refusing reasoning this preserves
+        # unchanged.
+        return transport.send_error(self, code, msg)
 
     def _file(self, path: Path) -> None:
-        if not path.is_file():
-            return self._err(404, "not found")
-        ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        # The browser refuses to instantiate a wasm module served as anything
-        # else, and mimetypes on Windows does not know these two.
-        ctype = {".wasm": "application/wasm",
-                 ".onnx": "application/octet-stream"}.get(path.suffix, ctype)
-        body = path.read_bytes()
-        if path.suffix == ".html":
-            # The nonce is generated inside _send, so mark the tags with a
-            # placeholder and let _send fill it. Only bare <script> tags are
-            # touched; ones with a src attribute are already covered by 'self'.
-            body = body.replace(b"<script>", b"<script nonce=\"@@NONCE@@\">")
-        self._send(200, body, ctype)
+        """Moved to static.serve in Stage 1B (step 5)."""
+        return static.serve(self, path)
 
     # A sighting carries a base64 vehicle crop, which is the only large body this
     # server has any reason to accept. 8 MB covers a generous JPEG with base64's
     # 33% overhead; everything else is a few hundred bytes. Bigger than this is
     # not a real submission, it is memory pressure on a 2-vCPU/3-GB box.
-    MAX_BODY = 8 * 1024 * 1024
+    #
+    # Kept as a Handler attribute for compatibility (existing call sites and
+    # tools reference self.MAX_BODY / Handler.MAX_BODY); the value itself now
+    # lives in transport.MAX_BODY, which _body reads from via transport.py.
+    MAX_BODY = transport.MAX_BODY
 
     def _body(self) -> dict:
-        # Marked before any read, so a refusal AFTER this point never tries to
-        # drain an already-consumed stream. See _drain_body.
-        self._body_done = True
-        n = int(self.headers.get("Content-Length") or 0)
-        if not n:
-            return {}
-        # 🚨 CAP BEFORE READING. Trusting Content-Length and calling read(n) with
-        # no ceiling lets one request ask the box to buffer gigabytes; a handful
-        # of those, or a slow-loris trickle, exhausts a thread-per-connection
-        # server. Never buffer more than MAX_BODY, and on an oversize claim close
-        # the connection (unread bytes would otherwise corrupt the next
-        # keep-alive request). The handler then sees {} and answers 400. No
-        # response is sent from here, so the caller can never double-respond.
-        if n > self.MAX_BODY:
-            self.close_connection = True
-            return {}
-        # 🚨 A WALL-CLOCK DEADLINE, NOT JUST A PER-RECV TIMEOUT.
-        # The socket timeout (dualstack.IDLE_TIMEOUT_S) applies to each recv
-        # individually, so a client sending one byte every 19 seconds resets it
-        # forever and holds an admission permit for as long as it likes. A few
-        # hundred of those at ~10 B/s and every POST, every no-store route and
-        # all map data past its micro-TTL returns 503 - while the page shell and
-        # tiles keep serving, which makes it harder to diagnose rather than
-        # milder. This is a slow-loris on the one resource the whole site
-        # shares.
-        #
-        # Read in chunks against a total budget instead. A legitimate body here
-        # is a few hundred KB of JPEG from a camera on a domestic uplink, so ten
-        # seconds is generous; anything slower is not a camera.
-        # ⚠️ THE DEADLINE ONLY WORKS IF EACH READ RETURNS. Checking the clock
-        # between reads is not enough: rfile.read() blocks until it has the
-        # bytes, and every trickled byte resets the socket timeout, so the very
-        # first read never comes back and the deadline is never consulted. The
-        # socket timeout must be shortened for the duration of the body read so
-        # control returns to this loop regularly. (Found by
-        # tools/test_slowloris.py, which failed identically before and after the
-        # first version of this fix - a test earning its place.)
-        deadline = time.time() + 10.0
-        prev_timeout = None
-        try:
-            prev_timeout = self.connection.gettimeout()
-            self.connection.settimeout(1.0)
-        except Exception:
-            pass
-        chunks, got = [], 0
-        try:
-            while got < n:
-                if time.time() > deadline:
-                    # The bytes cannot be left in the socket for the next
-                    # request on this connection.
-                    self.close_connection = True
-                    return {}
-                try:
-                    part = self.rfile.read(min(65536, n - got))
-                except (TimeoutError, socket.timeout, OSError):
-                    continue          # nothing yet; the deadline decides
-                if not part:
-                    self.close_connection = True
-                    return {}
-                chunks.append(part)
-                got += len(part)
-        finally:
-            try:
-                if prev_timeout is not None:
-                    self.connection.settimeout(prev_timeout)
-            except Exception:
-                pass
-        try:
-            return json.loads(b"".join(chunks).decode("utf-8"))
-        except Exception:
-            return {}
+        # Moved to transport.read_body in Stage 1A; see that function's
+        # docstring for the slow-loris deadline reasoning this preserves
+        # unchanged.
+        return transport.read_body(self)
 
     def _is_local(self) -> bool:
         """May this caller retract a published claim?
@@ -1452,61 +973,11 @@ class Handler(BaseHTTPRequestHandler):
     def _gated(self, inner, label: str):
         """Run a handler holding one permit, and RECORD that it holds it.
 
-        🚨 THE ACCOUNTING IS THE POINT, NOT THE CAP. Three separate times this
-        limiter refused visitors on an idle box, and every time the diagnosis
-        took a live investigation because nothing recorded what was actually
-        holding permits. A limiter that cannot say who is using it can only be
-        tuned by argument, and argument lost three times.
+        Moved to admission.run_gated in Stage 1B; kept as a method so
+        do_GET/do_POST and external tooling keep calling self._gated(...)
+        unchanged.
         """
-        # ⚠️ A CLASS PERMIT FIRST, AND IT QUEUES RATHER THAN REFUSES. A request
-        # that waits a moment nearly always finds the answer already built by
-        # the leader it was queued behind; one that is refused sends a reader an
-        # error for work that was about to be free, or makes a node drop a
-        # sighting it cannot re-send.
-        #
-        # These pools are deliberately SMALLER than MAX_REQUESTS and they
-        # overlap with it rather than replace it: MAX_REQUESTS still bounds the
-        # total, while these bound the two classes that proved able to eat the
-        # total on their own - big map answers, and camera ingest.
-        extra, wait = None, 0.0
-        if label in Handler._HEAVY_ROUTES:
-            extra, wait = Handler._HEAVY, HEAVY_WAIT_S
-        elif label in Handler._INGEST_ROUTES:
-            extra, wait = Handler._INGEST, INGEST_WAIT_S
-        if extra is not None and not extra.acquire(timeout=wait):
-            return self._too_busy()
-        try:
-            if not Handler._INFLIGHT.acquire(blocking=False):
-                return self._too_busy()
-            started = time.time()
-            with Handler._INFLIGHT_LOCK:
-                Handler._INFLIGHT_PATHS[id(self)] = (label, started)
-            try:
-                return inner()
-            finally:
-                Handler._INFLIGHT.release()
-                with Handler._INFLIGHT_LOCK:
-                    Handler._INFLIGHT_PATHS.pop(id(self), None)
-                    held = time.time() - started
-                    if held > Handler._SLOW_S:
-                        # A permit held this long is the shape of every outage
-                        # so far: something waiting on a third party, not
-                        # working.
-                        #
-                        # ⚠️ BOUNDED. The label is a route, but a route can be
-                        # unbounded - /api/tile/{z}/{x}/{y} alone is millions of
-                        # distinct strings - so an unbounded dict here is a slow
-                        # memory leak fed by exactly the traffic that causes an
-                        # outage. Keep the worst offenders; the tail is noise.
-                        Handler._SLOW_HELD[label] = round(
-                            max(held, Handler._SLOW_HELD.get(label, 0)), 1)
-                        if len(Handler._SLOW_HELD) > 40:
-                            for k, _ in sorted(Handler._SLOW_HELD.items(),
-                                               key=lambda kv: kv[1])[:20]:
-                                Handler._SLOW_HELD.pop(k, None)
-        finally:
-            if extra is not None:
-                extra.release()
+        return admission.run_gated(self, inner, label)
 
     # 🚨 THE EDGE CACHE THIS SERVER WAS DESIGNED AROUND IS NOT SWITCHED ON.
     #
@@ -1528,111 +999,34 @@ class Handler(BaseHTTPRequestHandler):
     # search, operator and per-visitor routes stay no-store and are never
     # entered here: caching a plate search would build the record of who looked
     # up what that no-store exists to prevent.
-    _MICRO: dict = {}
-    _MICRO_LOCK = threading.Lock()
-    # key -> Event, held by whichever thread is currently computing it.
-    _MICRO_FLIGHT: dict = {}
-
-    # What each cacheable route ACTUALLY reads. Anything else is noise and must
-    # not reach the cache key.
-    _MICRO_PARAMS = {
-        "/api/sightings":   ("since", "limit", "vclass", "bbox"),
-        "/api/leaderboard": ("hours",),
-        # 🚨 A PARAMETER THAT CHANGES THE ANSWER AND IS NOT LISTED HERE IS A
-        # CACHE POISONING BUG, NOT AN OMISSION. /api/nodes now returns a
-        # different set for public_cams=0, and without this line both variants
-        # share one key: whichever request missed first decides what everybody
-        # else gets for the life of the entry - the map either loses 4,800
-        # cameras it asked for or gets a megabyte it deliberately declined.
-        "/api/nodes":       ("public_cams", "box"),
-    }
+    # Moved to microcache.py in Stage 1B (step 3). Aliased here, unchanged,
+    # because callers below (and existing tools) still read Handler._MICRO*
+    # by these names, and they must alias the SAME dict/lock objects
+    # microcache.py owns - not fresh copies - or the cache/single-flight
+    # state would silently split into two disjoint pools.
+    _MICRO = microcache.MICRO
+    _MICRO_LOCK = microcache.MICRO_LOCK
+    _MICRO_FLIGHT = microcache.MICRO_FLIGHT
+    _MICRO_PARAMS = microcache.MICRO_PARAMS
 
     def _micro_key_for(self, path: str) -> str:
         """Cache key from the path plus ONLY the parameters that change the answer.
 
-        🚨 THE KEY WAS THE WHOLE QUERY STRING, WHICH HANDS ANYONE A CACHE-BUSTER.
-        `?x=1`, `?x=2`, `?x=3` … are unlimited distinct keys on a route that
-        ignores `x` entirely. Every one misses, becomes its own single-flight
-        leader, takes an admission permit and does the full query - so the one
-        defence the origin has against a crowd could be switched off from a
-        browser address bar. The map is CORS-open and meant to be embedded, so
-        an embedder that does not bucket its `since` values does this by
-        accident rather than maliciously.
-
-        ⚠️ `since` is BUCKETED here as well as in the frontend. Relying on the
-        client to round it means the protection only exists for clients that
-        cooperate, which is not a protection.
+        Moved to microcache.key_for in Stage 1B (step 3).
         """
-        from urllib.parse import parse_qs
-        names = self._MICRO_PARAMS.get(path)
-        if not names:
-            return path              # no parameters are read: one answer for all
-        q = parse_qs(urlparse(self.path).query)
-        bits = []
-        for n in names:
-            if n not in q:
-                continue
-            v = q[n][0]
-            if n == "since":
-                # Same bucket the cache TTL uses, so repeated polls land on one
-                # key instead of one per second.
-                try:
-                    v = str(int(float(v) // CACHE_BUCKET_S * CACHE_BUCKET_S))
-                except (TypeError, ValueError):
-                    continue
-            elif n in ("bbox", "box"):
-                # 🚨 AN UNBUCKETED BOX IS THE CACHE-BUSTER THIS DOCSTRING
-                # WARNS ABOUT, AND `bbox` HAS BEEN ONE ALL ALONG.
-                #
-                # A map sends a new box on every pan, to as many decimal places
-                # as Leaflet feels like. Each distinct string is its own key,
-                # its own miss, its own single-flight leader and its own
-                # admission permit - so the busiest interaction on the site was
-                # the one the micro-cache could never help with, and one person
-                # dragging the map could mint keys as fast as they could move a
-                # finger.
-                #
-                # ⚠️ SNAPPED OUTWARD, NEVER ROUNDED TO NEAREST, AND THAT IS A
-                # CORRECTNESS RULE RATHER THAN A PREFERENCE. Rounding to nearest
-                # can SHRINK the box, and then two viewports sharing a key get
-                # an answer that covers one of them - rows missing at the edge
-                # of somebody's screen, intermittently, depending on who missed
-                # the cache first. Snapping outward makes every cached answer a
-                # SUPERSET of any box in its bucket: extra rows off-screen are
-                # harmless, absent ones are not.
-                #
-                # The route snaps identically (see _snap_box) so the key and the
-                # query can never disagree about what was asked for.
-                try:
-                    v = _snap_box(v) or v
-                except ValueError:
-                    continue
-            bits.append(f"{n}={v}")
-        return path + ("?" + "&".join(bits) if bits else "")
+        return microcache.key_for(path, urlparse(self.path).query)
 
     def _micro_ttl(self) -> float:
-        cc = self._cache_control()
-        if "no-store" in cc:
-            return 0.0
-        m = re.search(r"max-age=(\d+)", cc)
-        return float(m.group(1)) if m else 0.0
+        """Moved to microcache.ttl_for in Stage 1B (step 3)."""
+        return microcache.ttl_for(self._cache_control())
 
     @staticmethod
     def _route_label(path: str) -> str:
         """A stable label for a path, so counters key on ROUTES not URLs.
 
-        /api/sighting/45746 and /api/tile/12/1096/1521.png are one route each,
-        not one label each. Keying on the raw path turns any per-id endpoint
-        into an unbounded set of dictionary keys.
+        Moved to transport.route_label in Stage 1A.
         """
-        parts = path.split("/")
-        out = []
-        for seg in parts:
-            if seg and (seg.isdigit() or seg.rstrip(".png").isdigit()):
-                out.append("{n}")
-            else:
-                out.append(seg)
-        return "/".join(out)[:48]
+        return transport.route_label(path)
 
     def do_GET(self) -> None:
         if self.path.startswith(Handler._UNGATED):
@@ -1644,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._gated(self._do_GET_inner, self._route_label(p))
 
         key = self._micro_key_for(p)
-        hit = Handler._MICRO.get(key)
+        hit = microcache.get_hit(key)
         if hit and time.time() - hit[0] < ttl:
             # Served without taking a permit at all: a memory read is not the
             # work the gate exists to bound.
@@ -1660,21 +1054,14 @@ class Handler(BaseHTTPRequestHandler):
         # So the FIRST caller computes and the rest wait for it. One hundred
         # simultaneous identical requests become one query and ninety-nine
         # waiters - which is exactly what the absent edge cache would have done.
-        with Handler._MICRO_LOCK:
-            leader = Handler._MICRO_FLIGHT.get(key)
-            if leader is None:
-                leader = threading.Event()
-                Handler._MICRO_FLIGHT[key] = leader
-                mine = True
-            else:
-                mine = False
+        mine, leader = microcache.begin_or_join(key)
 
         if not mine:
             # ⚠️ BOUNDED WAIT. If the leader dies or is unusually slow, a
             # follower must fall through and do the work itself rather than hang
             # - a cache that can wedge a request is worse than no cache.
             leader.wait(timeout=min(ttl + 5.0, 20.0))
-            hit = Handler._MICRO.get(key)
+            hit = microcache.get_hit(key)
             if hit and time.time() - hit[0] < ttl + 5.0:
                 return self._send(200, hit[1], "application/json")
             return self._gated(self._do_GET_inner, self._route_label(p))
@@ -1685,9 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
             self._micro_key = key
             return self._gated(self._do_GET_inner, self._route_label(p))
         finally:
-            with Handler._MICRO_LOCK:
-                Handler._MICRO_FLIGHT.pop(key, None)
-            leader.set()      # release the followers, success or failure
+            microcache.finish(key, leader)
+
 
     def do_POST(self) -> None:
         return self._gated(self._do_POST_inner,
@@ -1703,6 +1089,16 @@ class Handler(BaseHTTPRequestHandler):
             if not mirror.route_allowed(p):
                 return self._err(404, "not found")
 
+            # Fixed page shells, redirects and the desktop-download probe
+            # pair are pure route/HTTP concerns with no domain logic, moved
+            # to pages.py in Stage 2A. See that module's docstring for the
+            # extraction rationale; the per-route reasoning previously
+            # inline here now lives as comments on each pages.py function.
+            if p == "/":                 return pages.index(self)
+            if p == "/about":            return pages.about(self)
+            if p == "/transparency":     return pages.transparency(self)
+            if p == "/status":          return pages.status_page(self)
+            if p == "/checksums":       return pages.checksums(self)
             if p == "/":                 return self._file(PUBLIC / "index.html")
             if p == "/about":            return self._file(PUBLIC / "about.html")
             if p == "/contribute":       return self._file(PUBLIC / "contribute.html")
@@ -1773,116 +1169,32 @@ class Handler(BaseHTTPRequestHandler):
             # showing the numbers - including the bad retention one - is the
             # kind of thing this project exists to be the opposite of.
             if p in ("/support", "/donate"):
-                # ⚠️ GENERATED, SO IT CAN BE ABSENT. It is built on the server by
-                # tools/support_page.py and gitignored, so a fresh checkout has
-                # no copy. Say that rather than serving a 404, which would look
-                # like the page was taken down - on a donations page that reads
-                # as something worse than a missing file.
-                f = PUBLIC / "support.html"
-                if f.is_file():
-                    return self._file(f)
-                return self._send(
-                    503, b"<!doctype html><meta charset=utf-8>"
-                         b"<title>SparrowMap</title>"
-                         b"<p style='font:15px system-ui;padding:24px'>"
-                         b"This page is generated from the live database and has "
-                         b"not been built on this server yet.<br>"
-                         b"<a href='/'>Back to the map</a>", "text/html")
-            # 🚨 THE ROUTE SOMEBODY WITH THEIR OWN CAMERA IS SENT TO. Everything
-            # it needs is already public (enrol, aim, review); what did not exist
-            # was one page that walks somebody who owns a shop - not a terminal -
-            # from "I have a camera outside" to a running relay without them
-            # having to know which of these pages to visit in which order.
-            #
-            # ⚠️ IT WAS CALLED /business AND THE NAME WAS THE PROBLEM. People
-            # read "business" as "the paid tier" or "not for me", and asked. It
-            # describes who we imagined using it rather than what it does, so it
-            # is /IPCamera now - which is the thing they actually have.
-            #
-            # 🚨 /business STILL ANSWERS, FOREVER. It is printed in a viral reel's
-            # comments, in DMs and in older builds of the desktop app, and none of
-            # those can be edited. A rename that breaks them costs more than the
-            # rename gains. Accept the lower-case spelling too: nobody types
-            # capitals in the middle of a URL from memory.
+                return pages.support_or_donate(self)
             if p in ("/business", "/ipcamera"):
-                # ⚠️ 301 SO SEARCH MOVES THE PAGE ACROSS, BUT WITH A SHORT
-                # Cache-Control. A bare 301 is cached by browsers indefinitely
-                # and this name has already changed twice; an hour is plenty for
-                # search engines and leaves us able to change our minds without
-                # having poisoned every visitor's browser.
-                self._status = 301
-                self.send_response(301)
-                self.send_header("Location", "/IPCamera")
-                self.send_header("Cache-Control", "public, max-age=3600")
-                self.end_headers()
-                return
-            if p == "/IPCamera":        return self._file(PUBLIC / "ipcamera.html")
-            # 🚨 THE RELAY, AS ONE FILE. It imports nothing from this project
-            # and fetches its own model, so a business needs this file and three
-            # pip packages - not a git checkout. Telling somebody to clone a
-            # repository to run a background service is where most of them stop.
+                return pages.business_redirect(self)
+            if p == "/IPCamera":        return pages.ipcamera(self)
             if p == "/relay.py":
-                return self._file(PUBLIC.parent / "detect" / "relay.py")
-            # The packaged desktop app, when a build has been placed here. Kept
-            # OUT of git (it is a 60 MB derived artefact full of absolute build
-            # paths - preflight caught exactly that), so this 404s cleanly until
-            # somebody uploads one, and /IPCamera hides its button accordingly.
+                return pages.relay_py(self)
             if p == "/download":
-                # 🚨 REDIRECTED TO A GITHUB RELEASE, NOT SERVED FROM HERE.
-                # The app is 76 MB. This box is 2 vCPUs on a 13 Mbps uplink and
-                # also serves the map, so handing that file to a crowd would
-                # take the site down at exactly the moment attention arrives -
-                # which is the moment the download matters. GitHub carries it
-                # for free and is built for it.
-                #
-                # `/releases/latest/download/` is a stable URL that always
-                # points at the newest release's asset of that name, so cutting
-                # a new version needs no change here.
-                url = _download_url()
-                if not url:
-                    return self._err(404, "no desktop build is published yet")
-                self._status = 302
-                self.send_response(302)
-                self.send_header("Location", url)
-                self.send_header("Cache-Control", "public, max-age=300")
-                self.end_headers()
-                return
+                return pages.download(self)
 
             if p == "/api/download":
-                # Same-origin, so the page can ask without CORS - a HEAD from
-                # the browser straight to GitHub is opaque and would leave the
-                # button hidden even when the file is there.
-                url = _download_url()
-                return self._json({"available": bool(url), "url": url})
-            # What a node costs in compute, and how to measure your own board
-            # rather than take this page's word for it.
-            if p == "/hardware":         return self._file(PUBLIC / "hardware.html")
-            # Building a long-lens node from salvaged CCTV optics: the range
-            # geometry against this project's own two thresholds (120px of
-            # vehicle, ~60px of plate), and the assembly order. Public because
-            # the interesting half is the arithmetic, which applies to any lens
-            # somebody already owns - not just the one this was written for.
-            if p == "/build16":          return self._file(PUBLIC / "build16.html")
+                return pages.api_download(self)
+            if p == "/hardware":         return pages.hardware(self)
+            if p == "/build16":          return pages.build16(self)
             # 🚨 COMMUNITY LABELLING. Public on purpose, and safe because of
             # what it cannot do rather than who it lets in: a vote lands in a
             # SEPARATE database file with no sightings table, it never becomes a
             # label here, and every crop in a task is from a PUBLIC traffic
             # camera carrying an opaque id with no day, node, time or place.
             # See help_api.py, which exists to hold those limits in one place.
-            if p == "/help":             return self._file(PUBLIC / "help.html")
+            if p == "/help":             return community.help_page(self)
             if p == "/api/help/next":
-                import help_api
-                voter = (q.get("voter") or [""])[0]
-                return self._json(help_api.next_for(voter))
+                return community.help_next(self, q)
             if p == "/api/help/stats":
-                import help_api
-                return self._json(help_api.stats())
+                return community.help_stats(self)
             if p.startswith("/api/help/img/"):
-                import help_api
-                raw = help_api.image(p[len("/api/help/img/"):])
-                if raw is None:
-                    return self._err(404, "no such crop")
-                return self._send(200, raw, "image/jpeg")
+                return community.help_img(self, p)
             # One program, three modes. /node and /key are kept as aliases
             # because keys, QR codes and bookmarks already point at them - a
             # link a volunteer printed must not stop working because the pages
@@ -1892,60 +1204,35 @@ class Handler(BaseHTTPRequestHandler):
             # page of its own: log-by-hand was removed, so the alias lands on
             # the app rather than 404ing a printed link.
             if p in ("/app", "/node", "/key", "/contribute"):
-                return self._file(PUBLIC / "app.html")
+                return pages.app_alias(self)
             # The way back in for a camera whose browser lost its key. See
             # /api/node/whoami for what was actually happening to these people.
             if p == "/admin/bugs":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                return self._file(PUBLIC / "bugs.html")
+                return operator_bugs.admin_bugs_page(self)
             if p == "/api/bug/list":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                q = parse_qs(urlparse(self.path).query)
-                return self._json({"bugs": bugs.listing(
-                    limit=200, include_closed=(q.get("all", ["0"])[0] == "1"))})
+                return operator_bugs.bug_list(self, self.path)
             if p.startswith("/api/bug/shot/"):
-                # 🚨 OPERATOR ONLY, AND NOT IN SNAPS. A reporter's screenshot
-                # can contain their own camera key or the QR that is their key.
-                # It is served from core.BUGS, which no other route touches, so
-                # a leaked filename reaches nothing.
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                raw = bugs.shot_bytes(p.rsplit("/", 1)[-1])
-                if not raw:
-                    return self._err(404, "no screenshot")
-                return self._send(200, raw, "image/jpeg")
+                return operator_bugs.bug_shot(self, p)
 
             if p in ("/signin", "/login/camera"):
-                return self._file(PUBLIC / "signin.html")
+                return pages.signin(self)
             if p.startswith("/vendor/"):
-                # 🚨 `.name` FLATTENS THE PATH, WHICH IS THE TRAVERSAL GUARD AND
-                # ALSO WHY /vendor/images/* 404d. Leaflet asks for
-                # /vendor/images/marker-icon.png; `.name` turned that into
-                # vendor/marker-icon.png, which does not exist - so the marker
-                # on /IPCamera rendered as a broken-image box, on the one
-                # control the page asks a business to drag.
-                #
-                # The guard stays. One subdirectory is allowed and it is named
-                # literally, so nothing here can walk anywhere else: any segment
-                # that is not "images" falls through to the flat lookup, and the
-                # filename is still reduced to its own `.name`.
-                rest = [seg for seg in p[8:].split("/") if seg not in ("", ".", "..")]
-                if len(rest) == 2 and rest[0] == "images":
-                    return self._file(PUBLIC / "vendor" / "images"
-                                      / Path(rest[1]).name)
-                return self._file(PUBLIC / "vendor" / Path(p[8:]).name)
-            if p.startswith("/static/"): return self._file(PUBLIC / Path(p[8:]).name)
-            if p.startswith("/snap/"):   return self._file(SNAPS / Path(unquote(p[6:])).name)
+                # Traversal guard moved together with the file-I/O primitive
+                # to static.vendor_file_path/static.serve in Stage 1B (step 5)
+                # - see static.py's module docstring for why the guard is not
+                # safe to leave behind at this call site alone.
+                return self._file(static.vendor_file_path(PUBLIC, p[8:]))
+            if p.startswith("/static/"):
+                return self._file(static.static_file_path(PUBLIC, p[8:]))
+            if p.startswith("/snap/"):
+                return self._file(static.snap_file_path(SNAPS, unquote(p[6:])))
+
 
             # --- reviewer app (token-gated; separate from operator /review) ---
             if p == "/drive":
-                return self._file(PUBLIC / "drive.html")
+                return community.drive_page(self)
             if p == "/api/drive/reports":
-                # Live crowd reports for the driving radar. Public read, like the
-                # map. Ephemeral and unverified by construction.
-                return self._json({"reports": db.active_driver_reports()})
+                return community.drive_reports(self)
             if p == "/api/geocode":
                 # 🚨 PROXIED, NEVER CALLED FROM THE BROWSER.
                 # Tiles already go through /api/tile and road lookups happen in
@@ -2082,93 +1369,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(out)
 
             if p == "/api/places":
-                # Towns with cameras, for the zoomed-out map.
-                #
-                # 🚨 WHY THIS EXISTS: AT LOW ZOOM THE SPANS BECOME MARKERS.
-                # An 80 m watched span is 91 px at zoom 17 and under a pixel by
-                # zoom 12, so a national view renders thirty sub-pixel green
-                # smears - which read as "a thing is at this spot", the precise
-                # impression the corridor shape was drawn to prevent. A town
-                # badge says what is actually known at that zoom.
-                #
-                # It publishes LESS than the map already does: a watched span is
-                # a named stretch of a named street, and the town containing it
-                # is strictly coarser. No new exposure.
-                #
-                # ⚠️ The point is the mean of the JITTERED node positions, never
-                # the true ones, and it is only ever rendered as a town-sized
-                # badge - so it locates a town, which is what it claims.
-                places: dict = {}
-                for nd in db.nodes(active_only=True):
-                    name = (nd.get("place") or "").strip()
-                    if not name:
-                        continue          # unresolved: absent beats invented
-                    la, lo = nd.get("pub_lat"), nd.get("pub_lon")
-                    if la is None or lo is None:
-                        continue
-                    e = places.setdefault(name, {"place": name, "cameras": 0,
-                                                 "online": 0, "_la": 0.0,
-                                                 "_lo": 0.0})
-                    e["cameras"] += 1
-                    e["_la"] += la
-                    e["_lo"] += lo
-                    if nd.get("last_beat") and now() - nd["last_beat"] \
-                            < db.beat_window(nd.get("kind") or ""):
-                        e["online"] += 1
-                out = []
-                for e in places.values():
-                    c = e.pop("cameras")
-                    out.append({"place": e["place"], "cameras": c,
-                                "online": e["online"],
-                                "lat": round(e.pop("_la") / c, 4),
-                                "lon": round(e.pop("_lo") / c, 4)})
-                out.sort(key=lambda x: -x["cameras"])
-                return self._json({"places": out,
-                                   "cameras_placed": sum(x["cameras"] for x in out)})
+                # Moved to mapdata.places in Stage 2B.
+                return mapdata.places(self)
 
             if p == "/api/heat":
-                # Cumulative "everywhere a patrol has ever been confirmed",
-                # aggregated to a grid. The published record, gridded.
-                cells = db.gov_heat()
-                return self._json({"cells": cells,
-                                   "total": sum(c["n"] for c in cells)})
+                # Moved to mapdata.heat in Stage 2B.
+                return mapdata.heat(self)
 
             if p == "/api/node/me":
-                # A camera's owner reading back their OWN placement, to change
-                # it. Gated by the node's own token - the same secret that lets
-                # that camera post sightings, so this grants nothing new.
-                #
-                # 🚨 THIS IS THE ONE ENDPOINT THAT RETURNS A TRUE lat/lon.
-                # Everything else publishes the span and the jittered point,
-                # because a camera position identifies a house. The owner
-                # already knows where their own camera is, and cannot aim it
-                # without seeing it on a map - but that makes the token check
-                # the whole of the protection here, so it is checked before
-                # anything is read, and a node id alone (they are printed on
-                # the public map) gets nothing.
-                nd = db.node((q.get("id") or [""])[0])
-                if not nd:
-                    return self._err(404, "unknown camera")
-                if not nd.get("token") or not self._token_ok(nd):
-                    return self._err(401, "this camera's token is required")
-                return self._json({
-                    "id": nd["id"], "name": nd.get("name") or nd["id"],
-                    "kind": nd.get("kind") or "fixed",
-                    "lat": nd["lat"], "lon": nd["lon"],
-                    "heading": nd.get("heading") or 0,
-                    "fov": nd.get("fov") or 60,
-                    "reach_m": nd.get("reach_m") or 45,
-                    "road_name": nd.get("road_name"),
-                    "span_source": nd.get("span_source"),
-                    "span": node_mod.span_of(nd),
-                    # Whether the owner has agreed to publish that span. Sent so
-                    # the aim page can show the switch in its true position -
-                    # a consent control that renders "off" on every load is
-                    # indistinguishable from one that never saved.
-                    "publish_span": bool(nd.get("publish_span")),
-                    "sightings": nd.get("sightings") or 0,
-                    "last_seen": nd.get("last_seen"),
-                })
+                # Stage 2D1 moved the route-specific HTTP glue to node_self.py.
+                # The inline domain/consent logic stays here only until the
+                # later route-adapter/service split has a clean seam.
+                return node_self.node_me(self, q)
 
             if p == "/aim":
                 # Aiming a camera from the device that owns it. The capability
@@ -2199,29 +1411,11 @@ class Handler(BaseHTTPRequestHandler):
                 # and the page shows an operator sign-in until you are.
                 return self._file(PUBLIC / "rv-admin.html")
             if p == "/api/rv/me":
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                return self._json({"ok": True, "label": r["label"],
-                                   "scope": r["scope"],
-                                   "nodes": sorted(r["nodes"]) if r["nodes"] else []})
+                return reviewer_read.rv_me(self)
             if p == "/api/rv/queue":
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                scope = (q.get("scope") or ["pool"])[0]
-                # ?rejected=1 asks for the pile the head threw out, so the
-                # filter can be audited by the people it filters for.
-                rejected = (q.get("rejected") or ["0"])[0] in ("1", "true", "yes")
-                return self._json(review_api.queue(r, scope, rejected=rejected))
+                return reviewer_read.rv_queue(self, q)
             if p == "/api/rv/contributed":
-                # Counts only - never rows. It exists so an empty review queue
-                # can say what the camera HAS done instead of reading like a
-                # broken page to someone who just installed one.
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                return self._json(review_api.contributed(r))
+                return reviewer_read.rv_contributed(self)
 
             # --- retracted-photo shelf (pool-scope reviewer only) ------------
             # A retraction demotes the row and drops the plate, but never
@@ -2304,23 +1498,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, b, "image/jpeg",
                                   {"Cache-Control": "no-store"})
             if p == "/api/rv/progress":
-                # How close the label set is to training a detector small enough
-                # to run on a phone. Computed on the machine that holds the crops
-                # (tools/label_progress.py) and pushed here, because the mirror
-                # deliberately banks nothing and cannot count them itself.
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                try:
-                    return self._json(json.loads(
-                        (DATA / "label_progress.json").read_text(encoding="utf-8")))
-                except Exception:
-                    return self._json({"unavailable": True})
+                return reviewer_read.rv_progress(self)
 
             if p == "/api/rv/tokens":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                return self._json(review_api.list_tokens())
+                return operator_admin.rv_tokens(self)
 
             if p == "/api/health":
                 # 🚨 THIS ROUTE SAID "ok": true THROUGH A TWO-HOUR OUTAGE.
@@ -2348,7 +1529,7 @@ class Handler(BaseHTTPRequestHandler):
                 # rest of the operational surface.
                 health = {"ok": True, "version": VERSION, "ts": now()}
                 try:
-                    db.connect().execute("SELECT 1").fetchone()
+                    db.health_check()
                     health["db"] = "ok"
                 except Exception as exc:
                     health["ok"] = False
@@ -2429,7 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
                 # number. Same for Overpass: a road lookup queue that is full
                 # stalls enrolment and drive reports with nothing else moving.
                 try:
-                    health["tile_fetch_free"] = _TILE_FETCH._value
+                    health["tile_fetch_free"] = tiles._TILE_FETCH._value
                     health["tile_fetch_cap"] = 12
                 except Exception:
                     pass
@@ -2445,78 +1626,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(health, 200 if health["ok"] else 503)
 
             if p == "/api/policy":
-                # The privacy posture of this deployment, machine-readable.
-                # Anyone mirroring or auditing the network can diff it.
-                return self._json({
-                    "site": CONFIG["site_name"],
-                    "public_tiers": CONFIG["public_tiers"],
-                    "civilian_retention_days": CONFIG["civilian_retention_days"],
-                    "public_retention_days": CONFIG["public_retention_days"],
-                    "pepper_rotation_days": CONFIG["pepper_rotation_days"],
-                    "node_position_jitter_m": CONFIG["node_position_jitter_m"],
-                    "min_plate_confidence": CONFIG["min_plate_confidence"],
-                    "public_threshold": classify.PUBLIC_THRESHOLD,
-                    "private_plate_lookup": False,
-                    "stores_video": False,
-                    "stores_full_frames": not CONFIG.get("crop_only", True),
-                    # Whether this deployment is currently willing to assert
-                    # "police" about a vehicle. Published so an outside auditor
-                    # can see that the tier is gated rather than having to
-                    # infer it from an empty map. See classify.py.
-                    "publishes_public_tier": CONFIG.get("publish_public_tier", False),
-                    # 🚨 MEASURED, NOT ASSERTED.
-                    # This used to publish `classifier_validated`, whose value
-                    # was a verbatim copy of the line above - a config toggle
-                    # wearing the name of a validation that had never happened.
-                    # A transparency endpoint asserting its own validation with
-                    # nothing behind it is the most attackable thing a project
-                    # like this can ship, so it is replaced by counts anyone can
-                    # check: how many public sightings a PERSON decided, out of
-                    # how many there are. `decided_by` records that at the point
-                    # of the decision; rows predating the column read 'unknown'
-                    # and are reported separately rather than being quietly
-                    # counted as human.
-                    **db.public_decision_counts(),
-                    # Where the map opens. This is CONFIG, not a camera: it
-                    # belongs to the deployment, and it is served rather than
-                    # hardcoded in app.js so that no real coordinate has to
-                    # live in the published source. It is deliberately
-                    # town-level and says nothing a viewer cannot see anyway -
-                    # the watched spans are far more precise than this.
-                    "map_center": CONFIG["map_center"],
-                    "map_zoom": CONFIG["map_zoom"],
-                })
+                # Moved to mapdata.policy in Stage 2B.
+                return mapdata.policy(self)
 
             if p == "/api/whoami":
-                # Lets the review page tell "you are not signed in" apart from
-                # "the server is broken", without revealing anything.
-                return self._json({"operator": self._is_local(),
-                                   "auth_required": operator_auth.required()})
+                # Moved to mapdata.whoami in Stage 2B.
+                return mapdata.whoami(self)
             if p == "/api/plate":
-                # Search government plates. Only confirmed public-tier rows are
-                # scanned at all - see db.search_plate for why filtering in the
-                # redactor alone would still leak a yes/no answer about private
-                # vehicles.
-                # Searching public-tier data is NOT logged, on purpose. The
-                # target of this system is government vehicles on public roads,
-                # not the people curious enough to look them up. A search history
-                # - even a truncated one - would be a chilling record of who
-                # asked a question about a public record, which is exactly the
-                # surveillance posture SparrowMap exists to refuse. Reading public
-                # data is nobody's business but the reader's.
-                query = (q.get("q") or [""])[0]
-                rows = db.search_plate(query)
-                return self._json({"query": query,
-                                   "results": _public_rows(rows)})
+                # Moved to mapdata.plate in Stage 2B.
+                return mapdata.plate(self, q)
             if p == "/api/stats":
-                return self._json(db.stats())
+                # Moved to mapdata.stats in Stage 2B.
+                return mapdata.stats(self)
 
             if p == "/sw.js":
-                # Served at the ROOT so its scope covers /app and /node - a
-                # service worker only controls pages under its own path. Its
-                # Cache-Control is the default no-store, which is right: the
-                # browser must re-check it to pick up an updated worker.
-                return self._file(PUBLIC / "sw.js")
+                return pages.sw_js(self)
 
             if p == "/login":
                 # The one operator page that must be reachable WITHOUT being the
@@ -2536,113 +1660,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(PUBLIC / "review.html")
 
             if p == "/api/review/queue":
-                if not self._is_local():
-                    return self._err(403, "local only")
-                rows = db.connect().execute(
-                    "SELECT * FROM sightings WHERE tier='public' "
-                    "ORDER BY (reviewed IS NOT NULL), ts DESC LIMIT 200"
-                ).fetchall()
-                report_counts = db.open_report_counts()
-                out = []
-                for r in rows:
-                    d = dict(r)
-                    item = {k: d.get(k) for k in
-                            ("id", "ts", "vclass", "vclass_conf", "vclass_why",
-                             "plate_text", "snap", "node_id", "reviewed",
-                             "reviewed_at", "source", "color", "body")}
-                    # Attach any public flags so the operator sees WHAT a
-                    # stranger disputed, not just that something is disputed.
-                    item["reports"] = (db.reports_for(d["id"])
-                                       if report_counts.get(d["id"]) else [])
-                    out.append(item)
-                # Flagged-but-unreviewed rows are the ones a human most needs to
-                # look at, so lift them to the top without disturbing the rest.
-                out.sort(key=lambda x: (x["reviewed"] is not None,
-                                        0 if x["reports"] else 1))
-                # 🚨 MISSES ARE ALSO ERRORS, and only one direction was
-                # correctable. The first real patrol unit this network saw sat
-                # in the private tier because a gate read a field nothing
-                # populated - a bug, not a decision - and nothing surfaced it.
-                # These are private sightings the model DID think were police,
-                # offered for promotion. Bounded to the recent window: this is
-                # a review queue, not a second map.
-                missed = []
-                try:
-                    from detect import bank
-                    day = now() - 86400 * 3
-                    rows2 = db.connect().execute(
-                        "SELECT * FROM sightings WHERE tier='private' AND ts > ? "
-                        "AND reviewed IS NULL ORDER BY ts DESC LIMIT 400",
-                        (day,)).fetchall()
-                    from detect import head as _head
-                    hthr = _head.threshold() if _head.available() else None
-                    for r in rows2:
-                        # One indexed column, one file read - no scanning.
-                        if not r["bank_ref"]:
-                            continue
-                        j = bank.sidecar(r["bank_ref"])
-                        if not j:
-                            continue
-                        meta = json.loads(j.read_text(encoding="utf-8"))
-                        clip = meta.get("clip") or {}
-                        # The trained head decides when it has looked at the
-                        # crop; CLIP's raw argmax only gates the ones it never
-                        # saw. This matters most for PHONE crops: a phone cannot
-                        # run the head, so classify_worker scores them here later
-                        # and records `head_conf`. CLIP's argmax alone calls ~13%
-                        # of ordinary traffic police, so gating on it floods the
-                        # queue with exactly the false positives the head exists
-                        # to reject - honour the head whenever there is one.
-                        hc = clip.get("head_conf")
-                        if hc is not None and hthr is not None:
-                            if hc < hthr:
-                                continue
-                        elif (clip.get("vclass") != "police"
-                                or (clip.get("conf") or 0) < 0.50
-                                or (clip.get("margin") or 0) < 0.20):
-                            continue
-                        d = dict(r)
-                        missed.append({
-                            **{k: d.get(k) for k in
-                               ("id", "ts", "vclass", "snap", "node_id")},
-                            # Sort and show the head's confidence when it decided,
-                            # so the strongest head calls float to the top rather
-                            # than being ordered by a CLIP score the head overrode.
-                            "clip_conf": hc if (hc is not None and hthr is not None)
-                            else clip.get("conf"),
-                            "clip_margin": clip.get("margin"),
-                            "by_head": hc is not None and hthr is not None,
-                            "label": meta.get("label"),
-                        })
-                    missed.sort(key=lambda m: -(m.get("clip_conf") or 0))
-                    missed = missed[:40]
-                except Exception:
-                    traceback.print_exc()
-                # ⚠️ THE HEADER MUST COUNT EVERYTHING THAT NEEDS A DECISION.
-                # `pending` counts only unreviewed PUBLISHED sightings, so the
-                # page read "0 to review" while three possibly-missed cards sat
-                # below it with live buttons. A counter that ignores half the
-                # work is a counter that teaches you to ignore it.
-                return self._json({"queue": out, "missed": missed,
-                                   "missed_pending": len(missed),
-                                   **db.review_stats()})
+                return reviewer_read.review_queue(self)
 
             if p == "/api/pending":
-                # 🚨 "SOMETHING HERE WANTS A HUMAN", AND NOTHING MORE.
-                #
-                # A coarse cell and a count, for sightings the classifier called
-                # police or government and nobody has reviewed. It exists so the
-                # map can show that a possible patrol car is waiting on a person
-                # WITHOUT asserting one is there - which is the same
-                # propose/human-decide split the rest of the project runs on,
-                # made visible instead of hidden in a queue.
-                #
-                # ⚠️ The coarsening happens in db.pending_areas, not here and
-                # certainly not in the browser: an unreviewed claim's exact
-                # position must never leave the database at all.
-                return self._json({"cells": db.pending_areas(),
-                                   "cell_deg": db.PENDING_CELL,
-                                   "window_s": db.PENDING_WINDOW_S})
+                # Moved to mapdata.pending in Stage 2B.
+                return mapdata.pending(self)
 
             if p.startswith("/api/tile/"):
                 return self._tile(p)
@@ -2881,74 +1903,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(out)
 
             if p == "/api/sightings":
-                since = float(q.get("since", [now() - 3600])[0])
-                limit = int(q.get("limit", [400])[0])
-                vclass = q.get("vclass", ["all"])[0]
-                bbox = None
-                if "bbox" in q:
-                    try:
-                        bbox = tuple(float(x) for x in q["bbox"][0].split(","))
-                    except ValueError:
-                        bbox = None
-                rows = db.recent_sightings(since, limit, vclass, bbox)
-                return self._json(_public_rows(rows))
+                # Moved to mapdata.sightings in Stage 2B.
+                return mapdata.sightings(self, q)
 
             if p.startswith("/api/sighting/"):
-                r = db.sighting(int(p.rsplit("/", 1)[1]))
-                if not r:
-                    return self._err(404, "no such sighting")
-                # 🚨 NO PICTURE, NO PUBLICATION - HERE TOO.
-                # recent_sightings withholds a public row with no photograph
-                # from the feed, and a rule applied to one representation is
-                # bypassed by the other: ids are sequential and printed beside
-                # every sighting, so without this the withheld claim is still
-                # one URL away. Same lesson as the span consent gate and the
-                # /snap file that outlived its row.
-                if r.get("tier") == "public" and not r.get("snap"):
-                    return self._err(404, "no such sighting")
-                # 🚨 READING IS NOT AUDITED, DELIBERATELY.
-                # This used to write a row saying that somebody looked at this
-                # sighting. The whole project refuses to keep a record of which
-                # vehicle went where; keeping a record of which reader looked
-                # at which vehicle is the same dossier pointed at the public.
-                # And it is written on the way IN, so hiding the endpoint would
-                # not help - the disk is what gets copied or compelled.
-                # The audit log's purpose is to show what the OPERATOR did to
-                # the record, and operator actions are still audited below.
-                return self._json(_public_rows([r])[0])
+                # Moved to mapdata.sighting in Stage 2B.
+                return mapdata.sighting(self, p)
 
             if p.startswith("/api/track/"):
-                h = _resolve_hash(unquote(p.rsplit("/", 1)[1]))
-                rows = db.track_for(h)
-                if not rows:
-                    return self._json([])
-                # 🚨 NOT AUDITED - and this one was the worst of the two.
-                # Its target was the PLATE TEXT itself, so following a
-                # government vehicle's trail wrote "this reader looked up this
-                # plate" to disk. Someone checking on a patrol car that
-                # followed them home should leave no trace here.
-                out = _public_rows(rows)
-                # ⚠️ COMPUTED ONCE. This sat inside the loop and takes the WHOLE
-                # row set as its argument, so it was recomputed identically for
-                # every row - O(n squared) for a value that cannot vary between
-                # them. ~287ms at the 500-row cap, on a route that is no-store
-                # and therefore never absorbed by the cache. Latent only because
-                # the largest plate group is currently one row; public rows are
-                # served with their real plate_hash, so no alias is needed to
-                # drive the group size up.
-                score = classify.patrol_score(rows)
-                for r in out:
-                    r["patrol_score"] = score
-                return self._json(out)
+                # Moved to mapdata.track in Stage 2B.
+                return mapdata.track(self, p)
 
             if p == "/api/leaderboard":
-                hours = int(q.get("hours", [24])[0])
-                return self._json(db.leaderboard(hours))
+                # Moved to mapdata.leaderboard in Stage 2B.
+                return mapdata.leaderboard(self, q)
 
             if p == "/api/audit":
-                rows = db.connect().execute(
-                    "SELECT ts, action, target, ip FROM audit ORDER BY ts DESC LIMIT 200"
-                ).fetchall()
+                rows = db.recent_audit(200)
                 # The operator's decisions on the map - confirms, retractions,
                 # public flags. Searches are never in here (they are not logged
                 # at all). The IP is truncated so even this decision log cannot
@@ -2974,35 +1945,20 @@ class Handler(BaseHTTPRequestHandler):
     # State-changing routes authenticated by the operator COOKIE. A browser
     # attaches that cookie to any cross-site request automatically, so these need
     # CSRF defence beyond the cookie itself.
-    _CSRF_SENSITIVE = {"/api/review", "/api/review/bulk", "/api/review/edit",
-                       "/api/purge", "/api/key/rotate", "/api/operator/login",
-                       "/api/operator/logout", "/api/report",
-                       "/api/rv/login", "/api/rv/logout", "/api/rv/verdict",
-                       "/api/rv/tokens/new", "/api/rv/tokens/revoke",
-                       "/api/rv/my-token", "/api/drive/report", "/api/drive/vote",
-                       "/api/rv/retracted/delete", "/api/rv/held/fix",
-                       "/api/node/span", "/api/node/key"}
+    #
+    # Moved to response_policy.CSRF_SENSITIVE in Stage 1B (step 4). Aliased
+    # here, unchanged, because _do_POST_inner below (application/route logic,
+    # not in scope for this stage) reads _CSRF_SENSITIVE by this name.
+    _CSRF_SENSITIVE = response_policy.CSRF_SENSITIVE
 
     def _do_POST_inner(self) -> None:
         try:
             p = urlparse(self.path).path
 
-            # 🚨 CSRF: require a real application/json Content-Type on cookie-
-            # authed routes. `_body` parses JSON regardless of type, so without
-            # this a cross-site <form> POSTing text/plain that HAPPENS to be
-            # valid JSON would be accepted, and the browser would attach the
-            # operator cookie - letting any page the operator visits retract a
-            # sighting or purge data. application/json is NOT a form-reachable
-            # "simple" content type: a cross-origin fetch sending it triggers a
-            # CORS preflight, which this server never approves for these paths.
-            # SameSite=Strict already blocks the cookie cross-site; this is the
-            # second lock, and the one that still holds when auth is off and
-            # operator power comes from a LAN/loopback source IP instead.
-            if p in self._CSRF_SENSITIVE:
-                ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-                if ctype != "application/json":
-                    return self._err(415, "state-changing requests must be "
-                                          "application/json")
+            # CSRF check moved to response_policy.csrf_ok in Stage 1B (step 4).
+            if not response_policy.csrf_ok(p, self.headers.get("Content-Type")):
+                return self._err(415, "state-changing requests must be "
+                                      "application/json")
 
             if p == "/api/enroll":
                 b = self._body()
@@ -3134,13 +2090,12 @@ class Handler(BaseHTTPRequestHandler):
                 # government-vehicle review pen. A false RF guess costs a review
                 # click, never a wrong dot on the public map.
                 b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if nd["status"] != "active":
-                    return self._err(403, f"node is {nd['status']}")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
+                authenticated = node_auth.authenticate_active_node_bearer(
+                    str(b.get("node_id") or ""), self.headers.get("Authorization")
+                )
+                if not authenticated.allowed:
+                    return self._err(authenticated.status_code, authenticated.error)
+                nd = authenticated.node
                 if not rate_ok(p, self.client_ip, who=nd["id"]):
                     return self._err(429, "this node is posting too fast")
                 cands = b.get("candidates") or []
@@ -3156,31 +2111,16 @@ class Handler(BaseHTTPRequestHandler):
             # label_votes.db and nowhere else - not to sightings, not to the
             # bank. Consensus and the decision happen later, on his machine.
             if p == "/api/help/vote":
-                import help_api
-                b = self._body()
-                return self._json(help_api.record(
-                    str(b.get("item") or ""), str(b.get("label") or ""),
-                    str(b.get("voter") or "")))
+                return community.help_vote(self)
+
+            if p == "/api/heartbeat":
+                return node_lifecycle.heartbeat(self)
+
+            if p == "/api/heartbeat/bulk":
+                return node_lifecycle.heartbeat_bulk(self)
 
             if p == "/api/node/progress":
-                # How far setup got, so "never started" stops being one bucket.
-                # Same token as the heartbeat: this says nothing a heartbeat
-                # does not already say about who is talking, and it is refused
-                # outright without it.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
-                plat = str(b.get("platform") or "")[:12].lower()
-                if plat not in ("ios", "android", "desktop", "other", ""):
-                    plat = "other"
-                db.set_setup_stage(nd["id"], str(b.get("stage") or "")[:24],
-                                   plat or None)
-                # Always 200: a camera must never treat a telemetry failure as
-                # a setup failure, and there is nothing useful to tell it.
-                return self._json({"ok": True})
+                return node_lifecycle.node_progress(self)
 
             if p == "/api/node/label":
                 # 🚨 THE CAMERA OPERATOR'S VERDICT, ARRIVING FROM THE CAMERA.
@@ -3220,7 +2160,7 @@ class Handler(BaseHTTPRequestHandler):
                 row = db.sighting(sid)
                 if not row:
                     return self._err(404, "no such sighting")
-                if (row.get("node_id") or "") != nd["id"]:
+                if not ownership.sighting_belongs_to_node(row, nd):
                     return self._err(403, "not your camera's sighting")
                 label = str(b.get("label") or "")
                 undo = str(b.get("undo") or "")
@@ -3303,222 +2243,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(out)
 
             if p == "/api/bug":
-                # 🚨 UNAUTHENTICATED ON PURPOSE, AND BOUNDED BECAUSE OF IT.
-                # The people most likely to report a bug are the ones who
-                # cannot get in - a volunteer whose key is gone, somebody whose
-                # browser will not install the app. Requiring a login to report
-                # "I cannot log in" is how a report never arrives.
-                #
-                # The cost of that is an open upload on a 3 GB box, so: a rate
-                # bucket, a size cap checked before anything is decoded, a
-                # re-encode that strips EXIF, a ceiling on how many reports can
-                # exist per hour, and a TTL sweep. See bugs.py.
-                if not rate_ok(p, self.client_ip):
-                    return self._err(429, "too many reports right now - "
-                                          "please try again in a few minutes")
-                b = self._body()
-                out = bugs.save(str(b.get("desc") or ""),
-                                str(b.get("shot") or ""),
-                                page=str(b.get("page") or ""),
-                                ua=(self.headers.get("User-Agent") or ""))
-                if out.get("error"):
-                    return self._err(400, out["error"])
-                # Tell the operator it exists. The alert carries an ID and
-                # NOTHING ELSE - the default alert repo is the public one.
-                try:
-                    import subprocess
-                    subprocess.Popen(
-                        [sys.executable, str(DATA.parent / "tools" / "bug_alert.py"),
-                         out["id"]],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass          # a failed alert must never lose the report
-                return self._json({"ok": True, "id": out["id"]})
+                return operator_bugs.bug_report(self)
 
             if p == "/api/bug/close":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                b = self._body()
-                return self._json({"ok": bugs.close(str(b.get("id") or ""))})
+                return operator_bugs.bug_close(self)
 
             if p == "/api/bug/delete":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                b = self._body()
-                return self._json({"ok": bugs.delete(str(b.get("id") or ""))})
+                return operator_bugs.bug_delete(self)
 
             if p == "/api/node/whoami":
-                # 🚨 "MY CAMERA GOT DELETED." NOTHING WAS EVER DELETED.
-                #
-                # The camera app keeps its key in localStorage, and the boot
-                # line was `go(node && node.token ? 'watch' : 'setup')` - so a
-                # browser that lost that entry dropped the owner straight into
-                # SETUP, which enrols a BRAND NEW camera. Their real node still
-                # existed, still held its history and its watched road, and was
-                # now unreachable. Measured on the live box: 160 of 262 nodes
-                # have zero sightings AND zero heartbeats, and one street in
-                # Somerville is enrolled six times.
-                #
-                # Storage is lost routinely and through no fault of theirs:
-                # Safari evicts script-writable storage after 7 days for a site
-                # that is not installed to the home screen, in-app browsers keep
-                # their own throwaway copy, and clearing site data does it too.
-                #
-                # So there has to be a way back IN, and this is what a pasted
-                # key is checked against before the app adopts it. Telling
-                # somebody "that key is not valid" is only possible if something
-                # can say so; without it a mistyped key fails silently later,
-                # somewhere confusing.
-                #
-                # ⚠️ NOT AN ORACLE. It answers only to the node's OWN token, so
-                # it discloses nothing that the holder of the key does not
-                # already have, and it returns the node's own public-facing
-                # details rather than anything new.
-                #
-                # ⚠️ THE TOKEN ARRIVES IN `Authorization`, NOT THE BODY, because
-                # that is the only place _token_ok looks. Worth stating: this
-                # route takes an id in the body and a credential in a header,
-                # and the first version of /signin put both in the body - so it
-                # rejected every valid key while looking entirely correct.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "no camera with that id")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "that key does not match this camera")
-                return self._json({
-                    "id": nd["id"], "name": nd.get("name") or nd["id"],
-                    "status": nd.get("status"),
-                    "kind": nd.get("kind"),
-                    "sightings": nd.get("sightings") or 0,
-                    "last_seen": nd.get("last_seen"),
-                })
+                return node_self.node_whoami(self)
 
             if p == "/api/node/parked":
-                # 🚨 THE DRIVE CLIENT CANNOT LEARN THIS ANY OTHER WAY.
-                #
-                # A camera node scores its own crop, so _ingest can answer
-                # "parked: true" in the POST response and the owner is asked
-                # immediately. A PHONE cannot: there is no head in a browser, so
-                # its crop goes to the inbox, box_puller pulls it home, the head
-                # scores it there, and box_publish moves the head-positives into
-                # the pen back here - minutes later, long after the response the
-                # phone was reading.
-                #
-                # So the drive popup built on `parked` could never fire for the
-                # one client that needed it most. This is the missing half: the
-                # phone names the sightings it posted and asks which of them
-                # have since become government candidates.
-                #
-                # Deliberately CLIENT-NAMED ids rather than "everything recent
-                # for this node". The phone already knows what it sent and is
-                # holding the crop to show; a route that volunteers a node's
-                # recent history would be a second, chattier read path over the
-                # same rows for no benefit.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
-                try:
-                    ids = [int(x) for x in (b.get("ids") or [])][:40]
-                except (TypeError, ValueError):
-                    return self._err(400, "bad ids")
-                out = []
-                for sid in ids:
-                    row = db.sighting(sid)
-                    # 🚨 IT MUST BE THEIR OWN. Ids are sequential and printed
-                    # beside every sighting on the public map, so without this
-                    # any camera could enumerate whether ANY id is a government
-                    # candidate - which is a government-vehicle oracle over the
-                    # whole database, from one enrolled phone. Same rule
-                    # /api/node/label already enforces, for the same reason.
-                    if not row or (row.get("node_id") or "") != nd["id"]:
-                        continue
-                    meta = review_api._pen_meta(sid)
-                    if not meta:
-                        continue
-                    out.append({"id": sid,
-                                "vclass": meta.get("vclass") or row.get("vclass"),
-                                "score": meta.get("score")})
-                return self._json({"parked": out})
+                return node_self.node_parked(self)
 
             if p == "/api/node/key":
-                # 🚨 A CAMERA REGISTERS ITS OWN SIGNING KEY, WITHOUT RE-ENROLLING.
-                #
-                # Enrolment only happens when somebody SAVES a placement, so
-                # every camera already running would have gone on unsigned for
-                # ever - the fix would have shipped and changed nothing, which
-                # is how pubkey came to be NULL on 158 nodes in the first place.
-                # The detector calls this once at startup instead.
-                #
-                # Deliberately NOT /api/enroll: that call carries a position,
-                # and a position is what makes nodes.enroll split a node past
-                # MOVED_THRESHOLD_M. Registering a key must never be able to
-                # mint a camera. Nothing here touches placement.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
-                pub = str(b.get("pubkey") or "").strip()
-                if not pub:
-                    return self._err(400, "missing pubkey")
-                # Verify it is a usable ed25519 key BEFORE storing it. Storing
-                # an unusable one is the worst outcome available here: _ingest
-                # would then demand a signature it can never verify and 401
-                # every sighting from a camera that is working perfectly.
-                try:
-                    import base64 as _b64
-                    from cryptography.hazmat.primitives.asymmetric.ed25519 \
-                        import Ed25519PublicKey
-                    Ed25519PublicKey.from_public_bytes(_b64.b64decode(pub))
-                except Exception:
-                    return self._err(400, "that is not an ed25519 public key")
-                conn = db.connect()
-                conn.execute("UPDATE nodes SET pubkey=? WHERE id=?",
-                             (pub, nd["id"]))
-                conn.commit()
-                db.audit("node_key", nd["id"], actor=f"camera {nd['id']}",
-                         ip=privacy.audit_ip(self.client_ip))
-                return self._json({"ok": True, "id": nd["id"]})
+                return node_credentials.node_key(self)
 
             if p == "/api/node/span":
-                # The camera owner deciding whether the stretch of road their
-                # camera watches appears on the public map. Same node-token auth
-                # as /api/node/label, and for the same reason: this publishes
-                # something, so a tokenless node is not good enough.
-                #
-                # Only ever about THEIR node. There is no id to guess at here -
-                # the node is the one the token belongs to.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
-                on = bool(b.get("publish"))
-                db.set_publish_span(nd["id"], on)
-                db.audit("node_span:" + ("publish" if on else "hide"),
-                         nd["id"], actor=f"camera {nd['id']}",
-                         ip=privacy.audit_ip(self.client_ip))
-                # Report whether there is actually a span to publish, so the
-                # camera page can say "on, but this camera has no road yet"
-                # instead of showing a switch that appears to do nothing.
-                return self._json({"ok": True, "publish": on,
-                                   "has_span": node_mod.span_of(db.node(nd["id"]))
-                                   is not None,
-                                   "road_name": (db.node(nd["id"]) or {}).get("road_name")})
+                return node_self.node_span(self)
 
             if p == "/api/node/confirm":
                 # 🚨 THE OPERATOR SAYING "YES, THAT WAS A PATROL CAR" ABOUT A
@@ -3681,50 +2424,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "dropped": len(rows) - kept})
 
             if p == "/api/sighting/fullres":
-                # 🚨 THE ANSWER TO want_full. The camera hands back the picture
-                # it still holds for a sighting the hub has already PUBLISHED.
-                #
-                # ⚠️ EVERY CONDITION HERE IS A GUARD, NOT A FORMALITY:
-                #   - the node's own token, so nobody else can attach a picture;
-                #   - the sighting must BELONG to that node, so a camera cannot
-                #     overwrite another camera's evidence;
-                #   - the row must already be tier='public', so this can never
-                #     put a legible plate on a private-tier vehicle - which is
-                #     the entire promise the 200px cap exists to keep.
-                b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
-                try:
-                    sid = int(b.get("id") or 0)
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                row = db.sighting(sid)
-                if not row or row.get("node_id") != nd["id"]:
-                    return self._err(404, "not this camera's sighting")
-                if row.get("tier") != "public":
-                    return self._err(403, "not published; the small crop stands")
-                if row.get("snap_full"):
-                    return self._json({"ok": True, "already": True})
-                if not b.get("snap_b64"):
-                    return self._err(400, "no image")
-                try:
-                    full = snapshot.decode_bytes(str(b["snap_b64"]))
-                    name = review_api.attach_confirmed_photo(
-                        sid, row, full, ts=row.get("ts"),
-                        node_name=nd.get("name") or "a camera",
-                        vclass=("police" if row.get("vclass") == "police"
-                                else "gov"))
-                    if name:
-                        db.mark_fullres(sid, name)
-                    return self._json({"ok": bool(name), "snap": name})
-                except Exception as exc:
-                    # ⚠️ The vehicle is on the map either way. A rejected
-                    # picture must never un-publish it.
-                    print(f"[fullres] {sid}: {exc}")
-                    return self._err(400, "image rejected")
+                return node_credentials.sighting_fullres(self)
 
             if p == "/api/heartbeat/bulk":
                 # 🚨 ONE PROCESS, THOUSANDS OF CAMERAS, ONE REQUEST.
@@ -3863,13 +2563,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(429, "a lot of radar hits right now - "
                                           "the detector can retry shortly")
                 b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
+                authenticated = node_auth.authenticate_required_node_bearer(
+                    str(b.get("node_id") or ""), self.headers.get("Authorization")
+                )
+                if not authenticated.allowed:
+                    return self._err(authenticated.status_code, authenticated.error)
+                nd = authenticated.node
                 band = str(b.get("band") or "").strip().lower()
                 if band not in RADAR_BAND_BASE:
                     return self._err(400, "band must be one of ka, k, x, laser")
@@ -3898,13 +2597,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(429, "a lot of sensor events right now - "
                                           "retry shortly")
                 b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
+                authenticated = node_auth.authenticate_required_node_bearer(
+                    str(b.get("node_id") or ""), self.headers.get("Authorization")
+                )
+                if not authenticated.allowed:
+                    return self._err(authenticated.status_code, authenticated.error)
+                nd = authenticated.node
                 kind = str(b.get("kind") or "").strip().lower()
                 if kind not in LIVE_KINDS:
                     return self._err(400, "kind must be one of "
@@ -4085,13 +2783,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(429, "a lot of aircraft pushes right now - "
                                           "retry shortly")
                 b = self._body()
-                nd = db.node(str(b.get("node_id") or ""))
-                if not nd:
-                    return self._err(404, "unknown node")
-                if not nd.get("token"):
-                    return self._err(401, "this node has no token; re-enroll it")
-                if not self._token_ok(nd):
-                    return self._err(401, "bad node token")
+                authenticated = node_auth.authenticate_required_node_bearer(
+                    str(b.get("node_id") or ""), self.headers.get("Authorization")
+                )
+                if not authenticated.allowed:
+                    return self._err(authenticated.status_code, authenticated.error)
+                nd = authenticated.node
                 craft = b.get("aircraft")
                 if not isinstance(craft, list):
                     return self._err(400, "aircraft must be a list")
@@ -4254,170 +2951,34 @@ class Handler(BaseHTTPRequestHandler):
                                    **db.review_stats()})
 
             if p == "/api/key/qr":
-                # 🚨 THE TOKEN ARRIVES IN A POST BODY, NEVER A QUERY STRING.
-                # A key in a URL is written to every proxy log between here and
-                # the browser, kept in history, and leaked in the Referer of
-                # any outbound link. The same reason operator_auth refuses to
-                # read one from the query.
-                b = self._body()
-                nid, tok = str(b.get("node_id") or ""), str(b.get("token") or "")
-                nd = db.node(nid) if nid else None
-                if not nd or not nd.get("token") or not tok:
-                    return self._err(404, "unknown camera")
-                import secrets as _s
-                if not _s.compare_digest(str(nd["token"]), tok):
-                    return self._err(403, "wrong key")
-                origin = b.get("origin") or ""
-                if not origin.startswith(("http://", "https://")):
-                    return self._err(400, "bad origin")
-                # The key lives in the FRAGMENT. Browsers never transmit it, so
-                # scanning this code sends nothing to any server - the
-                # capability travels in the picture and stops at the device.
-                url = f"{origin.rstrip('/')}/node#k={nid}.{tok}"
-                try:
-                    return self._send(200, qr.png(url), "image/png")
-                except ValueError as exc:
-                    return self._err(400, str(exc))
+                return node_credentials.key_qr(self)
 
             if p == "/api/key/rotate":
-                # Losing a key must be recoverable. Rotating mints a new token
-                # and every copy of the old QR stops working at once.
-                b = self._body()
-                nid, tok = str(b.get("node_id") or ""), str(b.get("token") or "")
-                nd = db.node(nid) if nid else None
-                if not nd or not nd.get("token"):
-                    return self._err(404, "unknown camera")
-                import secrets as _s
-                if not (_s.compare_digest(str(nd["token"]), tok) or self._is_local()):
-                    return self._err(403, "wrong key")
-                new = _s.token_urlsafe(24)
-                c = db.connect()
-                c.execute("UPDATE nodes SET token=? WHERE id=?", (new, nid))
-                c.commit()
-                return self._json({"ok": True, "node_id": nid, "token": new})
+                return node_credentials.key_rotate(self)
 
             if p == "/api/operator/login":
-                if not operator_auth.required():
-                    return self._json({"ok": True, "note": "auth is off"})
-                val = operator_auth.login(self._body())
-                if not val:
-                    return self._err(401, "wrong token")
-                self._send(200, json.dumps({"ok": True}).encode(),
-                           "application/json",
-                           {"Set-Cookie": operator_auth.cookie_header(val)})
-                return
+                return operator_admin.operator_login(self)
             if p == "/api/operator/logout":
-                self._send(200, json.dumps({"ok": True}).encode(),
-                           "application/json",
-                           {"Set-Cookie": operator_auth.cookie_header("", clear=True)})
-                return
+                return operator_admin.operator_logout(self)
 
             # --- reviewer session + verdicts (token-gated) --------------------
             if p == "/api/rv/login":
-                val = review_auth.login_value((self._body() or {}).get("token", ""))
-                if not val:
-                    # 🚨 NO SLEEP INSIDE AN ADMISSION PERMIT.
-                    # This slept 0.3s while holding one of the concurrency
-                    # permits, on an unauthenticated route with no rate budget -
-                    # so a few hundred empty POSTs could occupy the gate and
-                    # 503 the site. _body() returns {} on Content-Length 0, so
-                    # an EMPTY post reached the sleep.
-                    #
-                    # The delay is also unnecessary here. It exists to slow
-                    # blind guessing, and a reviewer token is 192 bits of
-                    # randomness: an attacker guessing at any rate a network
-                    # allows will not finish before the heat death of the sun.
-                    # Rate-limiting the ROUTE would be worse than useless -
-                    # Caddy strips XFF so the bucket is network-wide, and one
-                    # attacker would lock every reviewer out.
-                    return self._err(401, "invalid token")
-                self._send(200, json.dumps({"ok": True}).encode(),
-                           "application/json",
-                           {"Set-Cookie": review_auth.cookie_header(val)})
-                return
+                return reviewer_read.rv_login(self)
             if p == "/api/rv/logout":
-                self._send(200, json.dumps({"ok": True}).encode(),
-                           "application/json",
-                           {"Set-Cookie": review_auth.cookie_header("", clear=True)})
-                return
+                return reviewer_read.rv_logout(self)
             if p == "/api/rv/retracted/delete":
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                b = self._body()
-                try:
-                    sid = int(b.get("id"))
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                return self._json(review_api.delete_retracted_photo(
-                    r, sid, privacy.audit_ip(self.client_ip)))
+                return reviewer_mutation.rv_retracted_delete(self)
 
             if p == "/api/rv/held/fix":
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                b = self._body()
-                try:
-                    sid = int(b.get("id"))
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                crop = b.get("crop")
-                return self._json(review_api.fix_photo(
-                    r, sid, b.get("action") or "",
-                    crop if isinstance(crop, dict) else None,
-                    privacy.audit_ip(self.client_ip)))
+                return reviewer_mutation.rv_held_fix(self)
 
             if p == "/api/rv/verdict":
-                r = review_auth.identify(self.headers)
-                if not r:
-                    return self._err(401, "not signed in")
-                b = self._body()
-                try:
-                    sid = int(b.get("id"))
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                # The tighten-only rectangle, if the reviewer drew one. Passed
-                # through as-is: review_api.tighten clamps every value into
-                # [0,1] and refuses anything degenerate, so validating the
-                # shape twice in two places would just be two places to get it
-                # wrong. A non-dict is dropped here rather than reaching it.
-                box = b.get("crop")
-                return self._json(review_api.verdict(
-                    r, sid, b.get("verdict"), privacy.audit_ip(self.client_ip),
-                    crop_box=box if isinstance(box, dict) else None))
+                return reviewer_mutation.rv_verdict(self)
 
             if p == "/api/drive/report":
-                # 🚨 CLOSED 2026-08-15. His call, and the right one.
-                #
-                # It let anybody POST "there is a patrol at this coordinate" -
-                # no camera, no photograph, no review, no identity. Every other
-                # route onto this map puts a human in front of a picture before
-                # a police marker appears; this one asserted a vehicle from a
-                # pair of numbers, and the numbers were supplied by the caller.
-                # Sending someone a false "police ahead", or clearing a street
-                # by covering it in fake ones, cost one request.
-                #
-                # ⚠️ THE BUTTON WAS NOT THE VULNERABILITY. drive.html was this
-                # route's only caller, so deleting the button and leaving the
-                # route open would have removed the feature from honest users
-                # and left it working for everybody else - which is worse than
-                # doing nothing, because it looks fixed.
-                #
-                # Reads and votes stay open so reports already on the layer age
-                # out normally. Re-enabling means restoring the body below; the
-                # db helper (add_driver_report) is untouched.
-                return self._err(410, "reporting a patrol by tapping has been "
-                                      "withdrawn - sightings come from cameras")
+                return community.drive_report(self)
             if p == "/api/drive/vote":
-                if not rate_ok(p, self.client_ip):
-                    return self._err(429, "voting too fast")
-                b = self._body()
-                try:
-                    rid = int(b.get("id"))
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                ok = db.vote_driver_report(rid, bool(b.get("still_there")))
-                return self._json({"ok": ok})
+                return community.drive_vote(self, p)
 
             if p == "/api/rv/my-token":
                 # A camera fetches its OWN reviewer token, proving ownership with
@@ -4472,23 +3033,9 @@ class Handler(BaseHTTPRequestHandler):
 
             # --- token administration (operator only) -------------------------
             if p == "/api/rv/tokens/new":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                b = self._body()
-                nodes = b.get("nodes") if isinstance(b.get("nodes"), list) else []
-                return self._json(review_api.issue_token(
-                    str(b.get("label") or "reviewer")[:60],
-                    "own" if b.get("scope") == "own" else "pool",
-                    [str(n)[:32] for n in nodes]))
+                return operator_admin.rv_tokens_new(self)
             if p == "/api/rv/tokens/revoke":
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                b = self._body()
-                try:
-                    tid = int(b.get("id"))
-                except (TypeError, ValueError):
-                    return self._err(400, "bad id")
-                return self._json(review_api.revoke_token(tid))
+                return operator_admin.rv_tokens_revoke(self)
             if p == "/api/review/bulk":
                 # Clearing the possibly-missed queue in one action, after a
                 # human has scrolled it and promoted the government vehicles.
@@ -4545,14 +3092,7 @@ class Handler(BaseHTTPRequestHandler):
                                    **db.review_stats()})
 
             if p == "/api/purge":
-                # Deleting rows is an operator action. It was reachable by
-                # anyone: it only removes ALREADY-EXPIRED data, so the damage
-                # was bounded, but an unauthenticated state change on a public
-                # box is a thing an attacker builds on, not a thing to leave.
-                if not self._is_local():
-                    return self._err(403, "operator only")
-                rep = privacy.purge_expired(db.connect())
-                return self._json(rep)
+                return operator_admin.purge(self)
 
             return self._err(404, "no such route")
         except Exception:
@@ -4582,446 +3122,80 @@ class Handler(BaseHTTPRequestHandler):
         ever crosses this boundary, which is the architectural reason SparrowMap
         is not a wiretap: there is no stream to intercept, subpoena or leak.
         """
-        nid = ev.get("node_id")
-        nd = db.node(nid) if nid else None
-        if not nd:
-            return self._err(404, "unknown node")
-        if nd["status"] != "active":
-            return self._err(403, f"node is {nd['status']}")
+        # This preserves nodes.verify_event before bearer verification for keyed
+        # nodes, after unknown and inactive node checks.
+        authenticated = node_auth.authenticate_node_submission(
+            ev, self.headers.get("Authorization")
+        )
+        if not authenticated.allowed:
+            return self._err(authenticated.status_code, authenticated.error)
+        nid = authenticated.node_id
+        nd = authenticated.node
+        sig_ok = authenticated.signature_verified
 
-        # --- authenticate the node ---------------------------------------
-        sig_ok = node_mod.verify_event(ev, ev.get("sig", ""), nd.get("pubkey") or "")
-        if nd.get("pubkey") and not sig_ok:
-            return self._err(401, "signature did not verify")
-        if not self._token_ok(nd):
-            return self._err(401, "bad node token")
-
-        conf = float(ev.get("plate_conf") or 0)
-        plate = ev.get("plate_text") or ""
-
-        # ⚠️ THE PLATE CONFIDENCE GATE ONLY APPLIES TO PLATES.
-        #
-        # It used to reject every submission scoring under the threshold,
-        # including ones carrying no plate at all - which silently discarded
-        # exactly the sightings the visual identifier exists to produce. A
-        # camera that cannot read plates would have been gated out by a plate
-        # rule. Drop a WEAK plate; never drop the whole sighting for not
-        # having one.
-        if plate and conf < float(CONFIG.get("min_plate_confidence", 0.55)):
-            plate, conf = "", 0.0
-
-        evidence = dict(ev.get("evidence") or {})
         source = ev.get("source", "camera")
+        decision = ingest_decisions.decide_vehicle_sighting(
+            ev.get("plate_text"),
+            ev.get("plate_conf"),
+            ev.get("evidence"),
+            source,
+            nid,
+            operator_confirmed,
+            CONFIG.get("min_plate_confidence", 0.55),
+        )
+        plate = decision.plate
+        conf = decision.plate_confidence
+        evidence = decision.evidence
+        c = decision.classification
+        tier = decision.tier
+        candidate = decision.candidate
+        if decision.reviewed:
+            ev["_reviewed"] = decision.reviewed
+        if decision.decided_by:
+            ev["_decided_by"] = decision.decided_by
 
-        # A submitter cannot hand themselves signals that are supposed to be
-        # EARNED, not asserted:
-        #   human_confirmed - the reviewer's judgement; only the operator tool
-        #     sets it, or anybody could tag a neighbour's car and publish it.
-        #   visual_police   - the trained head's verdict. It carries weight 0.0,
-        #     so asserting it as a boolean adds no confidence but fabricates a
-        #     second "visual" marker for the two-marker police rule, storing a
-        #     stranger's plate on one real cue. It may only arise inside the
-        #     gated head block from visual_police_conf/margin, which the node
-        #     computes and this server re-derives.
-        evidence.pop("human_confirmed", None)
-        evidence.pop("visual_police", None)
-
-        # 🚨 THE OPERATOR'S CONFIRMATION, RESTORED AFTER THE STRIP AND NEVER
-        # BEFORE IT. The strip above is right: `human_confirmed` is the single
-        # strongest signal classify.py has (weight 4.0, and it WAIVES the
-        # two-marker police rule), so a submitter who could assert it could
-        # publish a neighbour's car. It is set here instead, from a flag this
-        # server derived by checking a node token against the node that owns
-        # the crop - never from anything the caller typed.
-        #
-        # 📌 WHY THIS PATH HAS TO EXIST AT ALL. The posting gate runs at the
-        # moment a vehicle leaves frame, and it drops passes that clear no two
-        # markers. That is correct and it is also why a confirmed patrol car
-        # could never reach the map: a real one was scored by the trained head
-        # at 0.987, failed the gate because the plate read disagreed (0.34 <
-        # 0.55) and no second marker fired, and was discarded. The operator then
-        # pressed "Yes - government" on the crop and nothing happened, because
-        # there was no sighting to promote. The human arrived AFTER the gate.
-        # classify.py has always known how to weigh a human; it simply never got
-        # told, because the row it would have gone on was never created.
-        if operator_confirmed:
-            evidence["human_confirmed"] = True
-
-        # A public mirror cannot score a phone crop (no GPU, no trained head),
-        # so it parks a plate-less copy for the home classifier to pull. Captured
-        # HERE, before the mirror drops the image below, and written to the inbox
-        # after the row exists so it can be keyed by the sighting id. The size is
-        # re-verified (subresolution_bytes), so an oversized crop is refused, not
-        # quarantined. See mirror.quarantine_write.
-        relay_crop = None
-        if (source == "phone_node" and ev.get("snap_b64")
-                and mirror.relay_enabled()):
-            try:
-                relay_crop = snapshot.subresolution_bytes(ev["snap_b64"])
-            except Exception:
-                relay_crop = None
-
-        c = classify.classify(evidence)
-
-        # A public SIGHTING and a published PLATE are different decisions.
-        # `sightable` puts "a marked patrol unit was here" on the public map -
-        # no identifier, so nothing to protect. `tierable` is what allows the
-        # plate TEXT through, and it keeps the strict bar. Gating both on
-        # `tierable` meant a plate-blind camera could never contribute
-        # anything, which is most cameras. See classify.py rule 4.
-        # 🚨 A HUMAN SUBMISSION IS A CLAIM, NOT A RECORD (his call: nothing
-        # auto-publishes without the trained head first).
-        #
-        # This used to reach the public tier directly on the argument that a
-        # person looking at a marked patrol car beats any classifier. True of an
-        # honest person, and that is the whole problem: the submitter chooses
-        # the markers, so "two distinct visual markers" is two taps, and the map
-        # would publish whatever a stranger asserted about a vehicle they picked.
-        # Every other route to the public tier is gated by a model that cannot
-        # be argued with. This one was gated by the submitter's own honesty.
-        #
-        # So it is recorded PRIVATE and routed to the pen, where the trained head
-        # scores its crop and a human confirms it. Nothing is thrown away and
-        # nothing is distrusted - the claim simply has to survive the same gate
-        # everything else survives before it names a vehicle in public.
-        #
-        # ⚠️ THIS MUST HAPPEN BEFORE `tier` IS COMPUTED. Clearing the flags after
-        # the tier line reads as a fix, changes the reason string, and publishes
-        # exactly as before - the failure this codebase keeps producing: a check
-        # that runs and is not applied to the thing it governs.
-        if source == "phone":
-            c["why"] = f"human-submitted by {nid}, awaiting review; " + c["why"]
-            c["tierable"] = False
-            c["sightable"] = False
-
-        # A public SIGHTING and a published PLATE are different decisions.
-        # `sightable` puts "a marked patrol unit was here" on the public map -
-        # no identifier, so nothing to protect. `tierable` is what allows the
-        # plate TEXT through, and it keeps the strict bar. Gating both on
-        # `tierable` meant a plate-blind camera could never contribute
-        # anything, which is most cameras. See classify.py rule 4.
-        tier = "public" if (c["tierable"] or c["sightable"]) else "private"
-
-        # 🚨 THE PUBLIC TIER IS ENTERED BY A PERSON, NEVER BY INGEST.
-        # 33 of the 34 sightings ever auto-published came through here: the
-        # classifier judged a submission sightable and the row went public with
-        # nobody having looked at it. That is the claim the project is now
-        # making publicly - that a human decides what appears on the map - and a
-        # claim has to be true in the code, not merely usual in practice.
-        #
-        # The classification is NOT discarded. `c` still carries vclass and the
-        # reason, the crop is still parked in the review pen below, and a
-        # reviewer promotes it with one press. All that changes is that the
-        # default is private and the publish step needs a person.
-        #
-        # ⚠️ This is deliberately AFTER `tier` is computed, so the classifier's
-        # own opinion is still what routes the crop to the pen. Clearing the
-        # flags earlier would have made every candidate invisible instead of
-        # merely unpublished - the difference between "waiting for review" and
-        # "silently dropped".
-        # ⚠️ REMEMBER THAT THIS WAS A CANDIDATE. Downstream code needs to know
-        # "the classifier would have published this" AFTER the tier has been
-        # rewritten to private, and the tier can no longer answer that. Two
-        # separate behaviours were silently switched off by reading `tier`
-        # here: fragment merging, and the pen write itself.
-        candidate = (tier == "public")
-        # 🚨 AN OPERATOR CONFIRMATION IS THE HUMAN STEP. DO NOT HOLD IT FOR ONE.
-        #
-        # The hold above exists because nobody has looked yet. On this path
-        # somebody has: /api/node/confirm is only reached by the owner of the
-        # camera, authenticated with its token, answering the popup about a
-        # vehicle they just watched go past. Holding it for review asked the
-        # same person the same question twice.
-        #
-        # It also made the publish depend on a SECOND request succeeding
-        # (labelbank then calls /api/node/label to promote it). If that call
-        # failed the sighting sat private with no pen card - the confirmation
-        # reaching neither the map nor the queue, which is the exact silent loss
-        # /api/node/confirm was built to end.
-        #
-        # `public_tiers` still decides: a confirmed council truck is not public
-        # here either, because `tier` came from privacy.tier_for(vclass) above.
-        if candidate and not operator_confirmed:
-            c["why"] = (c.get("why") or "") + " - held for human review"
-            tier = "private"
-        elif candidate:
-            c["why"] = (c.get("why") or "") + " - confirmed by the camera operator"
-            # 🚨 RECORD THE DECISION. A public row with reviewed IS NULL is
-            # indistinguishable from one that reached the map unreviewed, which
-            # is the single claim this project makes about itself - "nothing is
-            # published without a person". The audit checks for exactly this
-            # ("public tier with no human decision"), and it would have started
-            # counting these.
-            ev["_reviewed"] = "confirmed"
-            ev["_decided_by"] = "human"
-
-        # A camera node scores its own crop, so its GOVERNMENT candidates go
-        # straight to the review pen for a human to confirm - captured here as a
-        # sub-resolution, plate-less crop BEFORE the mirror strips the image
-        # below. Phone-node crops take the inbox path instead (box_puller pulls
-        # and scores them at home first), so they are excluded here.
-        # `phone` (a human submission) is included here now that it no longer
-        # reaches the public tier by itself: the pen is where its claim gets
-        # looked at. `phone_node` is still excluded because it has its own route
-        # - the inbox, which box_puller pulls and scores at home.
-        review_crop = None
-        evidence_crop = None
-        if (source != "phone_node" and mirror.relay_enabled()
-                and ev.get("snap_b64") and c["vclass"] in ("police", "gov_dot")):
-            try:
-                # 🚨 CROP TO THE VEHICLE FIRST. A camera node posts its whole
-                # FRAME (store_submitted crops it server-side), so merely
-                # downscaling it parked a 200px photograph of the street - and
-                # the neighbours' houses with it - in front of every reviewer.
-                # The published snapshot was already being cropped correctly;
-                # only this second reader of the same field was not.
-                _vb = ev.get("vehicle_box")
-                if _vb:
-                    review_crop = snapshot.crop_to_subres(ev["snap_b64"],
-                                                          tuple(_vb))
-                    # And the same crop WITHOUT the 200px shrink, for the
-                    # reviewer and for whatever gets published if they say yes.
-                    # Built here because this is the last point the original
-                    # frame is still in hand - below, the mirror strips the
-                    # image and the redaction path rewrites it. Failing to
-                    # produce it must never cost the pen its card, so the pen
-                    # crop above is computed first and this cannot unset it.
-                    try:
-                        evidence_crop = snapshot.crop_full(ev["snap_b64"],
-                                                           tuple(_vb))
-                    except Exception:
-                        evidence_crop = None
-                else:
-                    # No box means nothing to crop to. Park no picture rather
-                    # than a bystander's - the same call the snapshot path
-                    # already makes a few lines below. The candidate still
-                    # reaches the reviewer, without an image.
-                    review_crop = None
-            except Exception:
-                review_crop = None
-
-        dropped_image = None
-        banked_stem = None
-        if ev.get("snap_b64") and not mirror.may_store_image(tier):
-            # Nothing to redact, nothing to leak, nothing to subpoena. A
-            # mirror keeps photographs of published government vehicles only.
-            ev.pop("snap_b64", None)
-            dropped_image = "public mirror keeps no private-tier imagery"
-        if ev.get("snap_b64") and not ev.get("snap"):
-            pbox = ev.get("plate_box")
-            pboxes = ev.get("plate_boxes") or ([pbox] if pbox else [])
-            vbox = ev.get("vehicle_box")
-            meta = {"ts": float(ev.get("ts") or now()), "node_id": nid,
-                    "node_name": nd["name"], "tier": tier,
-                    "plate_text": plate, "vclass": c["vclass"],
-                    "watermark": "UNVERIFIED" if source == "phone" else ""}
-            if source == "phone_node" and not pbox:
-                # A phone node cannot locate a plate to redact, so it destroys
-                # it instead: the crop arrives already below plate legibility.
-                # store_subresolution MEASURES that rather than believing it.
-                try:
-                    ev["snap"] = snapshot.store_subresolution(ev["snap_b64"], meta)
-                    # And keep a copy for labelling. This is the entire reason
-                    # phone nodes are worth building: every window someone puts
-                    # a camera in is real vehicles in real conditions, which is
-                    # what the classifier has been starving for.
-                    #
-                    # 🚨 BUT A MIRROR MUST NEVER BANK. mirror.may_bank() existed
-                    # for exactly this and was never called, so a public mirror
-                    # was writing the ORIGINAL full-resolution crop to disk -
-                    # the un-degraded image, the thing THREAT_MODEL promises a
-                    # breach cannot yield. Labelling happens where the camera is;
-                    # the mirror carries claims, not photographs of the street.
-                    if mirror.may_bank():
-                        from detect import bank as _bank
-                        banked_stem = _bank.bank_remote(
-                            snapshot.decode_bytes(ev["snap_b64"]), nid,
-                            {"ts": float(ev.get("ts") or now()),
-                             "cls_name": ev.get("body") or "car",
-                             "det_conf": ev.get("det_conf")})
-                except ValueError as exc:
-                    dropped_image = str(exc)
-                except Exception as exc:
-                    return self._err(400, f"snapshot rejected: {exc}")
-            elif tier != "public" and not pbox and not candidate:
-                # We cannot redact a plate we cannot locate, and a photograph of
-                # a car IS a photograph of its plate. So a private-tier image
-                # with no plate box is discarded rather than stored. The
-                # sighting itself still counts; only the picture is dropped.
-                #
-                # ⚠️ `not candidate` IS THE THIRD BEHAVIOUR THIS FILE LOST BY
-                # READING `tier` AFTER IT WAS FORCED TO PRIVATE. The two named
-                # above tier's rewrite are fragment merging and the pen write;
-                # this is the same mistake with the worst outcome. A marked
-                # patrol car whose plate the camera could not resolve - which is
-                # MOST of them, at 22px against the 60 an OCR needs - hit this
-                # branch and had its photograph thrown away for failing to
-                # locate a plate that was never going to be legible. The
-                # candidate's original is kept in core.EVIDENCE below instead,
-                # where the reviewer can actually see the livery.
-                dropped_image = "no plate box to redact on a private-tier image"
-            elif source == "phone":
-                # A human aimed the camera; their framing IS the crop.
-                try:
-                    ev["snap"] = snapshot.store_prepared(
-                        ev["snap_b64"], meta,
-                        plate_box=tuple(pbox) if pbox else None)
-                except Exception as exc:
-                    return self._err(400, f"snapshot rejected: {exc}")
-            elif not vbox:
-                # 🚨 A CAMERA NODE MUST SEND THE BOX IT DETECTED.
-                # Without one there is nothing to crop to, and the previous
-                # behaviour - fall through to the phone path - stored the whole
-                # street: the neighbours' houses and other vehicles' plates,
-                # none of them redacted. Drop the picture instead. The sighting
-                # still counts; an un-croppable image is not worth a bystander.
-                dropped_image = "camera submission carried no vehicle_box to crop to"
-            else:
-                try:
-                    ev["snap"] = snapshot.store_submitted(
-                        ev["snap_b64"], meta, tuple(vbox),
-                        plate_box=tuple(pbox) if pbox else None,
-                        plate_boxes=[tuple(b) for b in pboxes])
-                except Exception as exc:
-                    return self._err(400, f"snapshot rejected: {exc}")
+        try:
+            media = ingest_media.prepare_vehicle_media(
+                ev, nd, nid, plate, source, c, tier, candidate
+            )
+        except ingest_media.SnapshotRejected as exc:
+            return self._err(400, f"snapshot rejected: {exc}")
+        relay_crop = media.relay_crop
+        review_crop = media.review_crop
+        evidence_crop = media.evidence_crop
+        dropped_image = media.dropped_image
+        banked_stem = media.banked_stem
 
         # 🚨 CLAMP THE NODE'S CLOCK. IT DECIDES RETENTION, ORDERING AND LIVENESS.
         #
         # This took the submitted value unchecked, and three separate systems
         # read it afterwards. A camera running one hour slow has its sighting
         # stored, penned, confirmed by a human and promoted to public - and then
-        # never drawn, because /api/sightings defaults to since = now() - 3600.
-        # Every counter reports success and the dot is simply not on the map.
-        # A back-dated row is also what the retention sweep deletes first, so a
-        # skewed clock can quietly feed evidence to the janitor.
-        #
-        # The node's claim is kept in the response rather than thrown away: the
-        # camera is the only party that can fix its own clock, and it cannot fix
-        # what it is never told. `clock_skew_s` is what a node should log loudly.
-        claimed = float(ev.get("ts") or now())
-        server_now = now()
-        skew = claimed - server_now
-        # A little slack for network delay and honest drift; beyond that the
-        # SERVER's clock wins, because it is the one every reader compares
-        # against.
-        ts = claimed if abs(skew) <= 120 else server_now
-
-        # ⚠️ NEVER nd["lat"] / nd["lon"] HERE. Those are the camera's TRUE
-        # coordinates, and /api/sightings serves whatever is stored to anyone.
-        # Storing them defeated the node-position jitter entirely - one
-        # sighting gave up the exact camera location. See
-        # nodes.sighting_position.
-        #
-        # The seed makes the position stable for this sighting and different
-        # from the next one, so passes spread along the watched stretch instead
-        # of stacking 31 dots on one pixel.
-        s_lat, s_lon = node_mod.sighting_position(
-            nd, ev.get("lat"), ev.get("lon"),
-            seed=f"{nid}:{ts:.3f}:{ev.get('snap_sha256') or plate or ''}")
-
-        # An empty string is not "no plate", it is a value - and it was being
-        # counted as a distinct vehicle. Store the absence as an absence.
-        phash = privacy.plate_hash(plate, ev.get("plate_state", "")) or None
-
-        rec = {
-            "node_id": nid, "ts": ts,
-            "lat": s_lat, "lon": s_lon,
-            "tier": tier,
-            "plate_hash": phash,
-            # Plate text rides on `tierable` alone, NOT on the tier. A public
-            # SIGHTING is public because it carries no identifier; attaching an
-            # unverified plate to it would smuggle the identifier back in
-            # through the very row that was supposed to be identifier-free.
-            # Stored for a PUBLIC-tier row, served only after a human confirms
-            # it - see privacy.redact. The photograph on a public row already
-            # shows the plate, so keeping the text alongside adds no exposure
-            # that the image did not; what it adds is SEARCH, and search waits
-            # for a person. A retraction purges both (db.review_sighting).
-            # 🚨 PLATE TEXT RIDES ON `tierable` ALONE. The old `or tier=="public"`
-            # attached a plate to any public row - including a `sightable`-only
-            # dot, which is public precisely BECAUSE it carries no identifier.
-            # That smuggled the identifier back into the row that was supposed to
-            # be identifier-free, the exact thing the comment below warns of.
-            "plate_text": plate if c["tierable"] else None,
-            "plate_state": ev.get("plate_state") if c["tierable"] else None,
-            "plate_conf": conf,
-            "vclass": c["vclass"], "vclass_conf": c["conf"], "vclass_why": c["why"],
-            "color": ev.get("color"), "body": ev.get("body"),
-            "make": ev.get("make"), "model": ev.get("model"),
-            "heading": ev.get("heading"), "speed_mph": ev.get("speed_mph"),
-            "snap": ev.get("snap"), "source": ev.get("source", "camera"),
-            "reviewed": ev.get("_reviewed"), "decided_by": ev.get("_decided_by"),
-            "bank_ref": (ev.get("bank_ref") or None),
-            "sig_ok": 1 if sig_ok else 0,
-        }
-        # 🚨 IS THIS A NEW VEHICLE, OR THE SAME ONE STILL CROSSING THE FRAME?
-        # A tracker that loses a vehicle behind a window pillar and re-acquires
-        # it produces several completed tracks for one pass, and each posted its
-        # own sighting - three dots on the map for one patrol car. Fold them.
-        # See db.merge_window_row for why the test is deliberately blunt.
-        # 🚨 `candidate`, NOT `tier`. This read tier == "public" a few lines
-        # after tier was forced to "private", so it was dead code and the
-        # occluded-pass bug came straight back - now as THREE review cards for
-        # one patrol car, which a human then confirms three times onto the map.
-        # Only government candidates are folded: merging ordinary traffic by
-        # class and time window would be far too blunt.
-        prior = (db.merge_window_row(nid, c["vclass"], ts)
-                 if candidate else None)
-        if prior:
-            db.bump_detections(prior["id"], ts, c["conf"])
-            # Liveness is a SERVER observation: "this node spoke to me just
-            # now". Passing the node's own timestamp let a fast clock pin a
-            # dead camera online and a slow one flap a working camera offline,
-            # while /api/heartbeat recorded the same event correctly - so the
-            # two paths disagreed about the same node.
-            db.heartbeat(nid)
-            return self._json({"id": prior["id"], "tier": tier,
-                               "vclass": c["vclass"], "merged_into": prior["id"],
-                               "why": "same pass as a sighting seconds earlier"})
-
-        # Reduce BEFORE the write, never on the way out: a read-time redaction
-        # leaves the data on the disk, and the disk is what gets copied.
-        rec = mirror.strip_sighting(rec)
-        rec["id"] = db.insert_sighting(rec)
-        # 🚨 LINK THE BANKED CROP TO THE SIGHTING IT CAME FROM.
-        # Without this a remote crop is an orphan: labelling it "police" in the
-        # UI would record the judgement and leave the map untouched, because
-        # _sync_sighting has no id to promote. A volunteer's phone catching a
-        # patrol car has to be able to reach the map, or their contribution is
-        # training data and nothing else.
-        if banked_stem:
-            try:
-                from detect import bank as _bank
-                _bank.link_sighting(banked_stem, rec["id"])
-            except Exception:
-                pass
-        # Park the plate-less crop for the home classifier, keyed by this row.
-        # After strip_sighting, so nothing about the mirror's own record changed.
-        if relay_crop is not None:
-            mirror.quarantine_write(rec["id"], relay_crop, {
-                "ts": ts, "pub_lat": s_lat, "pub_lon": s_lon,
-                "node_name": nd.get("name") or "",
-                "det_conf": ev.get("det_conf"), "body": ev.get("body")})
-        # A camera's government candidate parks in the review pen for a human.
-        if review_crop is not None:
-            mirror.review_write(rec["id"], review_crop, {
-                "ts": ts, "node_id": nid, "node_name": nd.get("name") or "",
-                "score": c.get("conf"), "vclass": c["vclass"],
-                "det_conf": ev.get("det_conf"), "body": ev.get("body")})
-            # The full-resolution original beside it, at home only. This is
-            # what the reviewer is shown and what a confirmation publishes, so
-            # the livery survives the wait and a plate is not destroyed for a
-            # vehicle whose plate is the entire point of the public tier.
-            # mirror.evidence_write refuses on a mirror; core.EVIDENCE carries
-            # the rails and the cost.
-            if evidence_crop is not None:
-                mirror.evidence_write(rec["id"], evidence_crop)
-
-        # A node that is posting is self-evidently awake, so a submission is
-        # also a heartbeat. Detectors that never learn to beat still show
-        # online while they are actually working.
-        db.heartbeat(nid)
-        FEED.publish(rec)
+        timestamp = ingest_record.resolve_ingest_timestamp(ev.get("ts"))
+        ts = timestamp.timestamp
+        skew = timestamp.skew
+        # The record builder preserves the privacy.redact boundary by storing
+        # only node_mod.sighting_position's safe coordinates.
+        record = ingest_record.build_vehicle_sighting_record(
+            ev, nd, nid, plate, conf, c, tier, sig_ok, ts
+        )
+        rec = record.record
+        s_lat = record.latitude
+        s_lon = record.longitude
+        # ingest_persistence calls mirror.strip_sighting before inserting.
+        persisted = ingest_persistence.persist_vehicle_sighting(
+            rec, ev, nd, nid, c, ts, candidate, s_lat, s_lon, banked_stem,
+            relay_crop, review_crop, evidence_crop, FEED,
+        )
+        if persisted.merged_into is not None:
+            return self._json({
+                "id": persisted.merged_into,
+                "tier": tier,
+                "vclass": c["vclass"],
+                "merged_into": persisted.merged_into,
+                "why": "same pass as a sighting seconds earlier",
+            })
+        rec = persisted.record
         # 🚨 TELL THE CAMERA ITS CROP IS WAITING ON A HUMAN.
         # A phone detects VEHICLES; the government call happens here, after the
         # post. So the phone has never known it caught a patrol car - the
@@ -5033,18 +3207,9 @@ class Handler(BaseHTTPRequestHandler):
         # `parked` is the honest signal: not "this is a cop", but "a person is
         # being asked about this one", which is exactly when it is worth asking
         # the person who is standing there.
-        out = {"id": rec["id"], "tier": tier, "vclass": c["vclass"],
-               "why": c["why"], "parked": review_crop is not None}
-        if abs(skew) > 120:
-            # Said plainly, because the node cannot see this any other way and
-            # the consequence - its sightings landing outside every default
-            # time window - is invisible from its side.
-            out["clock_skew_s"] = round(skew, 1)
-            out["note"] = (f"your clock is {abs(skew):.0f}s "
-                           f"{'ahead of' if skew > 0 else 'behind'} the hub; "
-                           f"the server time was used instead")
-        if dropped_image:
-            out["image_dropped"] = dropped_image
+        out = ingest_record.build_ingest_response_metadata(
+            rec["id"], tier, c, review_crop is not None, skew, dropped_image
+        )
         return self._json(out)
 
     # -- server-sent events ---------------------------------------------

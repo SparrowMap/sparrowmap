@@ -3,7 +3,7 @@ r"""SparrowMap Camera Control - a PTZ and imaging console for a USB camera.
 Separate from the SparrowMap site on purpose: this is the installer's tool for
 aiming and tuning a node, not something the public map should carry.
 
-    python camctl\camctl.py            ->  http://sparrow-box:8160/
+    python camctl\camctl.py            ->  http://example-host:8160/
 
 WHY THIS ALSO SOLVES A REAL PROBLEM
 On Windows exactly one process can hold a webcam. If this app owns the camera,
@@ -732,7 +732,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 400)
 
         if u.path == "/api/bank/label":
-            # Same check as the hub, from the same function. `sparrow-box`
+            # Same check as the hub, from the same function. `example-host`
             # is IPv6-first on this box, so an IPv4-only test 403'd every
             # labelling click made through the Pages hub link.
             if not is_operator_addr(self.client_address[0]):

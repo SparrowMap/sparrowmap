@@ -34,7 +34,7 @@ Run these checks. Do NOT ask permission first - they are all read-only.
    PASS = all 200 and under ~3s. Any 503, or /api/sightings returning no rows,
    means the map is showing "reconnecting" or losing its markers.
 
-2. THE HUB. ssh -i D:/LLM/.ssh/emberaudio_hetzner root@$SPARROW_BOX and read
+2. THE HUB. ssh -i /path/to/ravenmap-key root@deploy-host and read
    http://127.0.0.1:8150/api/health. Report anything outside these:
      db == "ok"
      heavy_free  > 5   (cap 48)
@@ -87,10 +87,9 @@ REPORTING RULE:
     Nothing else. Do not summarise the checks you ran.
   * Something wrong -> diagnose it, fix it if the cause is known and the fix is
     one you have already made before (cache copy, CPU weight, restart a dead
-    local service), deploy via tools/deploy.py with SPARROW_BOX and
-    SPARROW_KEY set, verify the fix externally, and THEN report what broke and
-    what you did. Send a PushNotification for anything user-visible.
-  * Something wrong that you are NOT confident about -> do not guess and do not
+    local service), deploy via tools/deploy.py with DEPLOY_HOST and
+    DEPLOY_KEY set, verify the fix externally, and THEN report what broke and
+    what you did. Send a PushNotification for anything user-visible.  * Something wrong that you are NOT confident about -> do not guess and do not
     restart. Report what you measured and stop.
 
 Never run a drive-wide grep or a recursive grep over D:/LLM/sparrow - the data

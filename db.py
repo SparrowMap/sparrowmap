@@ -794,6 +794,19 @@ def audit(action: str, target: str = "", actor: str = "anon", ip: str = "") -> N
     conn.commit()
 
 
+def recent_audit(limit: int = 200) -> list[dict]:
+    """Most recent audit rows, newest first. Redaction stays the caller's job."""
+    rows = connect().execute(
+        "SELECT ts, action, target, ip FROM audit ORDER BY ts DESC LIMIT ?",
+        (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def health_check() -> None:
+    """Cheapest possible proof the database is reachable. Raises on failure."""
+    connect().execute("SELECT 1").fetchone()
+
+
 # --------------------------------------------------------------------------
 # Reads.  Every one of these returns raw rows; redaction happens in the hub so
 # it is applied uniformly and is visible in one place during review.
@@ -1158,6 +1171,20 @@ def nodes(active_only: bool = True, include_superseded: bool = False) -> list[di
 def node(nid: str) -> Optional[dict]:
     r = connect().execute("SELECT * FROM nodes WHERE id = ?", (nid,)).fetchone()
     return dict(r) if r else None
+
+
+def set_node_pubkey(node_id: str, pubkey: str) -> None:
+    """Record a node's Ed25519 public key. Caller is responsible for auditing."""
+    c = connect()
+    c.execute("UPDATE nodes SET pubkey=? WHERE id=?", (pubkey, node_id))
+    c.commit()
+
+
+def set_node_token(node_id: str, token: str) -> None:
+    """Replace a node's shared token (key rotation). No audit event by design."""
+    c = connect()
+    c.execute("UPDATE nodes SET token=? WHERE id=?", (token, node_id))
+    c.commit()
 
 
 # A node is online if it has beaten within this window. Two missed beats at the
@@ -1554,6 +1581,24 @@ def retracted_with_photo() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def public_review_queue_rows(limit: int = 200) -> list[dict]:
+    """Public-tier sightings ordered for the operator-local review queue."""
+    rows = connect().execute(
+        "SELECT * FROM sightings WHERE tier='public' "
+        "ORDER BY (reviewed IS NOT NULL), ts DESC LIMIT ?",
+        (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def private_unreviewed_since(cutoff: float, limit: int = 400) -> list[dict]:
+    """Private-tier, unreviewed sightings newer than cutoff, for 'missed' scoring."""
+    rows = connect().execute(
+        "SELECT * FROM sightings WHERE tier='private' AND ts > ? "
+        "AND reviewed IS NULL ORDER BY ts DESC LIMIT ?",
+        (cutoff, int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
 def clear_snap(sighting_id: int) -> Optional[str]:
     """Forget a sighting's photograph. Returns the filename it used to hold.
 
@@ -1570,6 +1615,45 @@ def clear_snap(sighting_id: int) -> Optional[str]:
     conn.execute("UPDATE sightings SET snap=NULL WHERE id=?", (int(sighting_id),))
     conn.commit()
     return str(row["snap"])
+
+
+def set_snap(sighting_id: int, name: str) -> None:
+    """Point a sighting at a (usually replacement) photograph filename.
+
+    Mirrors clear_snap's shape but writes rather than clears. The caller is
+    responsible for any old-file cleanup and for snap_held bookkeeping.
+    """
+    conn = connect()
+    conn.execute("UPDATE sightings SET snap=? WHERE id=?", (name, int(sighting_id)))
+    conn.commit()
+
+
+def sighting_contribution_stats(node_ids: Optional[list[str]]) -> dict:
+    """Counts, never rows: how many sightings/cameras/published a scope has.
+
+    node_ids=None means no node filter (pool-wide scope). An empty list means
+    "no cameras in scope" and the caller should treat that as zero without
+    querying, but this function still answers it correctly if asked.
+    """
+    conn = connect()
+    if node_ids is None:
+        where, args = "1=1", ()
+    else:
+        nodes = [n for n in node_ids if n]
+        if not nodes:
+            return {"cams": 0, "n": 0, "pub": 0}
+        where = "node_id IN (%s)" % ",".join("?" * len(nodes))
+        args = tuple(nodes)
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n, "
+        f"SUM(CASE WHEN tier='public' THEN 1 ELSE 0 END) AS pub, "
+        f"COUNT(DISTINCT node_id) AS cams "
+        f"FROM sightings WHERE {where}", args).fetchone()
+    return {
+        "cams": int(row["cams"] or 0),
+        "n": int(row["n"] or 0),
+        "pub": int(row["pub"] or 0),
+    }
 
 
 def resolve_reports(sighting_id: int) -> None:

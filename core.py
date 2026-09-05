@@ -124,7 +124,11 @@ for _d in (DATA, SNAPS):
 # entire privacy posture of a deployment in one screen.
 
 DEFAULTS = {
-    "site_name": "SparrowMap",
+    "site_name": "RavenMap",
+
+    # Optional CARTO basemap API key.
+    # Deployment-specific; never commit a real key.
+    "carto_api_key": "",
 
     # 🧪 STAGED, OFF BY DEFAULT. The aircraft page (/planes) reads live ADS-B
     # and the FAA registry to show government aircraft and ones that are
@@ -249,7 +253,7 @@ def is_operator_addr(addr: str) -> bool:
     """May a caller from this address use the operator-only routes?
 
     🚨 THIS WAS IPv4-ONLY AND IT SILENTLY BROKE BOTH OPERATOR PAGES.
-    `sparrow-box` resolves to an IPv6 unique-local address
+    `example-host` resolves to an IPv6 unique-local address
     (fd00:2e67:...), so reaching the labelling or review pages by HOSTNAME -
     which is how every link in the Pages hub is written, and the only way the
     phone can reach them - produced 403 "local only". The labelling buttons did
