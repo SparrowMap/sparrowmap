@@ -82,7 +82,7 @@ UA = "SparrowMap/0.1 (police accountability research; sparrowmap.com)"
 # police officer is filed in a federal district court. Filtering here keeps the
 # scan honest and keeps bankruptcy noise out of the officer queue.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from courtlistener_fetch import STATE_COURTS  # noqa: E402
+from courtlistener_fetch import STATE_COURTS, build_query  # noqa: E402
 
 COURT_STATE = {c: st for st, ids in STATE_COURTS.items() for c in ids}
 
@@ -354,12 +354,18 @@ def verify(state: str, token: str = "") -> None:
         raise SystemExit(f"unknown state {state!r}")
     c = oversight.connect()
     marks = ",".join("?" * len(courts))
+    # 🚨 COMPARE LIKE WITH LIKE. The first version of this check put the FULL
+    # bulk count (both tiers) against the API's `cause:(1983)` count and
+    # reported a 39,213 "material disagreement" that was entirely my own
+    # arithmetic - bulk holds a cause tier AND a nature-of-suit tier, and only
+    # the first has an API equivalent. A verification that cries wolf is worse
+    # than none, because the next real gap gets waved through.
     mine = c.execute(
         f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks})",
         courts).fetchone()[0]
-    street = c.execute(
+    by_cause = c.execute(
         f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks}) "
-        f"AND is_prisoner=0", courts).fetchone()[0]
+        f"AND match_basis='cause'", courts).fetchone()[0]
 
     def api(q: str) -> int:
         p = {"type": "d", "q": q, "court": " ".join(courts)}
@@ -373,21 +379,32 @@ def verify(state: str, token: str = "") -> None:
 
     print(f"{state.upper()}  ({', '.join(courts)})")
     try:
-        a_all = api("cause:(1983)")
+        a_cause = api("cause:(1983)")
         time.sleep(4)
-        a_street = api("cause:(1983) NOT suitNature:(Prisoner)")
+        a_broad = api(build_query(False, broad=True))
     except Exception as e:
         print(f"  API unreachable ({e}); bulk holds {mine:,} "
-              f"({street:,} street)")
+              f"({by_cause:,} by cause)")
         return
-    print(f"  all 1983    bulk {mine:>7,}   api {a_all:>7,}   "
-          f"delta {mine - a_all:+,}")
-    print(f"  street only bulk {street:>7,}   api {a_street:>7,}   "
-          f"delta {street - a_street:+,}")
-    worst = max(abs(mine - a_all), abs(street - a_street))
-    ok = worst <= max(50, 0.03 * max(a_all, 1))
+    rows = [("cause tier", by_cause, a_cause), ("everything", mine, a_broad)]
+    ok = True
+    for label, b, a in rows:
+        d = b - a
+        # ⚠️ The API is LIVE and bulk is a quarterly snapshot, so the API
+        # being a little higher is expected and healthy - it is the months
+        # since the dump. Bulk being higher means our filter is catching
+        # something the query is not, which is the direction worth explaining.
+        note = ""
+        if d > 0:
+            note = "  bulk ahead - filter may be broader than the query"
+        elif d < 0:
+            note = "  api ahead - expected, the dump is a quarterly snapshot"
+        print(f"  {label:<11} bulk {b:>7,}   api {a:>7,}   "
+              f"delta {d:+,}{note}")
+        if abs(d) > max(200, 0.10 * max(a, 1)):
+            ok = False
     print("  ✅ consistent" if ok else
-          "  ⚠️ MATERIAL DISAGREEMENT - do not trust the bulk filter yet")
+          "  ⚠️ MATERIAL DISAGREEMENT - explain it before trusting the counts")
 
 
 def purge(dry_run: bool = False) -> None:

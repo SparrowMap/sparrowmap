@@ -279,8 +279,16 @@ def list_courts(state_word: str) -> None:
 # `suitNature:("Civil Rights")` alone returns 51,742 for Michigan and drags in
 # employment, ADA, voting and welfare cases - 45% noise in the queue a human
 # has to read.
+# ⚠️ BOTH SPELLINGS OF "PRISON CONDITION(S)". PACER writes it singular AND
+# plural in the same jurisdiction - Michigan has 4,532 rows of "555 Prisoner -
+# prison condition" and 606 of "Prisoner: Prison Conditions". The bulk filter
+# matches a substring so it catches both; a Lucene PHRASE does not, so the
+# plural rows would have been loaded by bulk and then never enriched with party
+# names - present in the database, permanently nameless, and nothing would have
+# reported it as a gap.
 BROAD_NOS = ('suitNature:(440 OR 550 OR 555 OR "Civil Rights: Other" '
-             'OR "Prisoner: Civil Rights" OR "Prison Condition")')
+             'OR "Prisoner: Civil Rights" OR "Prison Condition" '
+             'OR "Prison Conditions")')
 
 
 def build_query(exclude_prisoner: bool, extra: str = "",
