@@ -245,6 +245,23 @@ MIGRATIONS = [
     # a human judgement on the camera's own view of a real published claim.
     ("sightings", "reviewed", "TEXT"),
     ("sightings", "reviewed_at", "REAL"),
+    # 🚨 WHAT THE CLASSIFIER SAID, PRESERVED THROUGH A RETRACTION.
+    #
+    # review_sighting('retracted') demotes the row and blanks vclass/
+    # vclass_conf, which is correct for the public map and wrong for the
+    # dataset: it erases the confidence the model had when it was wrong. A
+    # confident false positive is the hard negative worth retraining on; a
+    # borderline one is the threshold working. Without these columns every
+    # rejection looks identical (conf=NULL) and neither can be found again.
+    #
+    # Found 2026-09-05 after a FOX news van reached the review queue - a big
+    # marked van with roof gear, which is genuinely patrol-shaped to a head
+    # trained with light bars painted out. Precision was 2,432 confirmed
+    # against 14 retracted, so the model is fine; the missing piece was the
+    # negatives, and the negatives were being stripped on the way in.
+    ("sightings", "was_vclass", "TEXT"),
+    ("sightings", "was_conf", "REAL"),
+    ("sightings", "was_why", "TEXT"),
     # Which banked training crop came from this sighting, so a correction on
     # the map writes a label into the dataset instead of dying as a one-off fix.
     ("sightings", "bank_ref", "TEXT"),
@@ -1425,13 +1442,48 @@ def review_sighting(sighting_id: int, verdict: str) -> None:
         # endpoint rejected a bad verdict and an unknown id, and both of those
         # return BEFORE reaching this statement. I tested the guards and never
         # once exercised the operation.
+        # 🚨 KEEP WHAT THE MODEL BELIEVED BEFORE OVERWRITING IT.
+        #
+        # The demotion below is right - a retracted row must not be public and
+        # must not hold plate text. But it also set vclass='civilian' and
+        # vclass_conf=NULL, which DESTROYED the only interesting thing about a
+        # false positive: how confident the classifier was when it got it
+        # wrong.
+        #
+        # A human rejection is the most valuable training label this project
+        # produces, and a confident one is worth far more than a borderline
+        # one - "the head said 0.994 and it was a news van" is a hard negative
+        # worth mining for; "the head said 0.46" is just the threshold doing
+        # its job. All 14 retractions on the box read conf=NULL, so the two
+        # cannot be told apart, and the FOX news van that prompted this cannot
+        # now be scored at all.
+        #
+        # Same failure shape this project keeps finding: not a crash, an
+        # erasure that looks exactly like normal operation.
         conn.execute("""UPDATE sightings
-                        SET tier='private', vclass='civilian', vclass_conf=NULL,
+                        SET was_vclass=vclass, was_conf=vclass_conf,
+                            was_why=vclass_why,
+                            tier='private', vclass='civilian', vclass_conf=NULL,
                             plate_text=NULL, plate_state=NULL, vclass_why=?,
                             reviewed=?, reviewed_at=?
-                        WHERE id=?""",
+                        WHERE id=? AND was_vclass IS NULL""",
                      ("retracted by the camera operator: not a public-tier vehicle",
                       verdict, now(), sighting_id))
+        # ⚠️ `AND was_vclass IS NULL` so a second retraction cannot overwrite
+        # the preserved prediction with the already-blanked one. Retracting a
+        # row twice is not a normal path, but node_label can re-run a verdict,
+        # and a guard that costs one clause is cheaper than an unrecoverable
+        # overwrite of the evidence.
+        if conn.total_changes == 0:
+            conn.execute("""UPDATE sightings
+                            SET tier='private', vclass='civilian',
+                                vclass_conf=NULL, plate_text=NULL,
+                                plate_state=NULL, vclass_why=?,
+                                reviewed=?, reviewed_at=?
+                            WHERE id=?""",
+                         ("retracted by the camera operator: "
+                          "not a public-tier vehicle",
+                          verdict, now(), sighting_id))
     else:
         conn.execute("UPDATE sightings SET reviewed=?, reviewed_at=? WHERE id=?",
                      (verdict, now(), sighting_id))
