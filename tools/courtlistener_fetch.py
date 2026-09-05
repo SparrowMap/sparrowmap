@@ -217,13 +217,34 @@ ALL_STATES = sorted(STATE_COURTS)
 # human. Waiting is cheaper than being watched.
 _BACKOFF = (30, 60, 120, 240, 300, 300, 600, 600, 900, 900)
 
+# 🚨 PACE TO SUSTAINABILITY, NOT TO SPEED.
+#
+# Party enrichment is inherently a multi-day job - roughly 2,450 pages for
+# Michigan and days for the country - and the ceiling is a rolling window, not
+# a per-second rate. Bursting at --delay 2 wins for a few hundred pages and
+# then buys a lockout that outlasts the whole backoff ladder: measured
+# 2026-09-05, the limiter did not forgive a burst across 30/60/120/240/300/
+# 300/600/600/900s of waiting.
+#
+# For a job like this, giving up after an hour is the wrong behaviour - there
+# is nobody watching to restart it, and the cursor is already checkpointed.
+# --patient makes the last rung repeat forever, so a lockout costs time and
+# never costs the run. Combine it with a delay that stays under the ceiling
+# rather than discovering the ceiling every few hundred pages.
+PATIENT = False
+
 
 def _get(url: str, token: str = "", timeout: int = 60) -> dict:
     headers = {"User-Agent": UA}
     if token:
         headers["Authorization"] = f"Token {token}"
     last = None
-    for attempt in range(len(_BACKOFF) + 1):
+    attempt = 0
+    # ⚠️ A `while`, not a `for`. The patient branch has to STAY on the last
+    # rung, and `attempt -= 1` inside a for loop does nothing at all - the loop
+    # variable is reassigned from the range on every pass, so the decrement is
+    # silently discarded and the ladder marches on to SystemExit anyway.
+    while True:
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -237,9 +258,21 @@ def _get(url: str, token: str = "", timeout: int = 60) -> dict:
             # checkpointed either way, but retrying is cheaper than resuming.
             last, why = e, f"network: {e}"
         if attempt < len(_BACKOFF):
-            print(f"    {why} - waiting {_BACKOFF[attempt]}s", flush=True)
-            time.sleep(_BACKOFF[attempt])
-    raise SystemExit(f"gave up after {len(_BACKOFF)} retries: {last}")
+            wait = _BACKOFF[attempt]
+            attempt += 1
+            print(f"    {why} - waiting {wait}s", flush=True)
+        elif PATIENT:
+            # The ladder is exhausted but the job is not. Hold at the last
+            # rung forever rather than throwing away a checkpointed sweep that
+            # nobody is watching.
+            wait = _BACKOFF[-1]
+            print(f"    {why} - patient, holding at {wait}s", flush=True)
+        else:
+            raise SystemExit(
+                f"gave up after {len(_BACKOFF)} retries: {last}\n"
+                f"  the cursor is checkpointed - re-run the same command, or "
+                f"use --patient for an unattended job")
+        time.sleep(wait)
 
 
 def list_courts(state_word: str) -> None:
@@ -810,6 +843,9 @@ def main() -> None:
                     help="stop after N pages (resumable)")
     ap.add_argument("--delay", type=float, default=2.0,
                     help="seconds between requests (default 2, be polite)")
+    ap.add_argument("--patient", action="store_true",
+                    help="never give up on a 429 - hold at the longest "
+                         "backoff forever. For unattended multi-day jobs.")
     ap.add_argument("--resume", action="store_true",
                     help="continue the last unfinished sweep of this query")
     ap.add_argument("--token", default=os.environ.get("COURTLISTENER_TOKEN",
@@ -827,6 +863,8 @@ def main() -> None:
     ap.add_argument("--queue", type=int, metavar="N",
                     help="show the top N officer candidates")
     a = ap.parse_args()
+    global PATIENT
+    PATIENT = a.patient
 
     if a.list_courts:
         list_courts(a.list_courts)
