@@ -194,6 +194,65 @@ CREATE TABLE IF NOT EXISTS officers (
 
 CREATE INDEX IF NOT EXISTS idx_officers_surname ON officers(surname);
 
+-- A LAW ENFORCEMENT AGENCY, mined from case captions.
+--
+-- 🚨 THE ONE TABLE HERE THAT IS NOT ABOUT A PERSON, WHICH IS WHY IT CAN BE
+-- BUILT AUTOMATICALLY. Everything else in this database describes a human
+-- being and therefore waits for a human to approve it. "Oakland County" is an
+-- organisation: getting it wrong is a wrong COUNT, not a wrong accusation, so
+-- clustering may write here directly.
+--
+-- Identity is (state, kind, place), never the raw caption string. PACER
+-- captions are truncated, typo'd and word-reversed in the same jurisdiction -
+-- "COUNTY MACOMB", "Wayne County Officia", "COUNTY OFLENAWEE", "WASTENAW
+-- COUNTY" are all real - so the raw string is an ALIAS and the canonical form
+-- is derived. `place` is lowercased and unpunctuated for exactly that reason.
+--
+-- ⚠️ `cases` here is a count of captions that named this agency, which is NOT
+-- the same as cases where the agency was a defendant, and NOT a measure of
+-- misconduct. A big county appears often because it is big. Any page built on
+-- this has to say so or it is publishing a league table it cannot support.
+CREATE TABLE IF NOT EXISTS agencies (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    state       TEXT NOT NULL,      -- from court_id, never parsed from text
+    kind        TEXT NOT NULL,      -- county | city | township | village |
+                                    -- police | sheriff
+    place       TEXT NOT NULL,      -- 'oakland', 'hazel park'
+    display     TEXT,               -- 'Oakland County, MI'
+    cases       INTEGER DEFAULT 0,
+    first_filed TEXT, last_filed TEXT,
+    UNIQUE(state, kind, place)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agencies_state ON agencies(state, cases);
+
+-- Every raw caption string that resolved to an agency, and how.
+--
+-- Kept because the merge is a GUESS and has to be auditable: 'wastenaw'
+-- folding into 'washtenaw' is almost certainly right, and the only way to
+-- check is to see what was folded. A cluster nobody can inspect is a number
+-- nobody should quote.
+CREATE TABLE IF NOT EXISTS agency_aliases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agency_id   INTEGER NOT NULL,
+    raw         TEXT NOT NULL,      -- as it appeared in the caption
+    place_seen  TEXT,               -- what canon() derived before merging
+    hits        INTEGER DEFAULT 0,
+    merged      INTEGER DEFAULT 0,  -- 1 = fuzzy-merged, not an exact match
+    similarity  REAL,               -- the ratio that justified the merge
+    UNIQUE(agency_id, raw)
+);
+
+-- Which agency a case named. Many-to-many: a caption can name a county AND
+-- a city, and both are true.
+CREATE TABLE IF NOT EXISTS case_agencies (
+    docket_id   INTEGER NOT NULL,
+    agency_id   INTEGER NOT NULL,
+    PRIMARY KEY (docket_id, agency_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_case_agencies_a ON case_agencies(agency_id);
+
 -- A badge number, with the window it is known to have been worn.
 -- Separate table because it is one-to-many in both directions over time.
 CREATE TABLE IF NOT EXISTS officer_badges (
