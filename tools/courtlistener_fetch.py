@@ -864,6 +864,10 @@ def main() -> None:
                          "COURTLISTENER_TOKEN)")
     ap.add_argument("--list-courts", metavar="STATE",
                     help="print federal district court ids for a state name")
+    ap.add_argument("--police", action="store_true",
+                    help="re-derive which cases actually involve POLICE "
+                         "(vs corrections, vs other state actors, vs unknown). "
+                         "Cheap and repeatable - re-run it after enrichment.")
     ap.add_argument("--reclassify", action="store_true",
                     help="re-derive party guesses from the stored raw names "
                          "(skips rows a human has linked)")
@@ -878,6 +882,18 @@ def main() -> None:
 
     if a.list_courts:
         list_courts(a.list_courts)
+        return
+    if a.police:
+        st = oversight.classify_police(dry_run=a.dry_run)
+        n = st["examined"] or 1
+        print(f"{st['examined']:,} cases examined, {st['changed']:,} changed")
+        print()
+        for k in ("police", "corrections", "other", "unknown"):
+            print(f"  {k:<12} {st[k]:>9,}  ({100.0*st[k]/n:5.1f}%)")
+        print()
+        print("  UNKNOWN is not 'no'. It is cases whose parties have not "
+              "been fetched yet -")
+        print("  re-run this after enrichment and they move.")
         return
     if a.reclassify:
         r = oversight.reclassify(dry_run=a.dry_run)

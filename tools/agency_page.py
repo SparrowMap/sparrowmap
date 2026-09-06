@@ -76,7 +76,22 @@ def _case_row(r) -> dict:
     }
 
 
-def collect(state: str, min_cases: int) -> dict:
+def collect(state: str, min_cases: int, police_only: bool = True) -> dict:
+    """Gather one state. police_only=True is the DEFAULT and the point.
+
+    🚨 Section 1983 reaches every state actor, so most of what the bulk load
+    pulled in is not about police at all - prosecutors, schools, hospitals,
+    prison staff. Matthew's instruction is that only cases with actual police
+    involvement belong here, so the page shows `cases.police='police'` and
+    nothing else.
+
+    ⚠️ It FILTERS, it does not DELETE. 93% of cases are still UNKNOWN rather
+    than ruled out, because party names exist for a small fraction and a
+    caption reading "Smith v. Jones" says nothing about whether Jones wore a
+    badge. Re-running --police after enrichment promotes those; deleting them
+    now would throw away police cases we cannot identify yet.
+    """
+    POL = " AND c.police='police' " if police_only else " "
     c = oversight.connect()
     state = state.upper()
     if state not in STATE_COURTS:
@@ -84,10 +99,24 @@ def collect(state: str, min_cases: int) -> dict:
     courts = STATE_COURTS[state]
     marks = ",".join("?" * len(courts))
 
-    agencies = [dict(r) for r in c.execute(
-        "SELECT id, kind, place, display, cases, first_filed, last_filed "
-        "FROM agencies WHERE state=? AND cases>=? ORDER BY cases DESC",
-        (state, min_cases))]
+    if police_only:
+        # Counts have to be recomputed over the police subset - the stored
+        # agencies.cases counts EVERY civil-rights case that named the agency,
+        # which would contradict the list the page is showing.
+        agencies = [dict(r) for r in c.execute(
+            "SELECT a.id, a.kind, a.place, a.display, COUNT(*) AS cases, "
+            "       MIN(c.date_filed) AS first_filed, "
+            "       MAX(c.date_filed) AS last_filed "
+            "FROM agencies a JOIN case_agencies ca ON ca.agency_id = a.id "
+            "JOIN cases c ON c.docket_id = ca.docket_id "
+            "WHERE a.state=? AND c.police='police' "
+            "GROUP BY a.id HAVING COUNT(*) >= ? ORDER BY cases DESC",
+            (state, min_cases))]
+    else:
+        agencies = [dict(r) for r in c.execute(
+            "SELECT id, kind, place, display, cases, first_filed, last_filed "
+            "FROM agencies WHERE state=? AND cases>=? ORDER BY cases DESC",
+            (state, min_cases))]
     ids = {a["id"] for a in agencies}
 
     cases: dict = {a["id"]: [] for a in agencies}
@@ -97,7 +126,7 @@ def collect(state: str, min_cases: int) -> dict:
             "       c.match_basis, c.is_prisoner, c.absolute_url "
             "FROM case_agencies ca JOIN cases c ON c.docket_id = ca.docket_id "
             "JOIN agencies a ON a.id = ca.agency_id WHERE a.state=? "
-            "ORDER BY c.date_filed DESC", (state,)):
+            + POL + "ORDER BY c.date_filed DESC", (state,)):
         if r["agency_id"] not in ids:
             continue
         cases[r["agency_id"]].append(_case_row(r))
@@ -114,12 +143,22 @@ def collect(state: str, min_cases: int) -> dict:
                 {"r": r["raw"], "h": r["hits"], "m": r["merged"]})
 
     total_cases = c.execute(
+        f"SELECT COUNT(*) FROM cases c WHERE court_id IN ({marks})" + POL,
+        courts).fetchone()[0]
+    all_cases = c.execute(
         f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks})",
         courts).fetchone()[0]
+    unknown = c.execute(
+        f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks}) "
+        f"AND police IS NULL", courts).fetchone()[0]
+    # ⚠️ Must carry the same POL filter as total_cases. Without it the page
+    # printed "3,716 of 829 cases name an agency (448.3%)" - a ratio of the
+    # unfiltered numerator over the filtered denominator, which is the classic
+    # way a statistic ends up nonsense while every individual query is correct.
     linked = c.execute(
         f"SELECT COUNT(DISTINCT ca.docket_id) FROM case_agencies ca "
         f"JOIN cases c ON c.docket_id=ca.docket_id "
-        f"WHERE c.court_id IN ({marks})", courts).fetchone()[0]
+        f"WHERE c.court_id IN ({marks})" + POL, courts).fetchone()[0]
     named = c.execute(
         f"SELECT COUNT(DISTINCT docket_id) FROM case_parties WHERE docket_id "
         f"IN (SELECT docket_id FROM cases WHERE court_id IN ({marks}))",
@@ -140,7 +179,7 @@ def collect(state: str, min_cases: int) -> dict:
             "       c.absolute_url "
             "FROM case_parties p JOIN cases c ON c.docket_id = p.docket_id "
             f"WHERE c.court_id IN ({marks}) AND p.officer_signal >= 2 "
-            "AND p.officer_id IS NULL "
+            "AND p.officer_id IS NULL " + POL +
             "ORDER BY p.officer_signal DESC, c.date_filed DESC", courts):
         key = r["raw_name"]
         if key not in seen:
@@ -170,7 +209,9 @@ def collect(state: str, min_cases: int) -> dict:
     return {"state": state, "courts": courts, "agencies": agencies,
             "cases": cases, "aliases": aliases,
             "officers": officers, "ocases": ocases,
-            "total_cases": total_cases, "linked": linked, "named": named}
+            "total_cases": total_cases, "linked": linked, "named": named,
+            "all_cases": all_cases, "unknown": unknown,
+            "police_only": police_only}
 
 
 CSS = """
@@ -376,8 +417,9 @@ def render(d: dict) -> str:
 <style>{CSS}</style></head><body><div class="wrap">
 
 <h1>{st} &mdash; federal civil-rights cases by agency</h1>
-<p class="sub">Section 1983 and related civil-rights dockets from
-{", ".join(d["courts"])}, grouped by the agency named in the case caption.
+<p class="sub">Federal civil-rights dockets from {", ".join(d["courts"])}
+where <b>police involvement is evidenced</b> &mdash; a ranked defendant, a police
+or sheriff agency, or a caption that names one. Grouped by the agency named.
 Built from CourtListener's public bulk data. Every case links back to the
 public docket so you can read it yourself.</p>
 
@@ -386,12 +428,13 @@ public docket so you can read it yourself.</p>
 A case count is <b>not</b> a misconduct rate. A large city appears often
 because it is large, and every case here is an <b>allegation</b> &mdash;
 a filing, not a finding. Nothing on this page says anyone did anything.<br><br>
-These counts are a <b>floor, not a total</b>. Only {pct:.1f}% of this state's
-cases name an agency in the caption; the rest name individuals
-(&ldquo;Smith v. Jones&rdquo;) and cannot be attributed to a department until
-the officer names are filled in &mdash; currently {named_pct:.1f}% done. A
-small department&rsquo;s low number may mean only that its officers were sued
-by name.
+These counts are a <b>floor, not a total</b>, for two compounding reasons.
+Only {pct:.1f}% of these cases name an agency in the caption; the rest name
+individuals and cannot be attributed to a department yet.
+And of {d["all_cases"]:,} civil-rights cases in this state,
+<b>{d["unknown"]:,} are still UNKNOWN</b> &mdash; not ruled out, just not yet
+proven either way, because their party names have not been fetched.
+Police involvement can only be shown for a case once we know who was sued.
 </div>
 
 <div class="stats">
@@ -462,8 +505,11 @@ def main() -> None:
     ap.add_argument("--state", required=True)
     ap.add_argument("--out")
     ap.add_argument("--min-cases", type=int, default=1)
+    ap.add_argument("--all-cases", action="store_true",
+                    help="include non-police civil-rights cases (default: "
+                         "police only)")
     a = ap.parse_args()
-    d = collect(a.state, a.min_cases)
+    d = collect(a.state, a.min_cases, police_only=not a.all_cases)
     out = Path(a.out) if a.out else DATA / f"agencies_{d['state']}.html"
     out.write_text(render(d), encoding="utf-8")
     kb = out.stat().st_size / 1024

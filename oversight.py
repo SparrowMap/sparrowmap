@@ -417,6 +417,26 @@ MIGRATIONS = [
     # checked against the API filter on 'cause'; the review queue uses
     # everything; and nobody has to guess which is which later.
     ("cases", "match_basis", "TEXT"),
+    # 🚨 IS A POLICE OFFICER ACTUALLY INVOLVED IN THIS CASE?
+    #
+    # 'police'      evidenced: a ranked defendant, a police/sheriff agency, or a
+    #               caption that names one.
+    # 'corrections' prison or jail staff. Law enforcement, but not police, and a
+    #               different institution with different records - kept apart so
+    #               it can be included or excluded deliberately.
+    # 'other'       evidenced NOT police: the named defendants are prosecutors,
+    #               judges, schools, hospitals, attorneys.
+    # NULL          UNKNOWN. Not "no" - just no evidence yet.
+    #
+    # The distinction between 'other' and NULL is the whole point. Section 1983
+    # reaches every state actor, so most of this database is not about police -
+    # but at the time of writing, party names exist for only 7.4% of Michigan
+    # cases, and a caption reading "Smith v. Jones" is silent about whether
+    # Jones wore a badge. Marking those 'other' would be a guess dressed as a
+    # finding, and deleting them would throw away police cases we simply cannot
+    # identify yet. They stay NULL and get re-judged as enrichment fills in.
+    ("cases", "police", "TEXT"),
+    ("cases", "police_why", "TEXT"),
 ]
 
 
@@ -871,6 +891,108 @@ def upsert_parties(docket_id: int, names: Iterable[str], case_name: str = "",
 # --------------------------------------------------------------------------
 # Run bookkeeping
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Is a police officer involved?
+# --------------------------------------------------------------------------
+
+# Words that mean POLICE specifically. Deliberately not "law enforcement" in
+# the broad sense: a prosecutor enforces the law and is not what this is for.
+_POLICE_RE = re.compile(
+    r"\bpolice\b|\bsheriff|\bstate\s+police\b|\btrooper\b|\bconstable\b"
+    r"|\bmarshal\b|\bpublic\s+safety\b|\bhighway\s+patrol\b|\bp\.?d\.?\b"
+    r"|\bdetective\b|\bpatrolman\b|\bdeputy\b", re.I)
+
+# Prison and jail staff. Law enforcement, different institution.
+_CORRECTIONS_RE = re.compile(
+    r"\bcorrection|\bwarden\b|\bprison\b|\bjail\b|\bpenitentiary\b|\bmdoc\b"
+    r"|\bdepartment\s+of\s+corrections\b|\bparole\b|\bprobation\b", re.I)
+
+# State actors that are emphatically NOT police, used only to say 'other' when
+# nothing police-shaped is present.
+_NONPOLICE_RE = re.compile(
+    r"\battorney|\bprosecut|\bjudge\b|\bcourt\b|\bclerk\b|\bschool\b"
+    r"|\buniversity\b|\bhospital\b|\bmedical\b|\bnurse\b|\bdoctor\b"
+    r"|\bsocial\s+work|\bchild\s+protective\b|\bhousing\b|\bwelfare\b", re.I)
+
+
+def classify_case_police(case_name: str, cause: str, nos: str,
+                         party_names=(), agency_kinds=(),
+                         has_rank: bool = False) -> tuple:
+    """(verdict, why) for one case. verdict: police | corrections | other | None.
+
+    🚨 None MEANS "NO EVIDENCE YET", NOT "NO".
+    The commonest caption in this database is two surnames, which says nothing
+    about anyone's job. Calling that 'other' would be inventing a finding, and
+    it would hide real police cases the moment the enrichment that identifies
+    them finally runs. Absence of evidence gets its own value.
+    """
+    hay = " | ".join([case_name or ""] + [p or "" for p in party_names])
+    kinds = set(agency_kinds or ())
+
+    if has_rank:
+        return "police", "a party carries a police rank"
+    if kinds & {"police", "sheriff"}:
+        return "police", "linked to a police or sheriff agency"
+    m = _POLICE_RE.search(hay)
+    if m:
+        return "police", f"names {m.group(0).strip().lower()!r}"
+    m = _CORRECTIONS_RE.search(hay)
+    if m:
+        return "corrections", f"names {m.group(0).strip().lower()!r}"
+    # Only call it 'other' when we can actually SEE who was sued and none of
+    # them is police-shaped. With no party names, we know nothing.
+    if party_names:
+        m = _NONPOLICE_RE.search(hay)
+        if m:
+            return "other", f"named defendants are {m.group(0).strip().lower()!r}"
+        return "other", "parties known, none police-shaped"
+    return None, "no party names yet - unknown, not ruled out"
+
+
+def classify_police(dry_run: bool = False, state_courts=None) -> dict:
+    """Re-derive `police` for every case from whatever evidence exists now.
+
+    Cheap and repeatable on purpose: every time party enrichment adds names,
+    running this again promotes cases out of UNKNOWN. It is never destructive.
+    """
+    c = connect()
+    where, args = "", []
+    if state_courts:
+        where = f"WHERE court_id IN ({','.join('?' * len(state_courts))})"
+        args = list(state_courts)
+    rows = c.execute(f"SELECT docket_id, case_name, cause, suit_nature, police "
+                     f"FROM cases {where}", args).fetchall()
+    parties: dict = {}
+    ranks: set = set()
+    for r in c.execute("SELECT docket_id, raw_name, officer_signal "
+                       "FROM case_parties"):
+        parties.setdefault(r["docket_id"], []).append(r["raw_name"])
+        if r["officer_signal"] == 3:
+            ranks.add(r["docket_id"])
+    akinds: dict = {}
+    for r in c.execute("SELECT ca.docket_id, a.kind FROM case_agencies ca "
+                       "JOIN agencies a ON a.id = ca.agency_id"):
+        akinds.setdefault(r["docket_id"], set()).add(r["kind"])
+
+    stat = {"examined": len(rows), "police": 0, "corrections": 0,
+            "other": 0, "unknown": 0, "changed": 0}
+    batch = []
+    for r in rows:
+        did = r["docket_id"]
+        v, why = classify_case_police(
+            r["case_name"] or "", r["cause"] or "", r["suit_nature"] or "",
+            parties.get(did, []), akinds.get(did, set()), did in ranks)
+        stat[v or "unknown"] += 1
+        if v != r["police"]:
+            stat["changed"] += 1
+            batch.append((v, why, did))
+    if not dry_run and batch:
+        c.executemany("UPDATE cases SET police=?, police_why=? WHERE docket_id=?",
+                      batch)
+        c.commit()
+    return stat
+
 
 def reclassify(dry_run: bool = False) -> dict:
     """Re-derive every party guess from the preserved `raw_name`.
