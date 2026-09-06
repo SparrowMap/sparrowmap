@@ -67,6 +67,7 @@ def _case_row(r) -> dict:
     return {
         "id": r["docket_id"],
         "u": u,
+        "k": r["police"] or "unknown",
         "n": r["case_name"] or "",
         "d": r["docket_number"] or "",
         "f": r["date_filed"] or "",
@@ -91,7 +92,13 @@ def collect(state: str, min_cases: int, police_only: bool = True) -> dict:
     badge. Re-running --police after enrichment promotes those; deleting them
     now would throw away police cases we cannot identify yet.
     """
-    POL = " AND c.police='police' " if police_only else " "
+    # 🚨 NO SQL FILTER ANY MORE. Every case ships with its category and the
+    # page filters client-side, because an agency's case COUNT is different in
+    # every category - precomputing four sets of counts in Python, or filtering
+    # here and showing a count from elsewhere, is exactly how the 448.3%
+    # statistic happened. The browser filters the rows it already has and
+    # derives the count from them, so the number and the list cannot disagree.
+    POL = " "
     c = oversight.connect()
     state = state.upper()
     if state not in STATE_COURTS:
@@ -99,31 +106,17 @@ def collect(state: str, min_cases: int, police_only: bool = True) -> dict:
     courts = STATE_COURTS[state]
     marks = ",".join("?" * len(courts))
 
-    if police_only:
-        # Counts have to be recomputed over the police subset - the stored
-        # agencies.cases counts EVERY civil-rights case that named the agency,
-        # which would contradict the list the page is showing.
-        agencies = [dict(r) for r in c.execute(
-            "SELECT a.id, a.kind, a.place, a.display, COUNT(*) AS cases, "
-            "       MIN(c.date_filed) AS first_filed, "
-            "       MAX(c.date_filed) AS last_filed "
-            "FROM agencies a JOIN case_agencies ca ON ca.agency_id = a.id "
-            "JOIN cases c ON c.docket_id = ca.docket_id "
-            "WHERE a.state=? AND c.police='police' "
-            "GROUP BY a.id HAVING COUNT(*) >= ? ORDER BY cases DESC",
-            (state, min_cases))]
-    else:
-        agencies = [dict(r) for r in c.execute(
-            "SELECT id, kind, place, display, cases, first_filed, last_filed "
-            "FROM agencies WHERE state=? AND cases>=? ORDER BY cases DESC",
-            (state, min_cases))]
+    agencies = [dict(r) for r in c.execute(
+        "SELECT id, kind, place, display, cases, first_filed, last_filed "
+        "FROM agencies WHERE state=? AND cases>=? ORDER BY cases DESC",
+        (state, min_cases))]
     ids = {a["id"] for a in agencies}
 
     cases: dict = {a["id"]: [] for a in agencies}
     for r in c.execute(
             "SELECT ca.agency_id, c.docket_id, c.case_name, c.docket_number, "
             "       c.date_filed, c.date_terminated, c.suit_nature, "
-            "       c.match_basis, c.is_prisoner, c.absolute_url "
+            "       c.match_basis, c.is_prisoner, c.absolute_url, c.police "
             "FROM case_agencies ca JOIN cases c ON c.docket_id = ca.docket_id "
             "JOIN agencies a ON a.id = ca.agency_id WHERE a.state=? "
             + POL + "ORDER BY c.date_filed DESC", (state,)):
@@ -176,7 +169,7 @@ def collect(state: str, min_cases: int, police_only: bool = True) -> dict:
             "SELECT p.raw_name, p.title_guess, p.agency_hint, p.officer_signal,"
             "       c.docket_id, c.case_name, c.docket_number, c.date_filed, "
             "       c.date_terminated, c.suit_nature, c.is_prisoner, "
-            "       c.absolute_url "
+            "       c.absolute_url, c.police "
             "FROM case_parties p JOIN cases c ON c.docket_id = p.docket_id "
             f"WHERE c.court_id IN ({marks}) AND p.officer_signal >= 2 "
             "AND p.officer_id IS NULL " + POL +
@@ -206,7 +199,16 @@ def collect(state: str, min_cases: int, police_only: bool = True) -> dict:
     for i, o in enumerate(officers):
         o["id"] = i
 
-    return {"state": state, "courts": courts, "agencies": agencies,
+    cats = {}
+    for k in ("police", "corrections", "other"):
+        cats[k] = c.execute(
+            f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks}) "
+            f"AND police=?", (*courts, k)).fetchone()[0]
+    cats["unknown"] = c.execute(
+        f"SELECT COUNT(*) FROM cases WHERE court_id IN ({marks}) "
+        f"AND police IS NULL", courts).fetchone()[0]
+
+    return {"state": state, "courts": courts, "agencies": agencies, "cats": cats,
             "cases": cases, "aliases": aliases,
             "officers": officers, "ocases": ocases,
             "total_cases": total_cases, "linked": linked, "named": named,
@@ -268,6 +270,16 @@ padding-top:10px;border-top:1px dashed var(--line)}
 .alias code{background:var(--bg);padding:1px 5px;border-radius:3px}
 footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);
 color:var(--dim);font-size:12.5px;line-height:1.7}
+.cats{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.cats button{font:inherit;font-size:13px;font-weight:600;background:var(--card);
+border:1px solid var(--line);color:var(--dim);border-radius:99px;
+padding:6px 14px;cursor:pointer}
+.cats button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);
+color:#fff}
+.cats button .c{opacity:.75;font-weight:400;margin-left:5px;
+font-variant-numeric:tabular-nums}
+#catNote{font-size:13px;line-height:1.55;color:var(--dim);margin:0 0 18px;
+padding-left:11px;border-left:2px solid var(--line)}
 .tabs{display:flex;gap:4px;margin:0 0 18px;border-bottom:1px solid var(--line)}
 .tabs button{font:inherit;font-weight:600;background:none;border:0;
 border-bottom:2px solid transparent;color:var(--dim);padding:9px 14px;
@@ -281,9 +293,24 @@ vertical-align:1px;white-space:nowrap}
 """
 
 JS = """
+const CATNOTE={
+ police:"<b>Police.</b> Evidence of an actual officer: a defendant carrying a rank, a link to a police or sheriff agency, or a caption naming one. This is the set this project is for.",
+ corrections:"<b>Corrections.</b> Prison and jail staff — wardens, guards, parole and probation. Law enforcement, but a different institution from police, so it is kept separate rather than mixed in.",
+ other:"<b>Other state actors.</b> Section 1983 reaches everyone acting for the state, so this is prosecutors, judges, schools, hospitals and social workers. The parties are known and none of them is police.",
+ unknown:"<b>Unknown — not ruled out.</b> These cases have no party names fetched yet, and a caption reading “Smith v. Jones” says nothing about whether Jones wore a badge. Some of these ARE police cases. They move into the other buckets as enrichment runs; they are never guessed at."
+};
 const AG=DATA.agencies,CS=DATA.cases,AL=DATA.aliases,
       OF=DATA.officers,OC=DATA.ocases;
-let tab='agencies', oq='', titledOnly=true;
+let tab='agencies', oq='', titledOnly=true, cat='police';
+const inCat=c=>c.k===cat;
+function agStats(id){                       // count + span for the ACTIVE category
+  const cs=(CS[id]||[]).filter(inCat);
+  if(!cs.length) return null;
+  let lo=null,hi=null;
+  for(const c of cs){ if(!c.f) continue;
+    if(!lo||c.f<lo) lo=c.f; if(!hi||c.f>hi) hi=c.f; }
+  return {n:cs.length, lo, hi};
+}
 let kind='', q='';
 const tb=document.getElementById('rows');
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
@@ -303,19 +330,20 @@ function caseRow(c){
 function drawOfficers(){
   const ql=oq.toLowerCase();
   const rows=OF.filter(o=>(!titledOnly||o.sig===3)&&
-    (!ql||o.name.toLowerCase().includes(ql)||(o.agency||'').toLowerCase().includes(ql)));
+    (!ql||o.name.toLowerCase().includes(ql)||(o.agency||'').toLowerCase().includes(ql))
+    &&(OC[o.id]||[]).some(inCat));
   document.getElementById('oshown').textContent=rows.length.toLocaleString();
   document.getElementById('orows').innerHTML=rows.slice(0,600).map(o=>`
     <tr class="ag off" data-id="${o.id}">
       <td class="${o.sig===3?'':'sig2'}">${esc(o.name)}
         ${o.title?`<span class="rank">${esc(o.title)}</span>`:''}
         ${o.agency?`<span class="tag">${esc(o.agency)}</span>`:''}</td>
-      <td class="num">${o.cases.toLocaleString()}</td>
+      <td class="num">${(OC[o.id]||[]).filter(inCat).length.toLocaleString()}</td>
       <td class="yr">${yr(o.first)}&ndash;${yr(o.last)}</td>
     </tr><tr class="detail" id="od${o.id}" hidden><td colspan="3"></td></tr>`).join('');
 }
 function opanel(o){
-  const cs=OC[o.id]||[];
+  const cs=(OC[o.id]||[]).filter(inCat);
   let h=`<div class="panel"><h3>${esc(o.name)}</h3>
   <p class="note">${cs.length} case${cs.length==1?'':'s'} name this exact string.
   ${o.sig===3?'The court recorded a rank, which is the strongest signal that this is an officer.'
@@ -327,18 +355,25 @@ function opanel(o){
 }
 function draw(){
   const ql=q.toLowerCase();
-  const rows=AG.filter(a=>(!kind||a.kind===kind)&&
-    (!ql||a.display.toLowerCase().includes(ql)));
+  const rows=[];
+  for(const a of AG){
+    if(kind&&a.kind!==kind) continue;
+    if(ql&&!a.display.toLowerCase().includes(ql)) continue;
+    const st=agStats(a.id);          // hide agencies with nothing in this category
+    if(!st) continue;
+    rows.push([a,st]);
+  }
+  rows.sort((x,y)=>y[1].n-x[1].n);
   document.getElementById('shown').textContent=rows.length.toLocaleString();
-  tb.innerHTML=rows.map(a=>`<tr class="ag" data-id="${a.id}">
+  tb.innerHTML=rows.map(([a,st])=>`<tr class="ag" data-id="${a.id}">
     <td>${esc(a.display)}<span class="tag">${a.kind}</span></td>
-    <td class="num">${a.cases.toLocaleString()}</td>
-    <td class="yr">${yr(a.first_filed)}&ndash;${yr(a.last_filed)}</td>
+    <td class="num">${st.n.toLocaleString()}</td>
+    <td class="yr">${yr(st.lo)}&ndash;${yr(st.hi)}</td>
   </tr><tr class="detail" id="d${a.id}" hidden><td colspan="3"></td></tr>`)
     .join('');
 }
 function panel(a){
-  const cs=CS[a.id]||[], al=AL[a.id]||[];
+  const cs=(CS[a.id]||[]).filter(inCat), al=AL[a.id]||[];
   const open=cs.filter(c=>!c.t).length;
   let h=`<div class="panel"><h3>${esc(a.display)}</h3>
   <p class="note">${cs.length.toLocaleString()} case${cs.length==1?'':'s'}
@@ -395,6 +430,16 @@ document.querySelectorAll('.kinds button').forEach(b=>{
       x.setAttribute('aria-pressed', x.dataset.k===kind));
     draw();});
 });
+document.querySelectorAll('.cats button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    cat=b.dataset.cat;
+    document.querySelectorAll('.cats button').forEach(x=>
+      x.setAttribute('aria-pressed', x.dataset.cat===cat));
+    document.getElementById('catNote').innerHTML=CATNOTE[cat];
+    draw(); drawOfficers();
+  });
+});
+document.getElementById('catNote').innerHTML=CATNOTE[cat];
 draw();
 """
 
@@ -447,6 +492,14 @@ Police involvement can only be shown for a case once we know who was sued.
   <div class="stat"><div class="n" id="shown">0</div>
     <div class="l">shown</div></div>
 </div>
+
+<div class="cats">
+  <button data-cat="police" aria-pressed="true">Police<span class="c">{d["cats"]["police"]:,}</span></button>
+  <button data-cat="corrections" aria-pressed="false">Corrections<span class="c">{d["cats"]["corrections"]:,}</span></button>
+  <button data-cat="other" aria-pressed="false">Other<span class="c">{d["cats"]["other"]:,}</span></button>
+  <button data-cat="unknown" aria-pressed="false">Unknown<span class="c">{d["cats"]["unknown"]:,}</span></button>
+</div>
+<p id="catNote"></p>
 
 <div class="tabs">
   <button data-tab="agencies" aria-selected="true">Agencies</button>
