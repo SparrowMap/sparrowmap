@@ -640,12 +640,23 @@ def classify_party(raw: str, case_name: str = "", cause: str = "",
         return out
 
     # --- title / rank ------------------------------------------------------
+    # 🚨 WORD BOUNDARIES, NOT SUBSTRINGS. `"marshal" in low` matches the surname
+    # MARSHALL, which put a plain "Marshall" (5 cases) and a prisoner-plaintiff
+    # "Marshall 732012" at the TOP of Michigan's officer queue - the highest-
+    # visibility place in the whole project to be wrong about a person.
     for needle, label in _TITLES:
-        if needle in low:
+        m = re.search(r"\b" + re.escape(needle.strip()) + r"\b", low)
+        if m:
             out["title_guess"] = label
             # Whatever sits before the title is usually the agency:
             # "Detroit Police Officer Carter" -> "Detroit".
-            head = _norm(name[: low.index(needle)])
+            #
+            # ⚠️ Slice at the MATCH position, not low.index(needle). Several
+            # needles carry a trailing space ("sgt "), so after the switch to
+            # word-boundary matching `\bsgt\b` happily matched "Sgt. Bryan"
+            # while low.index("sgt ") raised ValueError and killed the whole
+            # reclassify pass.
+            head = _norm(name[: m.start()])
             if head and len(head) < 40:
                 out["agency_hint"] = head
             break
@@ -675,6 +686,16 @@ def classify_party(raw: str, case_name: str = "", cause: str = "",
                 break
 
     # --- settle ------------------------------------------------------------
+    # 🚨 AN INMATE NUMBER BEATS A TITLE. Everything else defers to a rank -
+    # plaintiffs are not "Sergeant" - but a party carrying an MDOC/BOP register
+    # number is the person who FILED, and no officer defendant is ever booked
+    # into the prison they are being sued over. "Marshall 732012" matched the
+    # rank `marshal` on a surname and outranked its own prisoner number.
+    if _PRISON_NUM.search(name):
+        out["kind_guess"] = "person"
+        out["role_guess"] = "plaintiff"
+        out["officer_signal"] = 0
+        return out
     if is_plaintiff and not out["title_guess"]:
         # A title beats the caption match: plaintiffs are not "Sergeant".
         out["kind_guess"] = "person"
