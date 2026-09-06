@@ -518,6 +518,14 @@ _ENTITY_WORDS = (
     "association", "union", "trust", "insurance", "services", "systems",
     "united states", "u.s.a", "usa", "federal bureau", "f.b.i", "fbi",
     "homeland security", "immigration",
+    # 🚨 LAW OFFICES ARE NOT PEOPLE. "Saginaw County Prosecuting Attorney's
+    # Office" was reaching the officer queue as a signal-2 PERSON, because the
+    # entity list knew "sheriff's office" but not any other kind of office.
+    # Matthew caught it on Clark v. County of Saginaw.
+    "attorney's office", "attorneys office", "attorney general",
+    "prosecuting attorney", "prosecutor", "district attorney",
+    "corporation counsel", "public defender", "clerk's office",
+    "office of the", "'s office", "s office",
 )
 
 # Placeholders and procedural artefacts. Not people, not organisations - noise.

@@ -277,8 +277,8 @@ function opanel(o){
   const cs=OC[o.id]||[];
   let h=`<div class="panel"><h3>${esc(o.name)}</h3>
   <p class="note">${cs.length} case${cs.length==1?'':'s'} name this exact string.
-  ${o.sig===3?'The court recorded a rank, which is the strongest signal here.'
-             :'No rank in the record &mdash; a named human defendant on a civil-rights case, which is weaker.'}
+  ${o.sig===3?'The court recorded a rank, which is the strongest signal that this is an officer.'
+             :'<b>No rank in the record.</b> This is a person sued under section 1983, which covers every state actor &mdash; they may be a prosecutor, a nurse, a jail employee or a school official rather than police.'}
   Nobody has verified this is one person, or which person.</p>
   <table class="cases"><tbody>`;
   for(const c of cs.slice(0,300)) h+=caseRow(c);
@@ -329,7 +329,7 @@ document.getElementById('oq').addEventListener('input',e=>{
 document.getElementById('titledOnly').addEventListener('click',e=>{
   titledOnly=!titledOnly;
   e.target.setAttribute('aria-pressed', titledOnly);
-  e.target.textContent = titledOnly ? 'showing ranked only' : 'showing all candidates';
+  e.target.textContent = titledOnly ? 'ranked only (police)' : 'all named defendants';
   drawOfficers();});
 document.getElementById('orows').addEventListener('click',e=>{
   const tr=e.target.closest('tr.off'); if(!tr)return;
@@ -407,7 +407,7 @@ by name.
 
 <div class="tabs">
   <button data-tab="agencies" aria-selected="true">Agencies</button>
-  <button data-tab="officers" aria-selected="false">Officer candidates ({len(d["officers"]):,})</button>
+  <button data-tab="officers" aria-selected="false">People named ({len(d["officers"]):,})</button>
 </div>
 
 <div id="paneAgencies">
@@ -420,16 +420,21 @@ by name.
 
 <div id="paneOfficers" hidden>
   <div class="warn" style="margin-top:0">
-  <b>These are names the court wrote down. They are not identified people.</b><br>
+  <b>These are names the court wrote down. They are not identified people, and most are
+  not police.</b><br>
+  Section 1983 covers <b>every state actor</b> &mdash; prosecutors, judges, jail staff,
+  social workers, school officials &mdash; so being named in one of these cases does not
+  make someone an officer. Only the <b>ranked</b> rows carry an actual rank from the court
+  record; the rest are simply people sued under a civil-rights statute.<br><br>
   Each row groups one exact party string. Two cases naming &ldquo;Officer Smith&rdquo; may be
-  two different people, and nothing here has checked. A person appearing on this list has
-  been <b>sued</b>, which is an allegation by whoever filed &mdash; not a finding, not a
+  two different people, and nothing here has checked. A person on this list has been
+  <b>sued</b>, which is an allegation by whoever filed &mdash; not a finding, not a
   complaint upheld, and not misconduct. Read the docket before believing anything.
   </div>
   <input type="search" id="oq" placeholder="Search officer names or agencies&hellip;"
    autocomplete="off">
   <div class="kinds">
-    <button id="titledOnly" aria-pressed="true">showing ranked only</button>
+    <button id="titledOnly" aria-pressed="true">ranked only (police)</button>
     <span style="margin-left:10px"><b id="oshown">0</b> shown</span>
   </div>
   <table><thead><tr><th>Name as written by the court</th><th class="num">Cases</th>
