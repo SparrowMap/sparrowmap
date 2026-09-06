@@ -250,9 +250,19 @@ def _get(url: str, token: str = "", timeout: int = 60) -> dict:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
-            if e.code != 429:
+            # 🚨 RETRY 5xx TOO, NOT JUST 429.
+            #
+            # The first version retried only 429 and re-raised everything else, which killed
+            # a --patient overnight run on a single HTTP 502 Bad Gateway - a momentary blip
+            # at CourtListener's gateway, gone by the next second, and arguably MORE clearly
+            # transient than the throttle it did handle.
+            #
+            # 4xx stays fatal on purpose: a 400 or 404 is our bug and will still be our bug
+            # in fifteen minutes, so retrying it just hides it behind an hour of waiting.
+            if e.code != 429 and not (500 <= e.code < 600):
                 raise
-            last, why = e, "429 throttled"
+            last, why = e, ("429 throttled" if e.code == 429
+                            else f"HTTP {e.code} upstream")
         except (urllib.error.URLError, TimeoutError) as e:
             # A blip must not end a multi-hour sweep. The cursor is
             # checkpointed either way, but retrying is cheaper than resuming.
