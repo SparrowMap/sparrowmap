@@ -375,7 +375,7 @@ the map is public and stays public either way.</p>"""
 {time.strftime('%Y-%m-%d %H:%M', time.localtime(s['generated']))}. Every number
 here is produced by <code>tools/support_page.py</code> reading the database, not
 typed in by hand.</p>
-<p><a class=cta href="https://buymeacoffee.com/sparrowmap">Chip in</a></p>
+<p><a class=cta href="https://cash.app/$sparrowmap">Chip in &mdash; $sparrowmap on Cash App</a></p>
 
 <h2>The volunteer network</h2>
 <div class=big>
@@ -423,7 +423,7 @@ one because publishing one takes a human confirming it.</p>
 <h2>What it costs to run</h2>
 {cost_block}
 {supporters}
-<p><a class=cta href="https://buymeacoffee.com/sparrowmap">Chip in</a></p>
+<p><a class=cta href="https://cash.app/$sparrowmap">Chip in &mdash; $sparrowmap on Cash App</a></p>
 <p class=n>If money ever exceeds what the servers cost, the surplus goes to the
 same place: more polling capacity and bandwidth. There is no salary in this.</p>
 

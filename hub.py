@@ -3112,6 +3112,27 @@ class Handler(BaseHTTPRequestHandler):
                         if rtok:
                             out["review_token"] = rtok
                             out["review_url"] = "/rv"
+                        # 🚨 AND THE POOL TOKEN, AT ENROLMENT. HIS CALL.
+                        # ensure_pool_token was already self-service through
+                        # /api/rv/my-token, so this grants nothing that was not
+                        # already one request away - it just stops the shared
+                        # queue being a thing you have to know exists. A
+                        # crowd-labelling queue nobody is told about is not a
+                        # crowd, which is the same argument that made it
+                        # self-service in the first place.
+                        #
+                        # 📌 STILL TWO SEPARATE TOKENS, deliberately. Widening
+                        # one token would mean revoking a pool abuser also
+                        # takes away the camera they run. These revoke apart:
+                        # the pool token goes, they keep their own camera.
+                        # And created_by stays "self"/"enroll", never
+                        # "operator", so neither satisfies is_trusted and the
+                        # retracted-photo shelf remains operator-only.
+                        ptok = review_auth.ensure_pool_token(
+                            rec["id"], str(b["name"])[:60])
+                        if ptok:
+                            out["pool_token"] = ptok
+                            out["pool_url"] = "/rv/pool"
                     except Exception:
                         pass
                 return self._json(out)
