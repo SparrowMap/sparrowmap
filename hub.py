@@ -825,8 +825,22 @@ def _download_url():
 
 
 def _public_rows(rows: list[dict]) -> list[dict]:
+    # 🚨 DROP THE NULLS. A sighting row has 31 columns and only ~12 are ever set,
+    # so 19 of them ship as `"plate_text":null` on every row of every response.
+    # Measured on the live all-time public feed: 1,302,448 bytes -> 578,551, a
+    # 56% cut for no change in meaning (JS reads a missing key and a null key
+    # identically for every check the clients make).
+    #
+    # This matters far more than it looks. The map re-fetches the WHOLE public
+    # feed every CACHE_BUCKET_S (4s), so the payload is not paid once, it is
+    # paid ~15 times a minute per open tab - it was ~2.6 Mbps of sustained
+    # download per viewer, on top of everything else sharing the link, and it
+    # grows with every sighting ever published. That is what "reconnecting"
+    # was: the 12s client timeout losing to the transfer, while the box served
+    # the query itself in 6ms.
     _alias_map(rows)
-    return [privacy.redact(r, "anon") for r in rows]
+    return [{k: v for k, v in privacy.redact(r, "anon").items() if v is not None}
+            for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1279,7 +1293,11 @@ class Handler(BaseHTTPRequestHandler):
                           {"Cache-Control": "public, max-age=604800"})
 
     def _json(self, obj, code: int = 200) -> None:
-        self._send(code, json.dumps(obj, default=str).encode(), "application/json")
+        # Compact separators: json.dumps defaults to ", " and ": ", which on the
+        # all-time public feed alone was ~124 KB of spaces per response, re-sent
+        # every 4 seconds to every viewer.
+        self._send(code, json.dumps(obj, default=str, separators=(",", ":")).encode(),
+                   "application/json")
 
     def _err(self, code: int, msg: str) -> None:
         # 🚨 DRAIN BEFORE REFUSING. Several refusals - every 429, the unknown
