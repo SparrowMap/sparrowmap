@@ -127,7 +127,7 @@ VEHICLE = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
 OPEN_TIMEOUT_MS = 8000
 READ_TIMEOUT_MS = 8000
-UA = "SparrowMap-relay/0.1"
+UA = "RavenMap-relay/0.1"
 
 
 # --------------------------------------------------------------------------
@@ -286,7 +286,8 @@ def main() -> int:
     ap.add_argument("--source", required=True, help="rtsp:// or http:// stream")
     ap.add_argument("--node", required=True, help="camera id from enrolment")
     ap.add_argument("--token", required=True, help="that camera's token")
-    ap.add_argument("--hub", default="https://map.sparrowmap.com")
+    ap.add_argument("--hub", default=os.environ.get("RAVEN_HUB") or os.environ.get("SPARROW_HUB"),
+                    help="hub URL (or set RAVEN_HUB / legacy SPARROW_HUB)")
     ap.add_argument("--lat", type=float, required=True)
     ap.add_argument("--lon", type=float, required=True)
     ap.add_argument("--every", type=float, default=SEND_EVERY_S,
@@ -294,6 +295,11 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="detect and report, but send nothing")
     a = ap.parse_args()
+    if not a.hub:
+        ap.error(
+            "No RavenMap hub configured. Set RAVEN_HUB to your hub URL, "
+            "or pass --hub explicitly. Legacy SPARROW_HUB is also accepted."
+        )
 
     mp = model_path(a.hub)
     import onnxruntime as ort

@@ -32,6 +32,7 @@ import argparse
 import base64
 import io
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -51,7 +52,11 @@ SUBRES = 200          # snapshot.SUBRES_MAX_EDGE - the plate-destroying cap
 
 def creds(hub_override: str = ""):
     p = json.loads(PLACEMENT.read_text(encoding="utf-8"))
-    hub = hub_override or "https://map.sparrowmap.com"
+    hub = (hub_override or os.environ.get("RAVEN_HUB") or
+           os.environ.get("SPARROW_HUB") or "")
+    if not hub:
+        raise RuntimeError("No RavenMap hub configured. Set RAVEN_HUB; "
+                           "legacy SPARROW_HUB is also accepted.")
     return hub.rstrip("/"), p["node_id"], p["token"]
 
 

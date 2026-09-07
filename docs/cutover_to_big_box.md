@@ -36,18 +36,18 @@ than waiting for a TTL anywhere.
 
 ```
 # 1. refresh the data (the staged copy is from staging time)
-ssh BIG 'systemctl stop sparrowmap'
-ssh MAP '/opt/sparrowmap/.venv/bin/python -c "
+ssh deploy_host 'systemctl stop sparrowmap'
+ssh map_host '/opt/sparrowmap/.venv/bin/python -c "
 import sqlite3
 s=sqlite3.connect(\"/opt/sparrowmap/data/sparrow.db\")
 d=sqlite3.connect(\"/tmp/cut.db\"); s.backup(d); d.close(); s.close()"'
-ssh BIG 'rsync -a -e "ssh -i /root/.ssh/stage_pull" root@MAP_IP:/tmp/cut.db /opt/sparrowmap/data/sparrow.db
-         rsync -a -e "ssh -i /root/.ssh/stage_pull" root@MAP_IP:/opt/sparrowmap/data/snaps/ /opt/sparrowmap/data/snaps/
+ssh deploy_host 'rsync -a -e "ssh -i /path/to/deploy-key" root@map_host:/tmp/cut.db /opt/sparrowmap/data/sparrow.db
+         rsync -a -e "ssh -i /path/to/deploy-key" root@map_host:/opt/sparrowmap/data/snaps/ /opt/sparrowmap/data/snaps/
          chown -R sparrow:sparrow /opt/sparrowmap/data
          systemctl start sparrowmap && systemctl enable --now caddy'
 
 # 2. stop the old origin so nothing writes to two databases
-ssh MAP 'systemctl stop caddy sparrowmap'
+ssh map_host 'systemctl stop caddy sparrowmap'
 
 # 3. point Cloudflare at <map-box>  (dashboard, or the API)
 
@@ -78,7 +78,7 @@ not delete anything on the map box until the new one has run a full day.**
 
 ## Loose ends from staging
 
-* A one-time key `/root/.ssh/stage_pull` on the big box is authorised on the map
+* A one-time key `/path/to/deploy-key` on the big box is authorised on the map
   box. Remove it from the map box's `authorized_keys` when the migration is done.
 * The staged database is a snapshot from staging time. Step 1 above re-syncs it;
   do not skip that.

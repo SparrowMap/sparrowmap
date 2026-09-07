@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db          # noqa: E402
 
-UA = "SparrowMap/1.0 (https://sparrowmap.com; town lookup)"
+UA = "RavenMap/1.0 (town lookup)"
 # zoom=10 is the "city/town" level. Higher gets suburbs and splits one town into
 # several names; lower collapses neighbouring towns into a county.
 ZOOM = 10

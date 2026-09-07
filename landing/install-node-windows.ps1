@@ -1,23 +1,30 @@
-# SparrowMap desktop camera - turn-key installer for Windows.
+# RavenMap desktop camera - turn-key installer for Windows.
 #
-# Turns a Windows PC with a webcam into a SparrowMap camera that contributes to
-# the public map at https://map.sparrowmap.com. Installs Python and the camera
+# Turns a Windows PC with a webcam into a RavenMap camera that contributes to
+# the configured RavenMap hub. Installs Python and the camera
 # code, sets up the detector, and starts you at the "aim your camera" step.
 #
-#   One line (recommended):
-#     irm https://sparrowmap.com/install-node-windows.ps1 | iex
+#   Configure RAVEN_HUB and RAVEN_REPO, then run this script from the checkout.
 #
 #   Or download and run:
 #     powershell -ExecutionPolicy Bypass -File install-node-windows.ps1
 #
 # It installs entirely under your user account (no admin needed for the app
 # itself; winget may prompt to install Python/Git the first time). Re-running it
-# updates an existing install. Self-hosters: set SPARROW_HUB to your own hub
-# before running and everything points there instead.
+# updates an existing install. Set RAVEN_HUB (or legacy SPARROW_HUB) to your
+# hub before running; there is no implicit default.
 
 $ErrorActionPreference = 'Stop'
-$Hub  = if ($env:SPARROW_HUB) { $env:SPARROW_HUB.TrimEnd('/') } else { 'https://map.sparrowmap.com' }
-$Repo = 'https://github.com/SparrowMap/sparrowmap'
+$Hub = if ($env:RAVEN_HUB) { $env:RAVEN_HUB.TrimEnd('/') } elseif ($env:SPARROW_HUB) { $env:SPARROW_HUB.TrimEnd('/') } else { $null }
+if (-not $Hub) {
+  Write-Error "No RavenMap hub configured. Set RAVEN_HUB to your hub URL. Legacy SPARROW_HUB is also accepted."
+  exit 1
+}
+$Repo = if ($env:RAVEN_REPO) { $env:RAVEN_REPO } elseif ($env:SPARROW_REPO) { $env:SPARROW_REPO } else { $null }
+if (-not $Repo) {
+  Write-Error "No RavenMap source repository configured. Set RAVEN_REPO. Legacy SPARROW_REPO is also accepted; no upstream default is used."
+  exit 1
+}
 $Root = Join-Path $env:LOCALAPPDATA 'SparrowMap'
 $App  = Join-Path $Root 'app'
 
@@ -25,7 +32,7 @@ function Say($m)  { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 
 Write-Host ""
-Write-Host "  SparrowMap desktop camera setup" -ForegroundColor Cyan
+Write-Host "  RavenMap desktop camera setup" -ForegroundColor Cyan
 Write-Host "  Contributes a real camera to $Hub"
 Write-Host ""
 
@@ -61,10 +68,10 @@ if (-not $PY) { throw "Python 3.10+ still not found after install. Open a new te
 
 # --- get / update the code ---------------------------------------------------
 if (Test-Path (Join-Path $App '.git')) {
-  Say "Updating SparrowMap in $App"
+  Say "Updating RavenMap in $App"
   git -C $App pull --ff-only
 } else {
-  Say "Downloading SparrowMap to $App"
+  Say "Downloading RavenMap to $App"
   New-Item -ItemType Directory -Force $Root | Out-Null
   git clone --depth 1 $Repo $App
 }
@@ -90,16 +97,16 @@ if (Have nvidia-smi) {
 }
 & $Py -m pip install -r (Join-Path $App 'requirements-node.txt')
 
-# --- point this machine at the public network (self-hosters override) -------
-[Environment]::SetEnvironmentVariable('SPARROW_HUB', $Hub, 'User')
-$env:SPARROW_HUB = $Hub
+# --- point this machine at the configured hub --------------------------------
+[Environment]::SetEnvironmentVariable('RAVEN_HUB', $Hub, 'User')
+$env:RAVEN_HUB = $Hub
 
 # --- shortcut + start at login ----------------------------------------------
 $Launcher = Join-Path $App 'desktop\run-node.ps1'
 $Cmd = "powershell.exe"
 $Args = "-ExecutionPolicy Bypass -NoExit -File `"$Launcher`""
 
-Say "Creating a 'SparrowMap Camera' shortcut and starting it at login"
+Say "Creating a 'RavenMap Camera' shortcut and starting it at login"
 try {
   $ws = New-Object -ComObject WScript.Shell
   foreach ($dir in @([Environment]::GetFolderPath('Desktop'),
@@ -109,7 +116,7 @@ try {
     $lnk.Arguments = $Args
     $lnk.WorkingDirectory = $App
     $lnk.IconLocation = "$Cmd,0"
-    $lnk.Description = "SparrowMap camera node"
+    $lnk.Description = "RavenMap camera node"
     $lnk.Save()
   }
 } catch { Warn "Could not create a shortcut ($_). You can still run desktop\run-node.ps1." }

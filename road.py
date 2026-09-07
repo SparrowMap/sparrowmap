@@ -1,4 +1,4 @@
-"""SparrowMap - putting a sighting on the ROAD without putting the camera on the map.
+"""RavenMap - putting a sighting on the ROAD without putting the camera on the map.
 
 🚨 THE PROBLEM THIS SOLVES
 Node positions are published jittered by up to 60 m so the map can show where
@@ -323,7 +323,7 @@ def fetch_ways(lat: float, lon: float, timeout: float = 25.0) -> list[list[tuple
             break
         req = urllib.request.Request(
             url, data=data,
-            headers={"User-Agent": "SparrowMap/0.1 (citizen ALPR; road snapping)"})
+            headers={"User-Agent": "RavenMap/0.1 (citizen ALPR; road snapping)"})
         try:
             with urllib.request.urlopen(req, timeout=remaining) as r:
                 doc = json.loads(r.read().decode("utf-8"))

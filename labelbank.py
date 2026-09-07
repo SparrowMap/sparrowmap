@@ -799,7 +799,8 @@ _PLACEMENT = Path(__file__).resolve().parent / "camctl" / "placement.json"
 
 
 def _node_creds() -> Optional[tuple]:
-    """(hub, node_id, token) for this camera, or None if it is not enrolled."""
+    """(hub, node_id, token) for this camera, or None if it is not enrolled
+    or no hub is configured."""
     import os
     try:
         p = json.loads(_PLACEMENT.read_text(encoding="utf-8"))
@@ -808,15 +809,19 @@ def _node_creds() -> Optional[tuple]:
     nid, tok = p.get("node_id"), p.get("token")
     if not nid or not tok:
         return None
-    hub = os.environ.get("SPARROW_HUB", "https://map.sparrowmap.com").rstrip("/")
+    # No implicit upstream default: an unconfigured install must not silently
+    # phone home to any public hub.
+    hub = (os.environ.get("RAVEN_HUB") or os.environ.get("SPARROW_HUB") or "").rstrip("/")
+    if not hub:
+        return None
     return hub, nid, tok
 
 
 def _call_box(payload: dict, path: str = "/api/node/label") -> Optional[dict]:
     creds = _node_creds()
     if not creds:
-        print("[labelbank] not enrolled: no node_id/token in placement.json, "
-              "so this label cannot reach the map")
+        print("[labelbank] not enrolled, or no hub configured (set RAVEN_HUB "
+              "or legacy SPARROW_HUB); this label cannot reach the map")
         return None
     hub, nid, tok = creds
     import urllib.request

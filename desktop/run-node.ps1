@@ -1,22 +1,27 @@
-# SparrowMap camera node - launcher (Windows).
+# RavenMap camera node - launcher (Windows).
 #
 # Starts the camera-control UI (which owns the webcam and serves its video to
 # the detector) and then the detector, which posts sightings to the public
-# SparrowMap network. Installed by install-node-windows.ps1; also run at login
+# RavenMap network. Installed by install-node-windows.ps1; also run at login
 # and from the desktop shortcut.
 #
-# A self-hoster points this at their own hub by setting SPARROW_HUB before it
-# runs (e.g. setx SPARROW_HUB http://localhost:8150). Everyone else contributes
-# to https://map.sparrowmap.com with no configuration.
+# Set RAVEN_HUB (or legacy SPARROW_HUB) to point this at your hub before it
+# runs (e.g. setx RAVEN_HUB http://localhost:8150). There is no implicit
+# default hub; an unconfigured install fails clearly instead of guessing.
 
 $ErrorActionPreference = 'Stop'
 $App   = Split-Path $PSScriptRoot -Parent
 $Py    = Join-Path $App '.venv\Scripts\python.exe'
 $Place = Join-Path $App 'camctl\placement.json'
-$Hub   = if ($env:SPARROW_HUB) { $env:SPARROW_HUB.TrimEnd('/') } else { 'https://map.sparrowmap.com' }
+$Hub   = if ($env:RAVEN_HUB) { $env:RAVEN_HUB.TrimEnd('/') } elseif ($env:SPARROW_HUB) { $env:SPARROW_HUB.TrimEnd('/') } else { $null }
 
 if (-not (Test-Path $Py)) {
-  Write-Host "SparrowMap is not installed yet. Run install-node-windows.ps1 first." -ForegroundColor Yellow
+  Write-Host "RavenMap is not installed yet. Run install-node-windows.ps1 first." -ForegroundColor Yellow
+  Read-Host "Press Enter to close"; exit 1
+}
+if (-not $Hub) {
+  Write-Host "No RavenMap hub configured. Set RAVEN_HUB to your hub URL." -ForegroundColor Yellow
+  Write-Host "Legacy SPARROW_HUB is also accepted." -ForegroundColor Yellow
   Read-Host "Press Enter to close"; exit 1
 }
 
@@ -30,7 +35,7 @@ function Enrolled {
 }
 
 Write-Host ""
-Write-Host "  SparrowMap camera node" -ForegroundColor Cyan
+Write-Host "  RavenMap camera node" -ForegroundColor Cyan
 Write-Host "    posts to  $Hub"
 Write-Host ""
 

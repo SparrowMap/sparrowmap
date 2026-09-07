@@ -47,12 +47,9 @@ Environment=PYTHONUNBUFFERED=1
 # source that both poll (double the load on somebody's public camera) or that
 # neither does (a state silently missing from the map).
 #
-#   /etc/sparrowmap-cams.env      SPARROW_SOURCES=... SPARROW_INTERVAL=... SPARROW_WORKERS=...
+#   /etc/sparrowmap-cams.env      RAVEN_SOURCES=... RAVEN_INTERVAL=... RAVEN_WORKERS=...
 #
 # The defaults below are the Helsinki box's, so an env file is optional.
-Environment=SPARROW_SOURCES=fi,ia,atx,on,oh,ny,nm,mo,sea,wsd,tor,nl
-Environment=SPARROW_INTERVAL=300
-Environment=SPARROW_WORKERS=96
 EnvironmentFile=-/etc/sparrowmap-cams.env
 
 # --interval 300: a traffic camera refreshes every 1-5 minutes, so polling
@@ -66,10 +63,11 @@ EnvironmentFile=-/etc/sparrowmap-cams.env
 #   either number; the run prints the arithmetic on startup for exactly this.
 # --sources: nyc is deliberately absent. Its index times out from a datacentre
 #   and 87% of its cameras are 352x240, below the 120px bar anyway.
-ExecStart=/opt/sparrowmap/.venv/bin/python /opt/sparrowmap/tools/public_cams.py \
+ExecStart=/bin/sh -c '/opt/sparrowmap/.venv/bin/python /opt/sparrowmap/tools/public_cams.py \
     run --tokens /opt/sparrowmap/data/cam_tokens.json \
-        --sources ${SPARROW_SOURCES} --interval ${SPARROW_INTERVAL} \
-        --workers ${SPARROW_WORKERS}
+        --sources "$${RAVEN_SOURCES:-$${SPARROW_SOURCES:-fi,ia,atx,on,oh,ny,nm,mo,sea,wsd,tor,nl}}" \
+        --interval "$${RAVEN_INTERVAL:-$${SPARROW_INTERVAL:-300}}" \
+        --workers "$${RAVEN_WORKERS:-$${SPARROW_WORKERS:-96}}"'
 
 Restart=on-failure
 RestartSec=30

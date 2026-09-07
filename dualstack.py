@@ -3,15 +3,14 @@
 ⚠️ THIS FIXES A 2-4 SECOND DELAY ON EVERY REQUEST. It is not a nicety.
 
 Binding to 0.0.0.0 listens on IPv4 only. Modern clients resolve a name to its
-AAAA record first, so `localhost` is tried as ::1 and `sparrow-box` as its
-IPv6 address BEFORE either falls back to IPv4. Nothing is listening there, so
-every request pays a connection-failure timeout first.
+AAAA record first, so `localhost` is tried as ::1 and `example-host` as its
+IPv6 address BEFORE either falls back to IPv4. Nothing is listening there, soevery request pays a connection-failure timeout first.
 
 Measured against an IPv4-only bind on this machine:
 
     http://127.0.0.1:8160/api/presets          1 ms
     http://localhost:8160/api/presets       2062 ms
-    http://sparrow-box:8160/api/presets 4100 ms
+    http://example-host:8160/api/presets 4100 ms
 
 The endpoint was identical in all three cases and never touched the camera, so
 the entire difference is the failed IPv6 attempt. It is invisible in testing

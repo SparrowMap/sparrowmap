@@ -1,4 +1,4 @@
-/* SparrowMap — the public map.
+/* RavenMap — the public map.
  *
  * Every vehicle the network has seen, plotted where it was seen, with the
  * snapshot that proves it. Public-tier vehicles carry their plate. Private
@@ -177,7 +177,7 @@ const map = L.map('map', { zoomControl: false, attributionControl: true,
                            wheelPxPerZoomLevel: 120 })
   .setView([42.7, -84.5], 8);
 // No zoom buttons at all: pinch and scroll zoom the map, and the buttons only
-// got in the way - on a phone they sat over the SparrowMap logo. `zoomControl:
+// got in the way - on a phone they sat over the RavenMap logo. `zoomControl:
 // false` above removes them. Keep the map sized to its container, because after
 // the mobile layout stacks map-over-panel Leaflet renders short and leaves a
 // grey gap otherwise.
@@ -208,6 +208,14 @@ addEventListener('error', (e) => {
   }
 }, true);
 
+/* Same-origin on purpose - see hub.py TILES. The tiles are CARTO's, fetched
+ * and cached by the hub, so a viewer's IP and the streets they chose to look
+ * at never reach a third party. Attribution is still required and still
+ * shown; proxying the bytes does not proxy the credit. */
+L.tileLayer('/api/tile/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO &middot; RavenMap',
+  maxZoom: 20,
+}).addTo(map);
 /* 🗺️ OUR OWN vector basemap. We serve a full-planet Protomaps archive
  * (planet.pmtiles, on the box via `pmtiles serve`) and render it with MapLibre
  * GL through the Leaflet bridge - keeping every Leaflet marker/layer below,
@@ -1100,7 +1108,7 @@ map.on('dragstart zoomstart', () => { _userMovedMap = true; });
 // open on THEIR own city instead of yanking them to another state's cameras.
 // With no cameras at all, open on their city. Runs when geolocation resolves or
 // the cameras load, whichever is last, and never fights a visitor who has
-// already panned. Deliberately NO IP lookup - SparrowMap does not send anyone's
+// already panned. Deliberately NO IP lookup - RavenMap does not send anyone's
 // location to a geo service to guess where they are; the browser asks, once.
 /* 🚨 A FLORIDA VOLUNTEER OPENED THE MAP AND GOT LANSING, MICHIGAN.
  *
@@ -1329,7 +1337,7 @@ async function loadCameras() {
       color: '#7fd1ff', fillColor: '#1b2a3d', fillOpacity: 0.9,
     }).bindPopup(
       '<b>' + esc(c.name) + '</b><br>'
-      + '<span style="color:#93a3b3">A public traffic camera, read by SparrowMap.'
+      + '<span style="color:#93a3b3">A public traffic camera, read by RavenMap.'
       + ' Not a volunteer\u2019s camera.</span><br>'
       + esc(String(c.sightings || 0)) + ' passes seen'
     ).addTo(state.publicCamLayer);
@@ -2035,7 +2043,7 @@ function airPopup(a) {
   return `<div class="pop"><h4>${esc(a.call || a.n_number || a.icao)}</h4>`
        + bits.map((b) => `<div class="sub">${b}</div>`).join('')
        + `<div class="sub dim">Live position from ADS-B, which aircraft `
-       + `broadcast publicly. SparrowMap does not track aircraft.</div></div>`;
+       + `broadcast publicly. RavenMap does not track aircraft.</div></div>`;
 }
 
 // 🚨 WHICH SWITCH OWNS AN AIRCRAFT. Law enforcement wins outright, so a
@@ -2457,7 +2465,7 @@ async function policyBanner() {
     return;
   }
   el.style.display = '';
-  el.innerHTML = `<b>Public-tier reporting is off.</b> SparrowMap is not yet
+  el.innerHTML = `<b>Public-tier reporting is off.</b> RavenMap is not yet
     willing to call a vehicle a police vehicle: the classifier has not been
     validated against locally labelled footage, and an unvalidated one was
     wrong every time it was checked. Traffic is still counted and cameras are
@@ -2763,7 +2771,7 @@ function showIntro() {
   // redacts only when tier != "public". The unscoped version of this sentence
   // promised something the system does not do and was never meant to do, which
   // is a worse failure than promising nothing.
-  const p = mk('div', 'SparrowMap runs on volunteer cameras. Point a spare phone '
+  const p = mk('div', 'RavenMap runs on volunteer cameras. Point a spare phone '
     + 'at a street and it maps the patrols that pass. Private plates are '
     + 'destroyed on the device and never uploaded.',
     { color: '#93a3b3', marginBottom: '20px' });
@@ -2841,7 +2849,7 @@ setInterval(ageTraffic, 1000);    // the live traffic view
 
 /* ---- government plate search ------------------------------------------
  *
- * The one control on this map that could be mistaken for the thing SparrowMap
+ * The one control on this map that could be mistaken for the thing RavenMap
  * exists to oppose. So it is built to be honest about its own limits: it can
  * only find a plate on a PUBLIC-tier sighting that a human has confirmed, and
  * the server never scans anything else - not as a display rule, but in the

@@ -1,4 +1,4 @@
-"""SparrowMap4Biz: the LIGHT node for a business, with a window instead of a terminal.
+"""RavenMap4Biz: the LIGHT node for a business, with a window instead of a terminal.
 
     python desktop\\sparrowmap_app.py          # run it
     python desktop\\build.py                   # build SparrowMap.exe
@@ -37,8 +37,8 @@ from tkinter import ttk, messagebox
 # The BUSINESS build. Named apart from the phone/webcam node so the two
 # downloads on the release page cannot be confused for each other - one
 # is for a shop with an IP camera, the other is not.
-APP = "SparrowMap4Biz"
-HUB_DEFAULT = "https://map.sparrowmap.com"
+APP = "RavenMap4Biz"
+HUB_DEFAULT = os.environ.get("RAVEN_HUB") or os.environ.get("SPARROW_HUB") or ""
 CFG = Path.home() / ".sparrowmap" / "desktop.json"
 BG, PANEL, INK, DIM, LINE = "#0a0d12", "#111621", "#e6ecf5", "#8794a8", "#2a3547"
 RED, GREEN = "#ff3b47", "#3ddc97"
@@ -189,7 +189,7 @@ class App(tk.Tk):
     def _build(self):
         head = tk.Frame(self, bg=PANEL, height=58)
         head.pack(fill="x")
-        tk.Label(head, text="SPARROWMAP", bg=PANEL, fg=INK,
+        tk.Label(head, text="RAVENMAP", bg=PANEL, fg=INK,
                  font=("Segoe UI", 13, "bold")).pack(side="left", padx=14, pady=(12, 0))
         self.dot = tk.Label(head, text="●", bg=PANEL, fg=DIM, font=("Segoe UI", 13))
         self.dot.pack(side="right", padx=(0, 6), pady=12)
@@ -335,6 +335,11 @@ class App(tk.Tk):
             return messagebox.showerror(
                 APP, "This camera needs an id and a token.\n\n"
                      "Use the button below the boxes to create one.")
+        if not v["hub"]:
+            return messagebox.showerror(
+                APP, "No RavenMap hub configured.\n\n"
+                     "Set RAVEN_HUB (or legacy SPARROW_HUB) before starting "
+                     "RavenMap4Biz.")
         self.cfg.update({k: v[k] for k in ("node", "token", "lat", "lon")})
         self.cfg["source"] = self.e_src.get().strip()
         save_cfg(self.cfg)
@@ -417,7 +422,7 @@ def set_autostart(on: bool) -> str:
     if on:
         unit.parent.mkdir(parents=True, exist_ok=True)
         unit.write_text(
-            "[Unit]\nDescription=SparrowMap relay\n\n"
+            "[Unit]\nDescription=RavenMap relay\n\n"
             f"[Service]\nExecStart={cmd}\nRestart=always\nRestartSec=10\n\n"
             "[Install]\nWantedBy=default.target\n", encoding="utf-8")
         subprocess.run(["systemctl", "--user", "enable", "--now", "sparrowmap"],

@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>How SparrowMap works</title>
+<title>How RavenMap works</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <meta name="theme-color" content="#0a0d12">
-<meta name="description" content="How SparrowMap works: volunteer cameras, what is kept, what is destroyed, and where it gets things wrong.">
+<meta name="description" content="How RavenMap works: volunteer cameras, what is kept, what is destroyed, and where it gets things wrong.">
 <style>
 :root{
   --bg:#0a0d12; --bg2:#0d1219; --bg3:#111621;
@@ -230,7 +230,7 @@ blockquote cite{display:block; margin-top:8px; font:11px var(--mono); font-style
 
 <div class="hero">
   <h1>Watching the watchers</h1>
-  <p class="sub">SparrowMap &middot; how it works</p>
+  <p class="sub">RavenMap &middot; how it works</p>
   <p class="lede">
     Volunteers point cameras at public roads, and everything they see goes into
     <strong>one shared database that anyone can read</strong> &mdash; no account, no
@@ -246,7 +246,7 @@ blockquote cite{display:block; margin-top:8px; font:11px var(--mono); font-style
       <b>One database, and it is everybody&rsquo;s.</b>
       <p>The same technology is normally sold to police departments and kept
       private &mdash; you cannot see it, query it, or know you are in it.
-      SparrowMap runs <strong>one shared database</strong>, and every sighting in
+      RavenMap runs <strong>one shared database</strong>, and every sighting in
       it is readable by anyone, including the people it watches. There is no
       customer tier, no paid access, and no version of this map with more in it
       than the one you are looking at.</p>
@@ -288,7 +288,7 @@ blockquote cite{display:block; margin-top:8px; font:11px var(--mono); font-style
     <div class="arrow"><span>&rarr;</span></div>
     <div class="box mid">
       <h4>The public box</h4>
-      <span class="who">map.sparrowmap.com</span>
+      <span class="who">the configured public hub</span>
       <ul>
         <li>Holds the published record only</li>
         <li>No private imagery, ever</li>
@@ -510,7 +510,7 @@ review:confirm   31656   actor=Matthew</pre></div>
       <div class="outs">
         <div class="out">
           <h3>Plates: government only, and not working yet</h3>
-          <p>SparrowMap <strong>does</strong> keep plate text &mdash; but only for a
+          <p>RavenMap <strong>does</strong> keep plate text &mdash; but only for a
           government vehicle, and only after a person has confirmed it. An
           ordinary vehicle&rsquo;s plate is destroyed in the image on the camera
           and never stored readable, so there is nothing to look up and no way
@@ -665,10 +665,10 @@ review:confirm   31656   actor=Matthew</pre></div>
       contract. Any of these answers from the live server, in a browser or from
       a terminal, with no permission from anyone:</p>
 
-      <div class="codewrap"><pre><code>curl https://map.sparrowmap.com/api/sightings   <span class="c"># every sighting on the map</span>
-curl https://map.sparrowmap.com/api/nodes       <span class="c"># every contributing camera</span>
-curl https://map.sparrowmap.com/api/policy      <span class="c"># what this deployment promises</span>
-curl https://map.sparrowmap.com/api/audit       <span class="c"># what the reviewers decided</span></code></pre></div>
+      <div class="codewrap"><pre><code>curl /api/sightings   <span class="c"># every sighting on this hub</span>
+curl /api/nodes       <span class="c"># every contributing camera</span>
+curl /api/policy      <span class="c"># what this deployment promises</span>
+curl /api/audit       <span class="c"># what the reviewers decided</span></code></pre></div>
 
       <p class="intro">That is the difference worth caring about. The same
       cameras, pointed at the same streets, normally feed a private database
@@ -676,8 +676,8 @@ curl https://map.sparrowmap.com/api/audit       <span class="c"># what the revie
       of. This one answers to anybody who asks.</p>
 
   <div class="outs">
-    <a class="out" href="https://map.sparrowmap.com" rel="noopener">
-      <b>The live map</b>
+    <a class="out" href="/" rel="noopener">
+      <b>This hub's map</b>
       <span>Every sighting, with the evidence behind it.</span>
     </a>
     <a class="out" href="https://github.com/SparrowMap/sparrowmap" rel="noopener">
@@ -705,9 +705,8 @@ curl https://map.sparrowmap.com/api/audit       <span class="c"># what the revie
 (function () {
   'use strict';
 
-  // Same-origin when served by the hub; the public box otherwise, so this page
-  // works identically as a local preview and as a deployed page.
-  var API = location.hostname.indexOf('sparrowmap') !== -1 ? '' : 'https://map.sparrowmap.com';
+  // The guide is served by the current hub, so API requests stay same-origin.
+  var API = '';
 
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -801,7 +800,7 @@ curl https://map.sparrowmap.com/api/audit       <span class="c"># what the revie
   }).catch(function (e) {
     fail('dot-policy', 'lbl-policy', document.getElementById('policy'),
       'Could not reach the policy endpoint (' + e.message + '). The published ' +
-      'values are readable at map.sparrowmap.com/api/policy.');
+      'values are readable at this hub\\'s /api/policy endpoint.');
   });
 
   /* ---------- 2. live counters ---------- */

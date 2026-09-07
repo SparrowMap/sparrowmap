@@ -10,11 +10,6 @@
 # quietly shows the marketing page instead would lose exactly the argument it
 # was built to win.
 #
-# 302 rather than 301: the status page lives on the hub today, and a permanent
-# redirect is cached by browsers for a long time and is painful to take back if
-# that ever moves.
-/status  https://map.sparrowmap.com/status  302
-
-# The same trap, for the two paths people already share by hand.
-/map     https://map.sparrowmap.com/        302
-/app     https://map.sparrowmap.com/app     302
+# RavenMap has no canonical public hosted hub yet. Do not redirect these paths
+# to the upstream SparrowMap deployment; self-hosted users should use their
+# configured RAVEN_HUB/legacy SPARROW_HUB directly.

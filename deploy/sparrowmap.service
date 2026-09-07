@@ -21,7 +21,7 @@ Group=sparrow
 WorkingDirectory=/opt/sparrowmap
 # Loopback only. Caddy terminates TLS in front and proxies here; binding wider
 # would put the port on the internet past every header and rate limit.
-Environment=SPARROW_BIND=127.0.0.1
+Environment=RAVEN_BIND=127.0.0.1
 # 🚨 WITHOUT THIS THE BOX CANNOT TELL YOU ANYTHING IS WRONG.
 #
 # Python block-buffers stdout when it is not a terminal, and systemd gives it a

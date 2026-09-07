@@ -57,6 +57,7 @@ import concurrent.futures as cf
 import gzip
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -1378,7 +1379,7 @@ for _st in CARS:
                     cars_index(k, measured_only))(_st)
 
 
-def load_model():
+def load_model(hub: str):
     import onnxruntime as ort
     # ⚠️ DO NOT go through detect.relay unless you have to. It imports cv2 at
     # module level, so asking it to resolve a FILE PATH drags OpenCV (and its
@@ -1388,7 +1389,7 @@ def load_model():
     local = ROOT / "public" / "vendor" / "yolo11s.onnx"
     if not local.exists():
         from detect import relay          # download + verify path, needs cv2
-        local = relay.model_path("https://map.sparrowmap.com")
+        local = relay.model_path(hub)
     sess = ort.InferenceSession(str(local), providers=["CPUExecutionProvider"])
     shape = sess.get_inputs()[0].shape
     size = int(shape[2]) if isinstance(shape[2], int) else 320
@@ -1709,7 +1710,7 @@ def cams_from_tokens(tokens_path: str, sources: list) -> list:
 def cmd_survey(args) -> int:
     cams = SOURCES[args.source]()
     print(f"{len(cams)} online cameras with coordinates; probing {args.limit}\n")
-    sess, size = load_model()
+    sess, size = load_model(args.hub)
     st = load_state()
     good = 0
     for c in cams[:args.limit]:
@@ -1777,7 +1778,7 @@ def cmd_run(args) -> int:
         print("no enrolled cameras - run survey then enrol first, or pass "
               "--tokens for cameras registered by bulk_enrol_cams.py")
         return 1
-    sess, size = load_model()
+    sess, size = load_model(args.hub)
     # 🚨 WHY THREADS AND NOT A GPU.
     #
     # Measured before spending anything: a camera costs 0.36s of NETWORK and
@@ -2028,7 +2029,9 @@ def cmd_run(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hub", default="https://map.sparrowmap.com")
+    ap.add_argument("--hub",
+                    default=os.environ.get("RAVEN_HUB") or
+                    os.environ.get("SPARROW_HUB") or "")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("survey"); s.add_argument("--source", default="nyc")
     s.add_argument("--limit", type=int, default=200); s.set_defaults(fn=cmd_survey)
@@ -2053,6 +2056,9 @@ def main() -> int:
                    help="concurrent fetches (default min(32, fleet size))")
     r.set_defaults(fn=cmd_run)
     args = ap.parse_args()
+    if not args.hub:
+        ap.error("No RavenMap hub configured. Set RAVEN_HUB; "
+                 "legacy SPARROW_HUB is also accepted.")
     return args.fn(args)
 
 

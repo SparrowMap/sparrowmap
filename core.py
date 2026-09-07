@@ -1,6 +1,6 @@
-"""SparrowMap - shared paths, config and small helpers.
+"""RavenMap - shared paths, config and small helpers.
 
-SparrowMap is a citizen-run camera network. Volunteers point a camera at a public
+RavenMap is a citizen-run camera network. Volunteers point a camera at a public
 road from their own property. The camera does all recognition locally and sends
 the hub a *detection event*, never video.
 
@@ -107,7 +107,7 @@ EVIDENCE_TTL_S = 72 * 3600
 # (Overpass, Nominatim, the tile CDN, aircraft). The clients pointed at our OWN
 # hub were the ones that did not, which is backwards: those are the requests we
 # most need to be able to recognise, allow-list and debug.
-NODE_UA = "SparrowMap-Node/1.0 (+https://sparrowmap.com)"
+NODE_UA = "RavenMap-Node/1.0"
 PUBLIC = ROOT / "public"
 DB_PATH = DATA / "sparrow.db"
 CONFIG_PATH = ROOT / "config.json"
@@ -124,7 +124,11 @@ for _d in (DATA, SNAPS):
 # entire privacy posture of a deployment in one screen.
 
 DEFAULTS = {
-    "site_name": "SparrowMap",
+    "site_name": "RavenMap",
+
+    # Optional CARTO basemap API key.
+    # Deployment-specific; never commit a real key.
+    "carto_api_key": "",
 
     # 🧪 STAGED, OFF BY DEFAULT. The aircraft page (/planes) reads live ADS-B
     # and the FAA registry to show government aircraft and ones that are
@@ -249,7 +253,7 @@ def is_operator_addr(addr: str) -> bool:
     """May a caller from this address use the operator-only routes?
 
     🚨 THIS WAS IPv4-ONLY AND IT SILENTLY BROKE BOTH OPERATOR PAGES.
-    `sparrow-box` resolves to an IPv6 unique-local address
+    `example-host` resolves to an IPv6 unique-local address
     (fd00:2e67:...), so reaching the labelling or review pages by HOSTNAME -
     which is how every link in the Pages hub is written, and the only way the
     phone can reach them - produced 403 "local only". The labelling buttons did

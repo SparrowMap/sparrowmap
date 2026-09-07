@@ -1,6 +1,6 @@
 # SparrowMap - desktop camera, Windows.
 #
-#   powershell -ExecutionPolicy Bypass -File install-windows.ps1 https://sparrowmap.com
+#   powershell -ExecutionPolicy Bypass -File install-windows.ps1 https://your-hub.example
 #
 # ## What this installs, and what it deliberately does not
 #
@@ -19,16 +19,16 @@
 # have to remember" and "a thing that runs".
 
 param(
-  # Defaults to the public network so the script works with no arguments -
-  # `irm https://sparrowmap.com/install-windows.ps1 | iex`. Pass your own URL
-  # only if you self-host an instance.
-  [string]$Url = 'https://sparrowmap.com',
+  [string]$Url = $(if ($env:RAVEN_HUB) { $env:RAVEN_HUB } else { $env:SPARROW_HUB }),
   [switch]$NoAutostart
 )
 
 $ErrorActionPreference = 'Stop'
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
+if (-not $Url) {
+  throw "No RavenMap hub configured. Set RAVEN_HUB or pass the hub URL explicitly. Legacy SPARROW_HUB is also accepted; no upstream default is used."
+}
 if ($Url -notmatch '^https?://') { throw "Url must start with http:// or https://" }
 $AppUrl = ($Url.TrimEnd('/')) + '/app'
 
@@ -59,7 +59,7 @@ New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
 $argLine = "--app=$AppUrl --user-data-dir=`"$profileDir`" --start-maximized"
 
 # --- shortcut ---------------------------------------------------------------
-Say "Creating the SparrowMap Camera shortcut"
+Say "Creating the RavenMap Camera shortcut"
 $desktop = [Environment]::GetFolderPath('Desktop')
 $lnk = Join-Path $desktop 'SparrowMap Camera.lnk'
 $shell = New-Object -ComObject WScript.Shell
@@ -67,7 +67,7 @@ $s = $shell.CreateShortcut($lnk)
 $s.TargetPath = $browser
 $s.Arguments = $argLine
 $s.WorkingDirectory = Split-Path $browser
-$s.Description = 'SparrowMap - watch the road from this computer'
+$s.Description = 'RavenMap - watch the road from this computer'
 $s.Save()
 Write-Host "    $lnk"
 
@@ -94,7 +94,7 @@ Write-Host "    (the app also holds a screen wake lock while it is running)"
 Write-Host ""
 Say "Done"
 Write-Host @"
-    Open 'SparrowMap Camera' on your desktop.
+    Open 'RavenMap Camera' on your desktop.
 
     First time: name the camera, allow the camera and location, press
     Register, then Start watching. The detector downloads once (~21 MB)

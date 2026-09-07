@@ -5,7 +5,7 @@ CPU was already spoken for.
 
 ## The measurement that decides the whole plan
 
-Taken on the live box (`ubuntu-4gb-hel1-3`, **2 vCPU**, 3.8 GB RAM):
+Taken on the live box (`example-host`, **2 vCPU**, 3.8 GB RAM):
 
 | process | CPU |
 |---|---|
@@ -19,7 +19,7 @@ Taken on the live box (`ubuntu-4gb-hel1-3`, **2 vCPU**, 3.8 GB RAM):
 
 So the instinct "move EmberFM off the box" aims at the wrong thing. Icecast,
 `radio.py` and the player website are nearly free and can stay where they are.
-**One service is 96 % of the problem: `emberfm-youtube.service`.**
+**One service is 96 % of the problem: `project-stream.service`.**
 
 It already runs at `Nice=5`, which is not helping, because niceness only decides
 who wins a contended core and there is nothing else to yield to — the work is
@@ -33,7 +33,7 @@ Frees a full core. Touches nothing that serves a listener.
 
 **The one real change:** the encoder currently reads
 `http://localhost:8000/ember.mp3`. From another box it reads
-`https://fm.emberaudio.net/ember.mp3` — already public, already live, 128 kbps.
+`https://example-stream.example.local/ember.mp3` — already public, already live, 128 kbps.
 
 ✅ **And no code edit is needed.** `youtube_stream.py:24` is already
 `ICECAST = os.environ.get("EMBER_STREAM_URL", "http://localhost:8000/ember.mp3")`,
@@ -51,30 +51,30 @@ Side benefit: the old box also stops pushing video upstream to YouTube.
 1. Hetzner **CPX21** (3 vCPU AMD, ~€8/mo). x264 720p24 needs roughly one solid
    core; three gives headroom. CPX31 if the channel ever goes 1080p.
 2. `apt install ffmpeg python3-venv`, create the `ember` user.
-3. Copy `/home/ember/emberfm/youtube_stream.py` and `/home/ember/emberfm/pngs/`.
+3. Copy `/srv/ravenmap/streamer/youtube_stream.py` and `/srv/ravenmap/streamer/pngs/`.
    ⚠️ The stream key is inside `youtube_stream.py` — **treat that file as a secret**,
    move it over SSH, and never let it reach a public repo.
-4. Point the input at `https://fm.emberaudio.net/ember.mp3`.
-5. Copy `emberfm-youtube.service`, fix paths, drop `Nice=5` (nothing to yield to
-   now), drop the `After=` on icecast/emberfm — they live on another machine.
-6. **Cutover:** `systemctl stop emberfm-youtube` on the old box, start it on the
-   new one, confirm the YouTube channel is live again.
-7. Only then `systemctl disable emberfm-youtube` on the old box.
+4. Point the input at `https://example-stream.example.local/ember.mp3`.
+5. Copy `project-stream.service`, fix paths, drop `Nice=5` (nothing to yield to
+   now), drop the `After=` on the upstream service — they live on another machine.
+6. **Cutover:** `systemctl stop project-stream` on the old box, start it on the
+   new one, confirm the stream is live again.
+7. Only then `systemctl disable project-stream` on the old box.
 8. Watch `/api/health` on SparrowMap: `threads_peak` and load should fall, and
    the 48-connection cap should stop being reached.
 
 ### Rollback
-Stop the new box's service, `systemctl start emberfm-youtube` on the old box.
-Nothing was deleted, so rollback is one command and another short YouTube gap.
+Stop the new box's service, `systemctl start project-stream` on the old box.
+Nothing was deleted, so rollback is one command and another short stream gap.
 
 ## Option B — move the whole radio
 
 Icecast, `radio.py`, the player site and the encoder all move together.
 
 **Costs much more risk for 4.3 % more CPU.** It needs a DNS change for
-`fm.emberaudio.net`, a Caddy vhost and certificate on the new box, the Icecast
-credentials, the `radio_library` (171 MB), and it drops every live listener plus
-the TuneIn feed during cutover.
+`example-stream.example.local`, a Caddy vhost and certificate on the new box, the
+upstream credentials, the `radio_library` (171 MB), and it drops every live listener
+plus the public feed during cutover.
 
 Worth doing only if the goal is separating the projects for their own sake rather
 than reclaiming CPU. If so, do **Option A first** — it is a prerequisite step of B
@@ -82,6 +82,6 @@ anyway, and it delivers the entire performance win on its own.
 
 ## What is NOT part of this
 
-`/home/ember/emberaudio` (3.1 GB) is the **EmberAudio site**, not EmberFM, and it
-costs 0.1 % CPU. `litestream` and `bizcenter` likewise. None of them are why
+`/srv/ravenmap/project-audio` (3.1 GB) is the **Project Audio site**, not the stream,
+and it costs 0.1 % CPU. `litestream` and `bizcenter` likewise. None of them are why
 SparrowMap fell over. Leave them.

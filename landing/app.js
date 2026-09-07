@@ -9,8 +9,10 @@
 /* ---- call-to-action buttons --------------------------------------------
    Fill either value in and its button appears; leave it empty and the button
    is simply not rendered, so the page never ships a dead link. */
-const APP_URL = "https://map.sparrowmap.com/app";
-const MAP_URL = "https://map.sparrowmap.com";
+// No canonical public RavenMap host is configured yet. Keep these empty rather
+// than sending visitors to the upstream SparrowMap deployment.
+const APP_URL = "";
+const MAP_URL = "";
 const GITHUB_URL = "https://github.com/SparrowMap/sparrowmap";
 const INSTAGRAM_URL = "https://instagram.com/sparrowmap";
 const CONTACT_EMAIL = "sparrowmap@icloud.com";
@@ -26,8 +28,8 @@ const CONTACT_EMAIL = "sparrowmap@icloud.com";
   };
   if (APP_URL) link("btn", APP_URL, "Add a camera");
   if (MAP_URL) link("btn ghost", MAP_URL, "View the live map");
-  if (GITHUB_URL) link("btn ghost", GITHUB_URL, "Read the code on GitHub");
-  if (INSTAGRAM_URL) link("btn ghost", INSTAGRAM_URL, "Follow on Instagram");
+  if (GITHUB_URL) link("btn ghost", GITHUB_URL, "Read the upstream code");
+  if (INSTAGRAM_URL) link("btn ghost", INSTAGRAM_URL, "Upstream Instagram");
   if (CONTACT_EMAIL) {
     const a = document.createElement("a");
     a.className = "btn ghost";
@@ -64,12 +66,13 @@ const CONTACT_EMAIL = "sparrowmap@icloud.com";
     "font-size:21px;font-weight:700;color:#fff;margin-bottom:10px");
   // ⚠️ "PRIVATE plates", NOT "plates" - kept in step with public/app.js. A
   // government plate is deliberately kept readable and searchable.
-  const p = mk("div", "SparrowMap runs on volunteer cameras. Point a spare phone "
+  const p = mk("div", "RavenMap runs on volunteer cameras. Point a spare phone "
     + "at a street and it maps the patrols that pass. Private plates are "
     + "destroyed on the device and never uploaded.", "color:#93a3b3;margin-bottom:20px");
-  const add = mk("a", "Add a camera", "display:block;padding:14px;border-radius:11px;"
+  const add = mk("a", APP_URL ? "Add a camera" : "Configure a hub to add a camera", "display:block;padding:14px;border-radius:11px;"
     + "background:#3b82f6;color:#fff;font-weight:600;text-decoration:none;margin-bottom:10px");
-  add.href = APP_URL || "https://map.sparrowmap.com/app"; add.rel = "noopener";
+  if (APP_URL) { add.href = APP_URL; add.rel = "noopener"; }
+  else { add.removeAttribute("href"); add.style.opacity = ".65"; }
 
   /* 🚨 THE SAME THREE ROUTES AS THE MAP'S CARD, AND FOR THE SAME REASON.
    * This card and public/app.js's showIntro() are two copies of one decision -
@@ -87,13 +90,17 @@ const CONTACT_EMAIL = "sparrowmap@icloud.com";
     + "background:#131c27;border:1px solid #22303c;color:#c7d2dc;font-weight:600;"
     + "font-size:12.5px;text-decoration:none;text-align:center;cursor:pointer;"
     + "white-space:nowrap;min-width:0";
-  const drive = mk("a", "🚗 Driving", SEC);
-  drive.href = "https://map.sparrowmap.com/drive"; drive.rel = "noopener";
-  const biz = mk("a", "📷 IP Camera", SEC);
-  biz.href = "https://map.sparrowmap.com/IPCamera"; biz.rel = "noopener";
-  const signin = mk("a", "🔑 Sign in", SEC);
-  signin.href = "https://map.sparrowmap.com/signin"; signin.rel = "noopener";
-  row.append(drive, biz, signin);
+  const destinations = [
+    ["🚗 Driving", "/drive"],
+    ["📷 IP Camera", "/IPCamera"],
+    ["🔑 Sign in", "/signin"],
+  ];
+  destinations.forEach(([text, path]) => {
+    if (!MAP_URL) return;
+    const link = mk("a", text, SEC);
+    link.href = MAP_URL + path; link.rel = "noopener";
+    row.append(link);
+  });
 
   const backNote = mk("div",
     "Set up a camera before? Nothing is deleted — sign in with your key rather "
@@ -107,7 +114,7 @@ const CONTACT_EMAIL = "sparrowmap@icloud.com";
   skip.addEventListener("click", done);
   // Every way out marks it seen, or the card returns on the next visit and
   // reads as the site having forgotten what was just chosen.
-  [add, drive, biz, signin].forEach((el) => el.addEventListener("click", done));
+  [add, ...row.children].forEach((el) => el.addEventListener("click", done));
   ov.addEventListener("click", (e) => { if (e.target === ov) done(); });
   card.append(h, p, add, row, backNote, skip);
   ov.appendChild(card);

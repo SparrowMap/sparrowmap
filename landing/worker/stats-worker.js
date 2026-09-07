@@ -29,6 +29,14 @@
 const FIELDS = ["vehicles_seen", "sightings", "confirmed_public",
                 "private_seen", "private_plates_stored", "cameras"];
 
+// Configure the public site origin explicitly in the worker environment.
+// RAVEN_STATS_ORIGIN is preferred; the legacy name remains compatible.
+function allowedOrigin(env, request) {
+  const configured = env.RAVEN_STATS_ORIGIN || env.SPARROW_STATS_ORIGIN || "";
+  const requestOrigin = request.headers.get("Origin") || "";
+  return configured && requestOrigin === configured ? configured : "";
+}
+
 function safeEqual(a, b) {
   // Constant time in the length-equal case; length is not secret.
   if (typeof a !== "string" || typeof b !== "string") return false;
@@ -95,13 +103,14 @@ export default {
       // "keep the honest snapshot in the markup", and an empty payload would
       // instead risk rendering zeros beside sentences that claim otherwise.
       if (!cur) return new Response("no data yet", {status: 404});
+      const corsOrigin = allowedOrigin(env, request);
       return new Response(cur, {
         headers: {
           "Content-Type": "application/json",
           // Short cache: the figures move slowly and a visitor spike should not
           // become a KV read per visitor.
           "Cache-Control": "public, max-age=60",
-          "Access-Control-Allow-Origin": "https://sparrowmap.com",
+          ...(corsOrigin ? {"Access-Control-Allow-Origin": corsOrigin} : {}),
         },
       });
     }

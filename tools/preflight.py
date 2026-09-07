@@ -37,9 +37,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # 🚨 NOT HARDCODED. The box address and the key path must never be published -
 # run_box_puller.bat is kept OUTSIDE this repo for exactly that reason. This
 # file caught its own violation on its first run, which is the best argument
-# for it existing. Set SPARROW_BOX and SPARROW_KEY to use --box.
-BOX = os.environ.get("SPARROW_BOX", "")
-KEY = os.environ.get("SPARROW_KEY", "")
+# for it existing. Set RAVEN_BOX and RAVEN_KEY to use --box.
+BOX = os.environ.get("RAVEN_BOX") or os.environ.get("SPARROW_BOX") or ""
+KEY = os.environ.get("RAVEN_KEY") or os.environ.get("SPARROW_KEY") or ""
 
 PATTERNS = {
     "coordinate pair": r"-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}",
@@ -257,7 +257,7 @@ def check_personal_data(changed: list[str]) -> None:
 
 def check_drift() -> None:
     if not BOX or not KEY:
-        say("skip", "set SPARROW_BOX and SPARROW_KEY to check box drift")
+        say("skip", "set RAVEN_BOX and RAVEN_KEY to check box drift")
         return
     files = subprocess.run(["git", "ls-files"], cwd=ROOT,
                            capture_output=True, text=True).stdout.split()

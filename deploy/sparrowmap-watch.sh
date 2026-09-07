@@ -27,12 +27,18 @@
 
 set -uo pipefail
 
-URL="${SPARROW_HEALTH_URL:-https://map.sparrowmap.com/api/health}"
+URL="${RAVEN_HEALTH_URL:-${SPARROW_HEALTH_URL:-}}"
 SERVICE="sparrowmap.service"
 STATE="/var/lib/sparrowmap-watch"
 LOG="/opt/sparrowmap/logs/watch.log"
 MAX_RESTARTS=3          # per hour
 WARN_PCT=80             # descriptor headroom worth shouting about
+
+if [ -z "$URL" ]; then
+    echo "No RavenMap health URL configured. Set RAVEN_HEALTH_URL "\
+"(legacy SPARROW_HEALTH_URL is also accepted)." >&2
+    exit 1
+fi
 
 mkdir -p "$STATE" "$(dirname "$LOG")"
 FAILS="$STATE/consecutive_fails"
@@ -52,17 +58,20 @@ say() { echo "$(date -Is) $*" >> "$LOG"; }
 # give-up can wake something that reasons instead of something that restarts.
 #
 # ⚠️ THE BODY IS DELIBERATELY THIN, AND THE REPO IS A CHOICE.
-# ALERT_REPO defaults to the public code repo, so anything written here is
-# public and permanent. Counts and timestamps only - never an address, never a
-# coordinate, never a token. /api/health already publishes these same numbers,
-# so this leaks nothing new; a detailed post-mortem does not belong here.
-# 📌 If you would rather not announce outages in public at all, point
-# ALERT_REPO at a private repo - that is the only change needed.
-ALERT_REPO="${SPARROW_ALERT_REPO:-SparrowMap/sparrowmap}"
-TOKEN_FILE="${SPARROW_GH_TOKEN_FILE:-/etc/sparrowmap/github_token}"
+# ALERT_REPO must be explicitly configured, so this fork cannot accidentally
+# file issues against an upstream repository. Counts and timestamps only -
+# never an address, never a coordinate, never a token. /api/health already
+# publishes these same numbers, so this leaks nothing new.
+ALERT_REPO="${RAVEN_ALERT_REPO:-${SPARROW_ALERT_REPO:-}}"
+TOKEN_FILE="${RAVEN_GH_TOKEN_FILE:-${SPARROW_GH_TOKEN_FILE:-/etc/sparrowmap/github_token}}"
 
 alert_human() {
     local status="$1"
+    if [ -z "$ALERT_REPO" ]; then
+        say "CANNOT ALERT: no alert repository configured; set RAVEN_ALERT_REPO "\
+"(legacy SPARROW_ALERT_REPO is also accepted)."
+        return 1
+    fi
     if [ ! -r "$TOKEN_FILE" ]; then
         say "CANNOT ALERT: no token at $TOKEN_FILE, so nobody is being told. "\
 "Create a fine-grained PAT with Issues:write on $ALERT_REPO and put it there, chmod 600."

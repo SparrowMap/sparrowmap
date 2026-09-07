@@ -1,6 +1,6 @@
 # SparrowMap - desktop camera, Windows.
 #
-#   powershell -ExecutionPolicy Bypass -File install-windows.ps1 https://sparrowmap.com
+#   powershell -ExecutionPolicy Bypass -File install-windows.ps1 https://your-hub.example
 #
 # ## What this installs, and what it deliberately does not
 #
@@ -19,16 +19,16 @@
 # have to remember" and "a thing that runs".
 
 param(
-  # Defaults to the public network so the script works with no arguments -
-  # `irm https://sparrowmap.com/install-windows.ps1 | iex`. Pass your own URL
-  # only if you self-host an instance.
-  [string]$Url = 'https://sparrowmap.com',
+  [string]$Url = $(if ($env:RAVEN_HUB) { $env:RAVEN_HUB } else { $env:SPARROW_HUB }),
   [switch]$NoAutostart
 )
 
 $ErrorActionPreference = 'Stop'
 function Say($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 
+if (-not $Url) {
+  throw "No RavenMap hub configured. Set RAVEN_HUB or pass the hub URL explicitly. Legacy SPARROW_HUB is also accepted; no upstream default is used."
+}
 if ($Url -notmatch '^https?://') { throw "Url must start with http:// or https://" }
 $AppUrl = ($Url.TrimEnd('/')) + '/app'
 

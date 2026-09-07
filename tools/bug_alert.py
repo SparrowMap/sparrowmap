@@ -2,10 +2,9 @@
 
     python tools/bug_alert.py <report-id>
 
-🚨 THE ALERT REPO DEFAULTS TO THE PUBLIC CODE REPOSITORY.
-deploy/sparrowmap-watch.sh files its outage alerts as GitHub issues on
-SparrowMap/sparrowmap, which is public, and this reuses that channel and that
-token because a second notification path is a second thing to keep working.
+🚨 THE ALERT REPO MUST BE EXPLICITLY CONFIGURED.
+deploy/sparrowmap-watch.sh files outage alerts as GitHub issues only when a
+Raven-configured repository is supplied; it will not default to upstream.
 
 The consequence is absolute: this may carry an ID, a page path and a timestamp,
 and nothing else. Not the description, not the screenshot, not the reporter's
@@ -16,8 +15,9 @@ answering.
 The operator opens /admin/bugs to read the actual report, which is behind
 operator authentication and served from a directory no other route touches.
 
-Set SPARROW_ALERT_REPO to a PRIVATE repository if you want more than an id in
-the notification. This file still will not send the image.
+Set RAVEN_ALERT_REPO to a PRIVATE repository if you want more than an id in
+the notification. Legacy SPARROW_ALERT_REPO remains accepted. This file still
+will not send the image.
 """
 
 from __future__ import annotations
@@ -34,9 +34,12 @@ sys.path.insert(0, str(ROOT))
 
 import bugs  # noqa: E402
 
-TOKEN_FILE = os.environ.get("SPARROW_GH_TOKEN_FILE", "/etc/sparrowmap/github_token")
-REPO = os.environ.get("SPARROW_ALERT_REPO", "SparrowMap/sparrowmap")
-PRIVATE = os.environ.get("SPARROW_ALERT_REPO_IS_PRIVATE", "") == "1"
+TOKEN_FILE = (os.environ.get("RAVEN_GH_TOKEN_FILE") or
+              os.environ.get("SPARROW_GH_TOKEN_FILE") or
+              "/etc/sparrowmap/github_token")
+REPO = os.environ.get("RAVEN_ALERT_REPO") or os.environ.get("SPARROW_ALERT_REPO")
+PRIVATE = (os.environ.get("RAVEN_ALERT_REPO_IS_PRIVATE") or
+           os.environ.get("SPARROW_ALERT_REPO_IS_PRIVATE") or "") == "1"
 
 
 def token() -> str:
@@ -53,6 +56,10 @@ def main() -> int:
         print("usage: bug_alert.py <report-id>", file=sys.stderr)
         return 2
     bid = sys.argv[1]
+    if not REPO:
+        print("no alert repository configured; set RAVEN_ALERT_REPO "
+              "(legacy SPARROW_ALERT_REPO is also accepted)", file=sys.stderr)
+        return 1
     rec = bugs.get(bid)
     if not rec:
         print(f"no such report: {bid}", file=sys.stderr)

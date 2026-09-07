@@ -2,7 +2,7 @@
 #
 # SparrowMap - desktop camera, for macOS and Linux.
 #
-#   ./install-unix.sh https://sparrowmap.com
+#   ./install-unix.sh https://your-hub.example
 #
 # ## What this installs, and what it deliberately does not
 #
@@ -17,13 +17,16 @@
 
 set -euo pipefail
 
-# Defaults to the public network so it works with no arguments -
-#   curl -fsSL https://sparrowmap.com/install-unix.sh | bash
-# Pass your own URL as $1 only if you self-host an instance.
-URL="${1:-https://sparrowmap.com}"
+# Pass the hub URL explicitly, or configure RAVEN_HUB/legacy SPARROW_HUB.
+URL="${1:-${RAVEN_HUB:-${SPARROW_HUB:-}}}"
 AUTOSTART="${2:-yes}"
 say() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 
+if [ -z "$URL" ]; then
+  echo "No RavenMap hub configured. Set RAVEN_HUB or pass the hub URL explicitly." >&2
+  echo "Legacy SPARROW_HUB is also accepted; no upstream default is used." >&2
+  exit 1
+fi
 if [[ ! "$URL" =~ ^https?:// ]]; then
   echo "usage: install-unix.sh [https://your-instance] [no-autostart]" >&2
   exit 1
@@ -57,14 +60,14 @@ ARGS=(--app="$APP_URL" --user-data-dir="$PROFILE" --start-maximized)
 
 if [[ "$(uname)" == "Darwin" ]]; then
   # --- macOS: a real .app bundle, so it behaves like a program -------------
-  say "Creating SparrowMap Camera.app"
+  say "Creating RavenMap Camera.app"
   APP="$HOME/Applications/SparrowMap Camera.app"
   mkdir -p "$APP/Contents/MacOS"
   cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>SparrowMap Camera</string>
+  <key>CFBundleName</key><string>RavenMap Camera</string>
   <key>CFBundleIdentifier</key><string>net.sparrowmap.camera</string>
   <key>CFBundleExecutable</key><string>run</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -105,14 +108,14 @@ RUN
 
 else
   # --- Linux: a .desktop entry --------------------------------------------
-  say "Creating the SparrowMap Camera launcher"
+  say "Creating the RavenMap Camera launcher"
   APPS="$HOME/.local/share/applications"
   mkdir -p "$APPS"
   DESKTOP="$APPS/sparrow-camera.desktop"
   cat >"$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=SparrowMap Camera
+Name=RavenMap Camera
 Comment=Watch the road from this computer
 Exec=$BROWSER --app=$APP_URL --user-data-dir=$PROFILE
 Terminal=false
@@ -137,7 +140,7 @@ fi
 cat <<EOF
 
 $(say "Done")
-    Open "SparrowMap Camera".
+    Open "RavenMap Camera".
 
     First time: name the camera, allow camera and location, press Register,
     then Start watching. The detector downloads once (~21 MB) and is cached.

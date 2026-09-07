@@ -30,7 +30,12 @@
 # reads exactly like a full disk. Every git call below is `sudo -u sparrow`.
 set -euo pipefail
 
-REPO="${REPO:-https://github.com/SparrowMap/sparrowmap.git}"
+REPO="${RAVEN_REPO:-${SPARROW_REPO:-${REPO:-}}}"
+if [ -z "$REPO" ]; then
+  echo "No RavenMap source repository configured. Set RAVEN_REPO." >&2
+  echo "Legacy SPARROW_REPO (or existing REPO) is accepted; no upstream default is used." >&2
+  exit 1
+fi
 DIR=/opt/sparrowmap
 USER_NAME=sparrow
 

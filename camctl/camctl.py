@@ -1,9 +1,9 @@
-r"""SparrowMap Camera Control - a PTZ and imaging console for a USB camera.
+r"""RavenMap Camera Control - a PTZ and imaging console for a USB camera.
 
 Separate from the SparrowMap site on purpose: this is the installer's tool for
 aiming and tuning a node, not something the public map should carry.
 
-    python camctl\camctl.py            ->  http://sparrow-box:8160/
+    python camctl\camctl.py            ->  http://example-host:8160/
 
 WHY THIS ALSO SOLVES A REAL PROBLEM
 On Windows exactly one process can hold a webcam. If this app owns the camera,
@@ -429,10 +429,21 @@ def save_placement(p: dict) -> None:
     PLACEMENT.write_text(json.dumps(p, indent=2), encoding="utf-8")
 
 
-# Where a camera enrolls by default. SparrowMap is the point, so the public
-# network is the default; a self-hoster sets SPARROW_HUB to their own hub
-# (e.g. http://localhost:8150) and everything else is unchanged.
-PUBLIC_HUB = os.environ.get("SPARROW_HUB", "https://map.sparrowmap.com").rstrip("/")
+# Where a camera enrolls by default. A self-hoster sets RAVEN_HUB (or the
+# legacy SPARROW_HUB) to their own hub (e.g. http://localhost:8150). There is
+# intentionally NO implicit default to any upstream/public hub: an unconfigured
+# install must fail with a clear error rather than silently phoning home.
+PUBLIC_HUB = os.environ.get("RAVEN_HUB") or os.environ.get("SPARROW_HUB") or ""
+
+
+def _require_hub(hub: str | None) -> str:
+    hub = (hub or "").rstrip("/")
+    if not hub:
+        raise RuntimeError(
+            "No RavenMap hub configured. Set RAVEN_HUB to your hub URL. "
+            "Legacy SPARROW_HUB is also accepted."
+        )
+    return hub
 
 
 def enroll_with_hub(p: dict, hub: str = None) -> dict:
@@ -442,7 +453,7 @@ def enroll_with_hub(p: dict, hub: str = None) -> dict:
     so re-saving a placement updates the same node instead of littering the map
     with duplicates every time someone nudges the heading.
     """
-    hub = (hub or PUBLIC_HUB)
+    hub = _require_hub(hub or PUBLIC_HUB)
     import urllib.request
 
     def _post(b):
@@ -732,7 +743,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 400)
 
         if u.path == "/api/bank/label":
-            # Same check as the hub, from the same function. `sparrow-box`
+            # Same check as the hub, from the same function. `example-host`
             # is IPv6-first on this box, so an IPv4-only test 403'd every
             # labelling click made through the Pages hub link.
             if not is_operator_addr(self.client_address[0]):
@@ -1013,7 +1024,7 @@ def main():
         print("  Serving anyway; the watchdog will keep retrying.")
     else:
         print(f"camera {a.index} open at {CAM.width}x{CAM.height}")
-    print(f"SparrowMap Camera Control -> http://localhost:{a.port}/")
+    print(f"RavenMap Camera Control -> http://localhost:{a.port}/")
     print(f"  node source: CameraSource(kind='mjpeg', "
           f"target='http://localhost:{a.port}/stream.mjpg')")
     import sys

@@ -24,10 +24,17 @@ const path = require("path");
 const R = require("../public/sparrowsend-ratchet.js");
 const P = require("../public/sparrowsend-pow.js");
 
-const HUB = process.env.SPARROW_HUB || "https://map.sparrowmap.com";
+const HUB = process.env.RAVEN_HUB || process.env.SPARROW_HUB || "";
 const UA = "SparrowClaude/1.0";
 const STATE = path.join(__dirname, ".sparrow_claude_state.json");
 const enc = new TextEncoder(), dec = new TextDecoder();
+
+function requireHub(){
+  if(!HUB){
+    throw new Error("No RavenMap hub configured. Set RAVEN_HUB. Legacy SPARROW_HUB is also accepted.");
+  }
+  return HUB;
+}
 
 function b64u(b){ return Buffer.from(b).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
 function ub64u(s){ s=s.replace(/-/g,"+").replace(/_/g,"/"); while(s.length%4)s+="="; return new Uint8Array(Buffer.from(s,"base64")); }
@@ -186,6 +193,7 @@ async function poll(ID, st, onMsg){
     console.log("address   "+ID.address);
     return;
   }
+  requireHub();
   if(cmd==="claim"){
     const h=(args[0]||"").toLowerCase().replace(/^@/,"");
     const sig = await subtle.sign({name:"ECDSA",hash:"SHA-256"}, ID.sign.privateKey, enc.encode("SPH1|"+h+"|"+ID.address));

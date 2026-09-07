@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import DATA                      # noqa: E402
 
-PUBLIC = "https://map.sparrowmap.com"
+PUBLIC = os.environ.get("RAVEN_HUB") or os.environ.get("SPARROW_HUB") or ""
 STATE = DATA / "health_state.json"
 # A camera is "online" for 90s after a beat; a beat is every 30s. Two missed
 # beats is the honest edge, so flag well before crying wolf.
@@ -238,6 +239,9 @@ def main() -> None:
     ap.add_argument("--quiet", action="store_true",
                     help="print only when something changed or broke")
     args = ap.parse_args()
+    if not PUBLIC:
+        ap.error("No RavenMap hub configured. Set RAVEN_HUB; "
+                 "legacy SPARROW_HUB is also accepted.")
 
     mark = setup_output()
     r = check()

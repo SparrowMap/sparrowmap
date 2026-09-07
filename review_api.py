@@ -221,25 +221,16 @@ def contributed(reviewer: dict) -> dict:
     contributor is told the size of their contribution, not shown the traffic.
     """
     allowed = reviewer.get("nodes")          # None = pool scope = the whole network
-    conn = db.connect()
-    if allowed is None:
-        where, args = "1=1", ()
-    else:
+    if allowed is not None:
         nodes = [n for n in allowed if n]
         if not nodes:
             return {"scope": "own", "cameras": 0, "sightings": 0, "published": 0}
-        where = "node_id IN (%s)" % ",".join("?" * len(nodes))
-        args = tuple(nodes)
-    row = conn.execute(
-        f"SELECT COUNT(*) AS n, "
-        f"SUM(CASE WHEN tier='public' THEN 1 ELSE 0 END) AS pub, "
-        f"COUNT(DISTINCT node_id) AS cams "
-        f"FROM sightings WHERE {where}", args).fetchone()
+    stats = db.sighting_contribution_stats(allowed)
     return {
         "scope": "pool" if allowed is None else "own",
-        "cameras": int(row["cams"] or 0),
-        "sightings": int(row["n"] or 0),
-        "published": int(row["pub"] or 0),
+        "cameras": stats["cams"],
+        "sightings": stats["n"],
+        "published": stats["pub"],
     }
 
 
@@ -814,9 +805,7 @@ def attach_confirmed_photo(sid: int, row: Optional[dict], crop: Optional[bytes],
     # URL away, which is the same leak the retracted-photo shelf exists to
     # clean up after. Unlinked is not deleted.
     old = (row or {}).get("snap")
-    conn = db.connect()
-    conn.execute("UPDATE sightings SET snap=? WHERE id=?", (snap, sid))
-    conn.commit()
+    db.set_snap(sid, snap)
     if old and Path(str(old)).name != snap:
         _drop_file(SNAPS, old, sid)
     # 🚨 TWO PATHS CAN PUBLISH A PHOTO AND ONLY ONE KNEW ABOUT THE HOLD.

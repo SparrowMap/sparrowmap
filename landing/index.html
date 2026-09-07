@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SparrowMap</title>
+<title>RavenMap</title>
 <meta name="description" content="A camera network that watches government vehicles. Volunteers run the cameras, the map is public, and private number plates are destroyed on the camera before anything is sent.">
 <link rel="icon" href="favicon.ico">
-<meta property="og:title" content="SparrowMap">
+<meta property="og:title" content="RavenMap">
 <meta property="og:description" content="Cameras that watch government vehicles, run by volunteers, owned by nobody.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://sparrowmap.com/">
-<meta property="og:image" content="https://sparrowmap.com/cover.png">
+<meta property="og:url" content="/">
+<meta property="og:image" content="cover.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="SparrowMap">
+<meta name="twitter:title" content="RavenMap">
 <meta name="twitter:description" content="Cameras that watch government vehicles, run by volunteers, owned by nobody.">
-<meta name="twitter:image" content="https://sparrowmap.com/cover.png">
+<meta name="twitter:image" content="cover.png">
 <meta name="theme-color" content="#0B0E13">
 <style>
 /* --------------------------------------------------------------------------
@@ -204,7 +204,7 @@ footer a{color:var(--steel)}
          Sign in": localStorage is per-ORIGIN, so this page genuinely cannot
          tell whether the visitor already holds a key. Guessing would be worse
          than asking. -->
-    <a class="signin" href="https://map.sparrowmap.com/signin">Camera sign in</a>
+    <a class="signin" href="#configure-hub">Camera sign in requires a configured hub</a>
   </header>
 
   <section class="hero framed">
@@ -217,23 +217,23 @@ footer a{color:var(--steel)}
     </p>
     <p class="herocta rise">
       <span class="ctapair">
-        <a href="https://map.sparrowmap.com" class="btn">Open live map</a>
-        <a href="https://map.sparrowmap.com/?news=1" class="btn news">&#10024; What&#39;s new</a>
+        <a href="#configure-hub" class="btn">Configure a hub</a>
+        <a href="#configure-hub" class="btn news">&#10024; Use RavenMap locally</a>
       </span>
-      <a href="https://map.sparrowmap.com/app" class="btn ghost">Add a camera</a>
-      <a href="https://map.sparrowmap.com/drive" class="btn ghost">Driving mode</a>
+      <a href="#configure-hub" class="btn ghost">Add a camera on your hub</a>
+      <a href="#configure-hub" class="btn ghost">Driving mode on your hub</a>
       <!-- The business route was explained a long way down this page and had no
            button at the top. A shop that already has a camera on the street is
            the cheapest coverage this project can get: hardware and sightline
            are already paid for. -->
-      <a href="https://map.sparrowmap.com/IPCamera" class="btn ghost">Add an IP Camera</a>
+      <a href="#configure-hub" class="btn ghost">Add an IP Camera on your hub</a>
     </p>
     <p class="rise" style="font-size:13.5px;color:var(--steel);margin-top:14px">
       Set up a camera before and it is asking you to start again?
       <strong style="color:#cfe3f5">Nothing was deleted</strong> &mdash; your phone
       just lost the key.
-      <a href="https://map.sparrowmap.com/signin" style="color:var(--blue-hi)">Sign
-      back in &rarr;</a>
+      <a href="#configure-hub" style="color:var(--blue-hi)">Configure your hub
+      &rarr;</a>
     </p>
   </section>
 
@@ -254,7 +254,7 @@ footer a{color:var(--steel)}
     </div>
   </section>
 
-  <section class="join">
+  <section class="join" id="configure-hub">
     <h2>Running a camera</h2>
     <p>
       There is nothing to install and no account to make. It runs in a browser tab on a
@@ -286,8 +286,8 @@ footer a{color:var(--steel)}
       the size a number plate can be read at.
     </p>
     <ul class="specs">
-      <li><strong>Start here:</strong> <a href="https://map.sparrowmap.com/IPCamera">Set up your camera</a> &mdash; type your address, drop the pin, point the cone at the road. It gives you the camera id the app asks for.</li>
-      <li><strong>Then run it:</strong> <a href="https://map.sparrowmap.com/download">the IP camera app for Windows</a> (76 MB), or <a href="https://map.sparrowmap.com/relay.py">relay.py</a> on any machine with <code>pip install opencv-python onnxruntime numpy</code></li>
+      <li><strong>Start here:</strong> configure your RavenMap hub and set up the camera there. Type your address, drop the pin, and point the cone at the road.</li>
+      <li><strong>Then run it:</strong> use the relay tooling from your configured RavenMap checkout on any machine with <code>pip install opencv-python onnxruntime numpy</code></li>
       <li>Works with RTSP / ONVIF cameras &mdash; Hikvision, Dahua, Reolink, Axis, UniFi and most others</li>
       <li>No graphics card needed: the vehicle spotting is light, and deciding &ldquo;patrol car or not&rdquo; happens on our hardware, not yours</li>
     </ul>
@@ -300,12 +300,11 @@ footer a{color:var(--steel)}
       sets it up and starts contributing to the map:
     </p>
     <ul class="specs">
-      <li><strong>Windows:</strong> run <code>irm https://sparrowmap.com/install-node-windows.ps1 | iex</code> in PowerShell, or download <a href="https://github.com/SparrowMap/sparrowmap/releases/latest/download/SparrowMapCameraSetup.exe">SparrowMapCameraSetup.exe</a>
-        (<a href="https://map.sparrowmap.com/checksums">verify the SHA-256</a>)</li>
-      <li><strong>Linux</strong> (help us test): <code>curl -fsSL https://sparrowmap.com/install-node-linux.sh | bash</code></li>
+      <li><strong>Windows:</strong> run the node installer from your configured RavenMap checkout after setting <code>RAVEN_HUB</code> and <code>RAVEN_REPO</code>.</li>
+      <li><strong>Linux</strong> (help us test): run the node installer from that same configured checkout; no upstream repository is selected implicitly.</li>
       <li>Everything still runs on your machine — only detections leave it, never video</li>
       <li><strong>It is a big install:</strong> about 2.5 GB of models, and it wants a PC left on, ideally with an NVIDIA card. If you already have an IP camera, the IP camera option above is far lighter.</li>
-      <li>Full guide: <a href="https://github.com/SparrowMap/sparrowmap/blob/main/docs/DESKTOP_NODE.md">Running a desktop camera</a></li>
+      <li>Upstream reference guide: <a href="https://github.com/SparrowMap/sparrowmap/blob/main/docs/DESKTOP_NODE.md">Running a desktop camera</a></li>
     </ul>
   </section>
 
@@ -320,12 +319,12 @@ footer a{color:var(--steel)}
       hardware that would answer the next question, each with a price that was
       checked rather than estimated.</p>
     <div class="actions">
-      <a href="https://map.sparrowmap.com/support" class="btn ghost">See the numbers</a>
+      <a href="#configure-hub" class="btn ghost">Configure a hub to see the numbers</a>
     </div>
   </section>
 
   <footer>
-    <span>SparrowMap</span>
+    <span>RavenMap</span>
     <span>Volunteer cameras. Public map.</span>
     <span>Built in Michigan</span>
   </footer>

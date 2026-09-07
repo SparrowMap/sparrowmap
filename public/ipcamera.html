@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Add an IP Camera — SparrowMap</title>
+<title>Add an IP Camera — RavenMap</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="stylesheet" href="/vendor/leaflet.css">
 <link rel="stylesheet" href="/static/style.css?v=107">
@@ -71,7 +71,7 @@
        project exists to argue against. -->
   <div class="deal">
     <div><b>Your camera stays yours</b><span>The video never leaves your
-      network. SparrowMap never connects to your camera and is never given the
+      network. RavenMap never connects to your camera and is never given the
       password.</span></div>
     <div><b>One small picture leaves</b><span>A crop of a vehicle, shrunk below
       the size a number plate can be read at. The server refuses anything
@@ -361,7 +361,7 @@
       paint();
       $("#s2").scrollIntoView({ behavior: "smooth", block: "start" });
     }).catch(function(){
-      err.textContent = "Could not reach SparrowMap.";
+      err.textContent = "Could not reach RavenMap.";
       btn.disabled = false; btn.textContent = "Create this camera";
     });
   };

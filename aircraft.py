@@ -36,7 +36,7 @@ from pathlib import Path
 from core import DATA
 
 OPENSKY = "https://opensky-network.org/api/states/all"
-UA = {"User-Agent": "SparrowMap/1.0 (aircraft; sparrowmap.com)"}
+UA = {"User-Agent": "RavenMap/1.0 (aircraft)"}
 REGISTRY = DATA / "faa_registry.json"        # written by tools/gov_aircraft.py
 
 # Tracks accumulate in memory: an orbit is only visible over time, and a single

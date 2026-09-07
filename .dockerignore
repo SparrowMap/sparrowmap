@@ -1,0 +1,63 @@
+# Git metadata
+.git/
+.gitignore
+
+# RavenMap operational/private state
+data/
+config.json
+certs/
+keys/
+logs/
+
+# Local environment / credentials
+.env
+.env.*
+!.env.example
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+desktop/.buildenv/
+
+# Build/test artifacts
+desktop/build/
+desktop/dist/
+desktop/*.spec
+testvideo/
+*.pt
+.wrangler/
+*.bak
+
+# Local machine-specific tooling
+Resume Sparrow.ps1
+Start Sparrow.bat
+Start Camera Node.bat
+camctl/Start Camera Control.bat
+camctl/placement.json
+register.py
+register_camctl.py
+vmlab/
+brand/*.py
+
+# Generated/local-only project artifacts
+public/snapshot.json
+public/support.html
+camsurvey/
+tools/measure_public_cams.py
+
+# Personal-data working drafts
+docs/abuse_reports_*.md
+docs/email_replies_*.md
+docs/replies_*.md
+
+# Editor / OS debris
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.err

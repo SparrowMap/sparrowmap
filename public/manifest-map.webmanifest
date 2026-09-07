@@ -1,6 +1,6 @@
 {
-  "name": "SparrowMap",
-  "short_name": "SparrowMap",
+  "name": "RavenMap",
+  "short_name": "RavenMap",
   "description": "A public map of government vehicles on public roads, run by volunteers. Private number plates are destroyed on the camera and never stored.",
   "start_url": "/",
   "scope": "/",

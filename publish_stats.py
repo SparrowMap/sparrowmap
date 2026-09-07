@@ -70,7 +70,7 @@ def send(url: str, token: str, body: dict) -> int:
                  # module deliberately does not import core (it runs standalone
                  # on the home hub), so the string is repeated rather than
                  # dragging in a dependency for one header.
-                 "User-Agent": "SparrowMap-Node/1.0 (+https://sparrowmap.com)",
+                 "User-Agent": "RavenMap-Node/1.0",
                  "Authorization": f"Bearer {token}"})
     with urllib.request.urlopen(req, timeout=20) as r:
         return r.status

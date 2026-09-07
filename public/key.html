@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>SparrowMap — your camera key</title>
+<title>RavenMap — your camera key</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="stylesheet" href="/static/style.css?v=107">
 <style>
@@ -150,10 +150,10 @@ const keyURL = () => `${location.origin}/node#k=${node.id}.${node.token}`;
 $('#btnFile').onclick = () => {
   const url = keyURL();
   const html = `<!doctype html><meta charset="utf-8">
-<title>SparrowMap camera key</title>
+<title>RavenMap camera key</title>
 <body style="background:#0a0d12;color:#e6ecf5;font:15px system-ui;padding:40px;
   max-width:520px;margin:0 auto">
-<h2>SparrowMap camera key</h2>
+<h2>RavenMap camera key</h2>
 <p>This file is the key to one camera. Opening it gives this device control.</p>
 <p><a style="color:#4da3ff;font-size:18px" href="${url}">Open the camera &rarr;</a></p>
 <p style="color:#8794a8;font-size:13px">Anyone who has this file has the camera.

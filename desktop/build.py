@@ -1,4 +1,4 @@
-"""Build SparrowMap4Biz.exe - the light desktop node for businesses.
+"""Build RavenMap4Biz.exe - the light desktop node for businesses.
 
     python desktop\\build.py
 
@@ -39,7 +39,7 @@ def main() -> int:
         return 1
     cmd = [sys.executable, "-m", "PyInstaller",
            "--noconfirm", "--clean",
-           "--name", "SparrowMap4Biz",
+           "--name", "RavenMap4Biz",
            "--onefile",
            # No console window: this is a desktop app, and a black terminal
            # behind it is what makes something feel like a script rather than a
@@ -63,7 +63,7 @@ def main() -> int:
     r = subprocess.run(cmd, cwd=str(ROOT))
     if r.returncode != 0:
         return r.returncode
-    exe = DIST / ("SparrowMap4Biz.exe" if sys.platform == "win32" else "SparrowMap4Biz")
+    exe = DIST / ("RavenMap4Biz.exe" if sys.platform == "win32" else "RavenMap4Biz")
     if exe.exists():
         mb = exe.stat().st_size / 1024 / 1024
         print(f"\n  {exe}  ({mb:.0f} MB)")

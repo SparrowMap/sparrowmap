@@ -1,7 +1,7 @@
 {
-  "name": "SparrowMap — run a camera",
-  "short_name": "SparrowMap",
-  "description": "Turn a spare phone or webcam into a SparrowMap camera. Detection runs on your device; no video and no readable plate ever leaves it.",
+  "name": "RavenMap — run a camera",
+  "short_name": "RavenMap",
+  "description": "Turn a spare phone or webcam into a RavenMap camera. Detection runs on your device; no video and no readable plate ever leaves it.",
   "start_url": "/app",
   "scope": "/",
   "display": "standalone",
