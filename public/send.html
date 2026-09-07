@@ -37,7 +37,7 @@
     background:var(--glass);backdrop-filter:blur(34px) saturate(1.6);-webkit-backdrop-filter:blur(34px) saturate(1.6);
     border:1px solid var(--line2);border-radius:24px;overflow:hidden;
     box-shadow:0 40px 100px rgba(0,0,0,.6),0 0 0 1px rgba(43,134,224,.08),inset 0 1px 0 rgba(120,170,235,.12)}
-  @keyframes sheetup{from{transform:translateY(14px);opacity:.4}to{transform:none;opacity:1}}
+  @keyframes sheetdown{from{transform:translateY(-14px);opacity:.4}to{transform:none;opacity:1}}
 
   .brandlogo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:24px;height:24px;border-radius:7px;display:block;cursor:pointer}
   .brandlogo img{width:100%;height:100%;display:block;border-radius:inherit}
@@ -248,31 +248,43 @@
     .topwrap{background:rgba(5,8,14,0.88)}
     .contact .av{background:rgba(10,14,20,0.92)}
 
-    /* 🚨 PANELS BECOME BOTTOM SHEETS ON PHONES. As a popover the panel was an
-       overflow:auto scroller capped at 70vh, nested inside a position:fixed shell
-       with `overflow:hidden` on body - so when the keyboard came up iOS had no
-       page to scroll and had to scroll the caret inside that nested box. iOS 26+
-       handles that badly. A sheet fixed to the VIEWPORT is the scroller instead,
-       which is the shape iOS is built around.
-       This only works because the blur above is gone: backdrop-filter on .win
-       would make it the containing block for position:fixed children, and the
-       sheet would anchor to .win instead of the viewport. Don't re-add one. */
-    .panel{position:fixed;left:0;right:0;top:auto;
-      bottom:var(--kb,0px);            /* --kb = keyboard height, set from visualViewport */
+    /* 🚨 PHONE PANELS DROP FROM THE TOP - AND MUST NOT MOVE ON FOCUS.
+       History, so nobody "fixes" this back into a bottom sheet:
+       v1 was a 300px popover whose blur wedged focus. v2 made it a bottom sheet
+       pinned to bottom:var(--kb). Both were dead CSS (this block used to sit above
+       the base rules). Once the sheet was really live, Matthew reported the
+       keyboard "came up for a second" and then vanished - focus was being LOST
+       just after it was gained.
+       The control that explains it: rotating to landscape WORKS. Landscape is
+       932px so it does not match this query at all, which means it runs the OLD
+       popover WITH the stacked blur - more blur, and it works. So blur is not the
+       cause. The one thing that differs is that the popover does not MOVE.
+       A bottom sheet has to move: at the instant of focus --kb is still 0, so the
+       sheet sits at bottom:0 with the field right where the keyboard is about to
+       land; the keyboard rises, iOS starts scrolling the caret inside this fixed
+       overflow:auto box, and only then does visualViewport fire and jump the whole
+       sheet up by ~300px. Two competing movements in one transition - iOS drops
+       the focus, and the keyboard goes with it.
+       So: anchor to the TOP, mirroring the geometry that demonstrably works on his
+       phone, and let --kb ONLY cap the height. The focused field then never travels
+       while the keyboard animates.
+       Still depends on the blur above being gone: a backdrop-filter on .win would
+       make it the containing block for position:fixed children and this would
+       anchor to .win instead of the viewport. Don't re-add one. */
+    .panel{position:fixed;left:0;right:0;
+      top:calc(env(safe-area-inset-top) + 56px);   /* same 56px the desktop popover uses */
+      bottom:auto;
       width:auto;max-width:none;
       background:rgba(11,15,24,0.97);
-      border:0;border-top:1px solid var(--line2);
-      border-radius:18px 18px 0 0;
-      box-shadow:0 -20px 60px rgba(0,0,0,.6);
-      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
-      /* when the keyboard is up, --kb has already lifted us; don't also reserve
-         the home-indicator inset or the sheet floats above the keyboard */
-      max-height:calc(88dvh - var(--kb,0px));
+      border:0;border-bottom:1px solid var(--line2);
+      border-radius:0 0 18px 18px;
+      box-shadow:0 24px 60px rgba(0,0,0,.6);
+      padding:14px;
+      /* --kb ONLY shortens the panel, it never repositions it. Moving a focused
+         field mid-keyboard-animation is what killed the keyboard. */
+      max-height:calc(100dvh - env(safe-area-inset-top) - 56px - var(--kb,0px) - 12px);
       overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
-    .panel.open{animation:sheetup .18s cubic-bezier(.22,.9,.3,1)}
-    /* grab handle, so it reads as a sheet rather than a stuck popover */
-    .panel::before{content:'';display:block;width:36px;height:4px;border-radius:2px;
-      background:var(--line2);margin:-4px auto 10px}
+    .panel.open{animation:sheetdown .18s cubic-bezier(.22,.9,.3,1)}
     .scrim{position:fixed;background:rgba(2,4,8,.5)} }
 
 </style>
@@ -1459,20 +1471,36 @@
   /* iOS never resizes the LAYOUT viewport for the keyboard, so a position:fixed
    * bottom sheet ends up hidden BEHIND it. visualViewport is the only thing that
    * reports the keyboard, so the sheet's bottom offset is driven from it. */
+  window.__kbMovedAt=0;   // when --kb last actually changed (i.e. the layout moved)
   (function(){
     var vv=window.visualViewport; if(!vv) return;
+    var last=null;
     function fit(){
       var kb=window.innerHeight - vv.height - vv.offsetTop;
       // Safari reports a few px of jitter while its own toolbar animates; only a
       // real keyboard is ever this tall, so anything smaller is noise.
-      document.documentElement.style.setProperty('--kb', (kb>60?Math.round(kb):0)+'px');
+      var v=(kb>60?Math.round(kb):0)+'px';
+      if(v===last) return;                       // don't churn on scroll jitter
+      last=v; window.__kbMovedAt=Date.now();
+      document.documentElement.style.setProperty('--kb', v);
     }
     vv.addEventListener('resize',fit); vv.addEventListener('scroll',fit); fit();
   })();
-  // ...and once the keyboard has landed, put the focused field where they can see it.
+  // Once the keyboard has landed, reveal the focused field ONLY if it is actually
+  // hidden. This used to be an unconditional smooth scrollIntoView({block:'center'}),
+  // which moved the field under the user a moment after focus - on iOS 26+ that is a
+  // good way to lose the focus and the keyboard with it. 'nearest', no smooth, and
+  // only when it is really out of view: the cheapest movement that still works.
   document.addEventListener('focusin',function(e){
-    var t=e.target; if(!t||!t.closest||!t.closest('.panel')) return;
-    setTimeout(function(){ try{ t.scrollIntoView({block:'center',behavior:'smooth'}); }catch(_){} },340);
+    var t=e.target; if(!t||!t.closest) return;
+    var panel=t.closest('.panel'); if(!panel) return;
+    setTimeout(function(){
+      try{
+        var r=t.getBoundingClientRect(), p=panel.getBoundingClientRect();
+        if(r.top>=p.top && r.bottom<=p.bottom) return;   // already visible - leave it alone
+        t.scrollIntoView({block:'nearest'});
+      }catch(_){}
+    },340);
   });
   function showScrim(on){ var s=$('#scrim'); if(s) s.classList.toggle('on', !!on); }
   // Nag to back up (export a login key) until they have - the account-loss fix.
@@ -1482,8 +1510,18 @@
   $('#contactsBtn').onclick=function(e){ e.stopPropagation(); toggle($('#contactsPanel')); };
   $('#soundBtn').onclick=function(e){ e.stopPropagation(); toggle($('#soundPanel')); };
   $('#chatmenu').onclick=function(e){ e.stopPropagation(); if(cur) openCmenu(cur, e.target); };
-  document.addEventListener('click',function(e){ if(!e.target.closest('.panel')&&!e.target.closest('.iconbtn')&&!e.target.closest('.cmenu')&&!e.target.closest('#chatmenu')) closePanels(); });
-  $('#scrim').onclick=closePanels;
+  // ⚠️ A tap that lands outside the panel right after the keyboard changed the
+  // layout is a MIS-HIT, not an intent to close. iOS dispatches the click at the
+  // original touch point, so a panel that just shrank leaves the click on the scrim
+  // behind it - which closed the panel, blurred the field and dropped the keyboard.
+  // Every outside-close path goes through here, INCLUDING the scrim's own handler
+  // (guarding only the document listener left the scrim closing it anyway).
+  function closePanelsUnlessMisHit(){ if(Date.now()-(window.__kbMovedAt||0)<500) return; closePanels(); }
+  document.addEventListener('click',function(e){
+    if(e.target.closest('.panel')||e.target.closest('.iconbtn')||e.target.closest('.cmenu')||e.target.closest('#chatmenu')) return;
+    closePanelsUnlessMisHit();
+  });
+  $('#scrim').onclick=closePanelsUnlessMisHit;
   // 🚨 #accountPanel, NOT #contactsPanel: exportBox lives in the ACCOUNT popup, so
   // "Back up now" used to open the ☰ contacts menu and appear to do nothing.
   $('#nagBackup').onclick=function(ev){ ev.stopPropagation(); closePanels(); $('#accountPanel').classList.add('open'); showScrim(true); $('#exportBox').hidden=false; $('#importBox').hidden=true; var e=$('#exPass'); if(e){ try{e.scrollIntoView({block:'center'});}catch(_){} e.focus(); } };
