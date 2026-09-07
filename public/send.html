@@ -37,50 +37,6 @@
     background:var(--glass);backdrop-filter:blur(34px) saturate(1.6);-webkit-backdrop-filter:blur(34px) saturate(1.6);
     border:1px solid var(--line2);border-radius:24px;overflow:hidden;
     box-shadow:0 40px 100px rgba(0,0,0,.6),0 0 0 1px rgba(43,134,224,.08),inset 0 1px 0 rgba(120,170,235,.12)}
-  @media(max-width:520px){ .app{padding:0}
-    /* respect the notch / status bar / home indicator - without this, viewport-fit=cover
-       renders the top bar UNDER the status bar (overlap) and taps land offset from the finger */
-    .win{max-width:none;height:100%;border-radius:0;border:0;
-      padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
-    /* 🚨 NO LIVE BLUR ON PHONES. iOS 26+ (Liquid Glass) will not raise the keyboard for
-       an input sitting inside a backdrop-filter that is ITSELF inside another one: the
-       compositor re-rasterises both blur layers while scrolling the caret into view and
-       wedges. Every pre-login field lives in a .panel (blur) inside .win (blur), so the
-       login-key box froze on an iPhone 15 Plus / iOS 27 beta while an iPhone SE on 18.7
-       was fine - it is blur AREA (1290x2796 is ~3x an SE), not CPU.
-       Losing the blur costs nothing here: on mobile .win covers the whole screen, so it
-       is only blurring .bg's smooth gradient, and a blurred gradient IS that gradient.
-       The layers that do sit over real content get opacity instead. */
-    .win,.topwrap,.panel,.contact .av{backdrop-filter:none;-webkit-backdrop-filter:none}
-    .topwrap{background:rgba(5,8,14,0.88)}
-    .contact .av{background:rgba(10,14,20,0.92)}
-
-    /* 🚨 PANELS BECOME BOTTOM SHEETS ON PHONES. As a popover the panel was an
-       overflow:auto scroller capped at 70vh, nested inside a position:fixed shell
-       with `overflow:hidden` on body - so when the keyboard came up iOS had no
-       page to scroll and had to scroll the caret inside that nested box. iOS 26+
-       handles that badly. A sheet fixed to the VIEWPORT is the scroller instead,
-       which is the shape iOS is built around.
-       This only works because the blur above is gone: backdrop-filter on .win
-       would make it the containing block for position:fixed children, and the
-       sheet would anchor to .win instead of the viewport. Don't re-add one. */
-    .panel{position:fixed;left:0;right:0;top:auto;
-      bottom:var(--kb,0px);            /* --kb = keyboard height, set from visualViewport */
-      width:auto;max-width:none;
-      background:rgba(11,15,24,0.97);
-      border:0;border-top:1px solid var(--line2);
-      border-radius:18px 18px 0 0;
-      box-shadow:0 -20px 60px rgba(0,0,0,.6);
-      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
-      /* when the keyboard is up, --kb has already lifted us; don't also reserve
-         the home-indicator inset or the sheet floats above the keyboard */
-      max-height:calc(88dvh - var(--kb,0px));
-      overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
-    .panel.open{animation:sheetup .18s cubic-bezier(.22,.9,.3,1)}
-    /* grab handle, so it reads as a sheet rather than a stuck popover */
-    .panel::before{content:'';display:block;width:36px;height:4px;border-radius:2px;
-      background:var(--line2);margin:-4px auto 10px}
-    .scrim{position:fixed;background:rgba(2,4,8,.5)} }
   @keyframes sheetup{from{transform:translateY(14px);opacity:.4}to{transform:none;opacity:1}}
 
   .brandlogo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:24px;height:24px;border-radius:7px;display:block;cursor:pointer}
@@ -264,6 +220,61 @@
   .backup-nag button{flex:none;border:1px solid var(--accent);background:var(--accent);color:#04121f;
     font:700 12px system-ui;border-radius:8px;padding:5px 9px;cursor:pointer}
   .backup-nag .later{flex:none;color:var(--muted);cursor:pointer;padding:4px}
+  /* ===================================================================
+     📱 PHONE OVERRIDES - THIS BLOCK MUST STAY LAST IN THE STYLESHEET.
+     A media query adds NO specificity. `.panel` in here and `.panel`
+     below both score 0,1,0, so whichever is written LAST wins - even on
+     a phone. This block used to sit at the top, above the base rules,
+     which made every override in it DEAD CSS: the bottom sheet never
+     applied, .panel kept its 26px backdrop-filter, and the iOS 26+
+     keyboard bug it was written to fix was never actually fixed.
+     If you move these rules up, you silently switch them all off.
+     =================================================================== */
+  @media(max-width:520px){ .app{padding:0}
+    /* respect the notch / status bar / home indicator - without this, viewport-fit=cover
+       renders the top bar UNDER the status bar (overlap) and taps land offset from the finger */
+    .win{max-width:none;height:100%;border-radius:0;border:0;
+      padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+    /* 🚨 NO LIVE BLUR ON PHONES. iOS 26+ (Liquid Glass) will not raise the keyboard for
+       an input sitting inside a backdrop-filter that is ITSELF inside another one: the
+       compositor re-rasterises both blur layers while scrolling the caret into view and
+       wedges. Every pre-login field lives in a .panel (blur) inside .win (blur), so the
+       login-key box froze on an iPhone 15 Plus / iOS 27 beta while an iPhone SE on 18.7
+       was fine - it is blur AREA (1290x2796 is ~3x an SE), not CPU.
+       Losing the blur costs nothing here: on mobile .win covers the whole screen, so it
+       is only blurring .bg's smooth gradient, and a blurred gradient IS that gradient.
+       The layers that do sit over real content get opacity instead. */
+    .win,.topwrap,.panel,.contact .av{backdrop-filter:none;-webkit-backdrop-filter:none}
+    .topwrap{background:rgba(5,8,14,0.88)}
+    .contact .av{background:rgba(10,14,20,0.92)}
+
+    /* 🚨 PANELS BECOME BOTTOM SHEETS ON PHONES. As a popover the panel was an
+       overflow:auto scroller capped at 70vh, nested inside a position:fixed shell
+       with `overflow:hidden` on body - so when the keyboard came up iOS had no
+       page to scroll and had to scroll the caret inside that nested box. iOS 26+
+       handles that badly. A sheet fixed to the VIEWPORT is the scroller instead,
+       which is the shape iOS is built around.
+       This only works because the blur above is gone: backdrop-filter on .win
+       would make it the containing block for position:fixed children, and the
+       sheet would anchor to .win instead of the viewport. Don't re-add one. */
+    .panel{position:fixed;left:0;right:0;top:auto;
+      bottom:var(--kb,0px);            /* --kb = keyboard height, set from visualViewport */
+      width:auto;max-width:none;
+      background:rgba(11,15,24,0.97);
+      border:0;border-top:1px solid var(--line2);
+      border-radius:18px 18px 0 0;
+      box-shadow:0 -20px 60px rgba(0,0,0,.6);
+      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+      /* when the keyboard is up, --kb has already lifted us; don't also reserve
+         the home-indicator inset or the sheet floats above the keyboard */
+      max-height:calc(88dvh - var(--kb,0px));
+      overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+    .panel.open{animation:sheetup .18s cubic-bezier(.22,.9,.3,1)}
+    /* grab handle, so it reads as a sheet rather than a stuck popover */
+    .panel::before{content:'';display:block;width:36px;height:4px;border-radius:2px;
+      background:var(--line2);margin:-4px auto 10px}
+    .scrim{position:fixed;background:rgba(2,4,8,.5)} }
+
 </style>
 </head>
 <body>
@@ -363,7 +374,14 @@
       </div>
       <div id="importBox" hidden style="margin-top:10px">
         <label>Upload your backup file</label>
-        <input type="file" id="imFile" accept=".txt,text/plain" style="font-size:13px">
+        <!-- 🚨 NO `accept` HERE. iOS turns accept into a UTI filter and GREYS OUT every
+           file it does not match, so a login key that Safari saved without a .txt
+           extension (or that lives in iCloud/Files under another type) becomes
+           unselectable and the user is locked out of their own account with an
+           empty-looking picker. The handler reads the file as text and validates
+           the SS1. prefix itself, so filtering here buys nothing and can only
+           block a legitimate key. -->
+        <input type="file" id="imFile" style="font-size:13px">
         <label style="margin-top:8px">…or paste your login key</label>
         <textarea id="imKey" rows="3" placeholder="login key" style="font-family:ui-monospace,monospace;font-size:11px"></textarea>
         <label>Password</label>
@@ -1275,7 +1293,23 @@
     document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     $('#exStatus').textContent='Saved. Keep this file safe, it restores your account.'; markedUp();
   };
-  $('#imFile').onchange=function(){ var f=this.files&&this.files[0]; if(!f) return; var r=new FileReader(); r.onload=function(){ $('#imKey').value=(r.result||'').toString().trim(); $('#imStatus').textContent='File loaded, enter the password and sign in.'; }; r.readAsText(f); };
+  // There is deliberately no `accept` filter on #imFile (it greyed out every file on
+  // iOS), so ANY file can arrive here. Find the key inside whatever was picked and say
+  // plainly when there isn't one, instead of loading a photo's bytes into the box.
+  $('#imFile').onchange=function(){
+    var f=this.files&&this.files[0]; if(!f) return;
+    var st=$('#imStatus');
+    if(f.size>4*1024*1024){ $('#imKey').value=''; st.textContent='That file is too big to be a login key. Pick the backup file you exported.'; return; }
+    var r=new FileReader();
+    r.onerror=function(){ st.textContent='Could not read that file.'; };
+    r.onload=function(){
+      var m=(r.result||'').toString().match(/SS1\.[A-Za-z0-9_-]+/);
+      if(!m){ $('#imKey').value=''; st.textContent='No login key in that file. Pick the backup you exported — its contents start with "SS1.".'; return; }
+      $('#imKey').value=m[0];
+      st.textContent='Key loaded from '+f.name+' — enter its password and sign in.';
+    };
+    r.readAsText(f);
+  };
   $('#imGo').onclick=async function(){
     var k=$('#imKey').value, p=$('#imPass').value;
     if(!k||!p){ $('#imStatus').textContent='Paste your key and its password.'; return; }
