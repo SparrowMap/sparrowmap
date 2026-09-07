@@ -41,7 +41,20 @@
     /* respect the notch / status bar / home indicator - without this, viewport-fit=cover
        renders the top bar UNDER the status bar (overlap) and taps land offset from the finger */
     .win{max-width:none;height:100%;border-radius:0;border:0;
-      padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)} }
+      padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+    /* 🚨 NO LIVE BLUR ON PHONES. iOS 26+ (Liquid Glass) will not raise the keyboard for
+       an input sitting inside a backdrop-filter that is ITSELF inside another one: the
+       compositor re-rasterises both blur layers while scrolling the caret into view and
+       wedges. Every pre-login field lives in a .panel (blur) inside .win (blur), so the
+       login-key box froze on an iPhone 15 Plus / iOS 27 beta while an iPhone SE on 18.7
+       was fine - it is blur AREA (1290x2796 is ~3x an SE), not CPU.
+       Losing the blur costs nothing here: on mobile .win covers the whole screen, so it
+       is only blurring .bg's smooth gradient, and a blurred gradient IS that gradient.
+       The layers that do sit over real content get opacity instead. */
+    .win,.topwrap,.panel,.contact .av{backdrop-filter:none;-webkit-backdrop-filter:none}
+    .topwrap{background:rgba(5,8,14,0.88)}
+    .panel{background:rgba(11,15,24,0.97)}
+    .contact .av{background:rgba(10,14,20,0.92)} }
 
   .brandlogo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:24px;height:24px;border-radius:7px;display:block;cursor:pointer}
   .brandlogo img{width:100%;height:100%;display:block;border-radius:inherit}
