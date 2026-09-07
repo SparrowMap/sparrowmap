@@ -1288,8 +1288,19 @@
     location.reload();
   };
   // portable login key
-  $('#exportBtn').onclick=function(){ var b=$('#exportBox'); b.hidden=!b.hidden; $('#importBox').hidden=true; };
-  $('#importBtn').onclick=function(){ var b=$('#importBox'); b.hidden=!b.hidden; $('#exportBox').hidden=true; };
+  // Both of these un-hide a section that sits BELOW the fold of the account panel, so
+  // without this you tap "Export login key" and nothing visibly happens until you
+  // scroll down to find the password box.
+  // ⚠️ block:'start', NOT 'center'. The phone panel is anchored at the top and the
+  // keyboard shortens it from the BOTTOM (--kb caps max-height, it never moves the
+  // panel - see the iOS notes in the CSS). A section parked at the TOP of the scroll
+  // area therefore stays visible once the keyboard is up; a centred one drops behind
+  // it, which is the whole thing we are trying to avoid.
+  // Safe to scroll here: this runs on the TAP, before any field is focused, so it
+  // cannot move a focused field mid-keyboard-animation.
+  function revealInPanel(box){ if(box && !box.hidden){ try{ box.scrollIntoView({block:'start'}); }catch(_){} } }
+  $('#exportBtn').onclick=function(){ var b=$('#exportBox'); b.hidden=!b.hidden; $('#importBox').hidden=true; revealInPanel(b); };
+  $('#importBtn').onclick=function(){ var b=$('#importBox'); b.hidden=!b.hidden; $('#exportBox').hidden=true; revealInPanel(b); };
   $('#exGo').onclick=async function(){
     var p=$('#exPass').value; if(p.length<8){ $('#exStatus').textContent='Use at least 8 characters, longer is much stronger.'; return; }
     $('#exStatus').textContent='Generating…';
@@ -1474,7 +1485,7 @@
   window.__kbMovedAt=0;   // when --kb last actually changed (i.e. the layout moved)
   (function(){
     var vv=window.visualViewport; if(!vv) return;
-    var last=null;
+    var last=null, kbT=null;
     function fit(){
       var kb=window.innerHeight - vv.height - vv.offsetTop;
       // Safari reports a few px of jitter while its own toolbar animates; only a
@@ -1483,24 +1494,32 @@
       if(v===last) return;                       // don't churn on scroll jitter
       last=v; window.__kbMovedAt=Date.now();
       document.documentElement.style.setProperty('--kb', v);
+      // The keyboard just SHORTENED the panel, which can leave the field being typed
+      // in below the new bottom edge - that is the "I have to scroll down to see it"
+      // complaint, arriving a second late. Re-reveal after it settles.
+      // ⚠️ Debounced and instant, and only ever a scroll INSIDE the panel: the panel
+      // itself must never move (that is what dropped the focus and the keyboard).
+      clearTimeout(kbT); kbT=setTimeout(keepFocusedVisible,300);
     }
     vv.addEventListener('resize',fit); vv.addEventListener('scroll',fit); fit();
   })();
-  // Once the keyboard has landed, reveal the focused field ONLY if it is actually
-  // hidden. This used to be an unconditional smooth scrollIntoView({block:'center'}),
-  // which moved the field under the user a moment after focus - on iOS 26+ that is a
-  // good way to lose the focus and the keyboard with it. 'nearest', no smooth, and
-  // only when it is really out of view: the cheapest movement that still works.
-  document.addEventListener('focusin',function(e){
-    var t=e.target; if(!t||!t.closest) return;
+  // Reveal the focused field ONLY if it is actually hidden. This used to be an
+  // unconditional smooth scrollIntoView({block:'center'}), which moved the field under
+  // the user a moment after focus - on iOS 26+ that is a good way to lose the focus and
+  // the keyboard with it. 'nearest', no smooth, and only when it is really out of view:
+  // the cheapest movement that still works.
+  function keepFocusedVisible(){
+    var t=document.activeElement; if(!t||!t.closest) return;
     var panel=t.closest('.panel'); if(!panel) return;
-    setTimeout(function(){
-      try{
-        var r=t.getBoundingClientRect(), p=panel.getBoundingClientRect();
-        if(r.top>=p.top && r.bottom<=p.bottom) return;   // already visible - leave it alone
-        t.scrollIntoView({block:'nearest'});
-      }catch(_){}
-    },340);
+    try{
+      var r=t.getBoundingClientRect(), p=panel.getBoundingClientRect();
+      if(r.top>=p.top && r.bottom<=p.bottom) return;     // already visible - leave it alone
+      t.scrollIntoView({block:'nearest'});
+    }catch(_){}
+  }
+  document.addEventListener('focusin',function(e){
+    var t=e.target; if(!t||!t.closest||!t.closest('.panel')) return;
+    setTimeout(keepFocusedVisible,340);
   });
   function showScrim(on){ var s=$('#scrim'); if(s) s.classList.toggle('on', !!on); }
   // Nag to back up (export a login key) until they have - the account-loss fix.
@@ -1524,7 +1543,7 @@
   $('#scrim').onclick=closePanelsUnlessMisHit;
   // 🚨 #accountPanel, NOT #contactsPanel: exportBox lives in the ACCOUNT popup, so
   // "Back up now" used to open the ☰ contacts menu and appear to do nothing.
-  $('#nagBackup').onclick=function(ev){ ev.stopPropagation(); closePanels(); $('#accountPanel').classList.add('open'); showScrim(true); $('#exportBox').hidden=false; $('#importBox').hidden=true; var e=$('#exPass'); if(e){ try{e.scrollIntoView({block:'center'});}catch(_){} e.focus(); } };
+  $('#nagBackup').onclick=function(ev){ ev.stopPropagation(); closePanels(); $('#accountPanel').classList.add('open'); showScrim(true); $('#exportBox').hidden=false; $('#importBox').hidden=true; revealInPanel($('#exportBox')); var e=$('#exPass'); if(e) e.focus(); };
   $('#nagLater').onclick=function(ev){ ev.stopPropagation(); window.__nagOff=true; updateBackupNag(); };
   $('#backBtn').onclick=closeChat;
   $('#replyx').onclick=clearReply;
