@@ -411,7 +411,25 @@ const publicInWindow = () => {
 
 /* The public fetch's row cap, named because loadStats has to know whether a
    count landed on it and is therefore a floor rather than a total. */
-const PUBLIC_LIMIT = 2000;
+const PUBLIC_LIMIT = 5000;
+
+/* How often the PUBLIC feed is re-fetched in full.
+ *
+ * It used to be every tick (4s). Public sightings are append-only history, so
+ * that was re-downloading the entire past every four seconds: ~1.3 MB per poll,
+ * ~15 times a minute, per open tab, growing forever. On a normal link that is
+ * ~2.6 Mbps of sustained download doing nothing, and when the link was busy the
+ * transfer lost to the 12s fetch timeout and the header said "reconnecting"
+ * while the box was serving the query itself in 6 milliseconds.
+ *
+ * Now: full fetch on load and every FULL_EVERY_MS after, and in between only
+ * the last INCR_WINDOW_S of sightings, merged in. The incremental URL is the
+ * SAME for every viewer (bucketed, no per-client cursor), so the CDN can
+ * actually serve it. A retraction takes up to FULL_EVERY_MS to disappear,
+ * which is the one thing this trades away and is worth it. */
+const PUB_FULL_EVERY_MS = 300000;   // 5 min
+const PUB_INCR_WINDOW_S = 900;      // 15 min of overlap, comfortably > the full interval
+let _pubFullAt = 0;
 
 const isPublic = (s) => s.tier === 'public';
 const label = (s) => isPublic(s) ? (s.plate_text || '—')
@@ -2386,14 +2404,19 @@ function fetchJSON(url, ms = FETCH_TIMEOUT_MS) {
 
 async function load() {
   const trafficCut = bucketed(Date.now() / 1000 - TRAFFIC_FADE_S);
+  // Full sweep on the first load and every PUB_FULL_EVERY_MS; otherwise just
+  // the recent tail, merged into what is already held.
+  const full = !_pubFullAt || (Date.now() - _pubFullAt) >= PUB_FULL_EVERY_MS;
+  const pubSince = full ? windowCut() : bucketed(Date.now() / 1000 - PUB_INCR_WINDOW_S);
   const [pub, live] = await Promise.all([
-    fetchJSON(`/api/sightings?since=${windowCut()}&vclass=public&limit=${PUBLIC_LIMIT}`),
+    fetchJSON(`/api/sightings?since=${pubSince}&vclass=public&limit=${PUBLIC_LIMIT}`),
     fetchJSON(`/api/sightings?since=${trafficCut}&limit=400`),
   ]);
   // ⚠️ The clear() is why drawSnapshot must never run after this: live data
-  // replaces the snapshot wholesale rather than merging with it.
+  // replaces the snapshot wholesale rather than merging with it. That still
+  // holds, because the FIRST load is always a full one.
   _liveArrived = true;
-  state.sightings.clear();
+  if (full) { state.sightings.clear(); _pubFullAt = Date.now(); }
   pub.forEach((r) => state.sightings.set(r.id, r));
   live.forEach((r) => { if (r.tier !== 'public') drawTraffic(r); });
   redrawAll();

@@ -879,7 +879,15 @@ def recent_sightings(since: float = 0, limit: int = 500,
         sql += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
         args += [bbox[0], bbox[2], bbox[1], bbox[3]]
     sql += " ORDER BY ts DESC LIMIT ?"
-    args.append(min(int(limit), 2000))
+    # 🚨 A CEILING BELOW THE THING IT IS SERVING IS A SILENT TRUNCATION.
+    # This sat at 2000 while the public tier passed 2,621 sightings, so the map
+    # simply stopped showing the oldest ones and looked "stuck at 2000" with no
+    # error anywhere. Raised with headroom, and it is affordable now that a row
+    # is ~289 bytes instead of ~651 and the client fetches the full set every
+    # five minutes rather than every four seconds.
+    # 📌 The real answer as this keeps growing is loading by VIEWPORT (bbox is
+    # already supported above), not a bigger number.
+    args.append(min(int(limit), 5000))
     return [dict(r) for r in connect().execute(sql, args).fetchall()]
 
 
