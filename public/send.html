@@ -53,8 +53,35 @@
        The layers that do sit over real content get opacity instead. */
     .win,.topwrap,.panel,.contact .av{backdrop-filter:none;-webkit-backdrop-filter:none}
     .topwrap{background:rgba(5,8,14,0.88)}
-    .panel{background:rgba(11,15,24,0.97)}
-    .contact .av{background:rgba(10,14,20,0.92)} }
+    .contact .av{background:rgba(10,14,20,0.92)}
+
+    /* 🚨 PANELS BECOME BOTTOM SHEETS ON PHONES. As a popover the panel was an
+       overflow:auto scroller capped at 70vh, nested inside a position:fixed shell
+       with `overflow:hidden` on body - so when the keyboard came up iOS had no
+       page to scroll and had to scroll the caret inside that nested box. iOS 26+
+       handles that badly. A sheet fixed to the VIEWPORT is the scroller instead,
+       which is the shape iOS is built around.
+       This only works because the blur above is gone: backdrop-filter on .win
+       would make it the containing block for position:fixed children, and the
+       sheet would anchor to .win instead of the viewport. Don't re-add one. */
+    .panel{position:fixed;left:0;right:0;top:auto;
+      bottom:var(--kb,0px);            /* --kb = keyboard height, set from visualViewport */
+      width:auto;max-width:none;
+      background:rgba(11,15,24,0.97);
+      border:0;border-top:1px solid var(--line2);
+      border-radius:18px 18px 0 0;
+      box-shadow:0 -20px 60px rgba(0,0,0,.6);
+      padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+      /* when the keyboard is up, --kb has already lifted us; don't also reserve
+         the home-indicator inset or the sheet floats above the keyboard */
+      max-height:calc(88dvh - var(--kb,0px));
+      overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+    .panel.open{animation:sheetup .18s cubic-bezier(.22,.9,.3,1)}
+    /* grab handle, so it reads as a sheet rather than a stuck popover */
+    .panel::before{content:'';display:block;width:36px;height:4px;border-radius:2px;
+      background:var(--line2);margin:-4px auto 10px}
+    .scrim{position:fixed;background:rgba(2,4,8,.5)} }
+  @keyframes sheetup{from{transform:translateY(14px);opacity:.4}to{transform:none;opacity:1}}
 
   .brandlogo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:24px;height:24px;border-radius:7px;display:block;cursor:pointer}
   .brandlogo img{width:100%;height:100%;display:block;border-radius:inherit}
@@ -1395,6 +1422,24 @@
   if('serviceWorker' in navigator){ navigator.serviceWorker.register('/send-sw.js',{scope:'/send'}).catch(function(){}); }
 
   /* ---------- panels / wiring ---------- */
+  /* iOS never resizes the LAYOUT viewport for the keyboard, so a position:fixed
+   * bottom sheet ends up hidden BEHIND it. visualViewport is the only thing that
+   * reports the keyboard, so the sheet's bottom offset is driven from it. */
+  (function(){
+    var vv=window.visualViewport; if(!vv) return;
+    function fit(){
+      var kb=window.innerHeight - vv.height - vv.offsetTop;
+      // Safari reports a few px of jitter while its own toolbar animates; only a
+      // real keyboard is ever this tall, so anything smaller is noise.
+      document.documentElement.style.setProperty('--kb', (kb>60?Math.round(kb):0)+'px');
+    }
+    vv.addEventListener('resize',fit); vv.addEventListener('scroll',fit); fit();
+  })();
+  // ...and once the keyboard has landed, put the focused field where they can see it.
+  document.addEventListener('focusin',function(e){
+    var t=e.target; if(!t||!t.closest||!t.closest('.panel')) return;
+    setTimeout(function(){ try{ t.scrollIntoView({block:'center',behavior:'smooth'}); }catch(_){} },340);
+  });
   function showScrim(on){ var s=$('#scrim'); if(s) s.classList.toggle('on', !!on); }
   // Nag to back up (export a login key) until they have - the account-loss fix.
   function updateBackupNag(){ var n=$('#backupNag'); if(!n) return; var need=true; try{ need=LS.getItem('sparrow.send.backed_up')!=='1'; }catch(e){ need=false; } n.style.display=(need && !window.__nagOff)?'flex':'none'; }
@@ -1405,7 +1450,9 @@
   $('#chatmenu').onclick=function(e){ e.stopPropagation(); if(cur) openCmenu(cur, e.target); };
   document.addEventListener('click',function(e){ if(!e.target.closest('.panel')&&!e.target.closest('.iconbtn')&&!e.target.closest('.cmenu')&&!e.target.closest('#chatmenu')) closePanels(); });
   $('#scrim').onclick=closePanels;
-  $('#nagBackup').onclick=function(ev){ ev.stopPropagation(); closePanels(); $('#contactsPanel').classList.add('open'); showScrim(true); $('#exportBox').hidden=false; $('#importBox').hidden=true; var e=$('#exPass'); if(e){ try{e.scrollIntoView({block:'center'});}catch(_){} e.focus(); } };
+  // 🚨 #accountPanel, NOT #contactsPanel: exportBox lives in the ACCOUNT popup, so
+  // "Back up now" used to open the ☰ contacts menu and appear to do nothing.
+  $('#nagBackup').onclick=function(ev){ ev.stopPropagation(); closePanels(); $('#accountPanel').classList.add('open'); showScrim(true); $('#exportBox').hidden=false; $('#importBox').hidden=true; var e=$('#exPass'); if(e){ try{e.scrollIntoView({block:'center'});}catch(_){} e.focus(); } };
   $('#nagLater').onclick=function(ev){ ev.stopPropagation(); window.__nagOff=true; updateBackupNag(); };
   $('#backBtn').onclick=closeChat;
   $('#replyx').onclick=clearReply;
