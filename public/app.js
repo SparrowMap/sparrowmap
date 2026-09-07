@@ -2408,8 +2408,15 @@ async function load() {
   // the recent tail, merged into what is already held.
   const full = !_pubFullAt || (Date.now() - _pubFullAt) >= PUB_FULL_EVERY_MS;
   const pubSince = full ? windowCut() : bucketed(Date.now() / 1000 - PUB_INCR_WINDOW_S);
+  // ⚠️ The full sweep needs a LONGER timeout than the 4s poll it shares a
+  // function with. It is ~760 KB of history and measured 16.5s on a weak link,
+  // which the 12s default would abort - turning the one fetch that populates
+  // the map into a guaranteed "reconnecting" on exactly the connections that
+  // can least afford to retry it. The incremental poll keeps the short timeout,
+  // because there a slow answer really is a broken one.
   const [pub, live] = await Promise.all([
-    fetchJSON(`/api/sightings?since=${pubSince}&vclass=public&limit=${PUBLIC_LIMIT}`),
+    fetchJSON(`/api/sightings?since=${pubSince}&vclass=public&limit=${PUBLIC_LIMIT}`,
+              full ? 60000 : FETCH_TIMEOUT_MS),
     fetchJSON(`/api/sightings?since=${trafficCut}&limit=400`),
   ]);
   // ⚠️ The clear() is why drawSnapshot must never run after this: live data
