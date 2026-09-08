@@ -18,3 +18,35 @@
 # The same trap, for the two paths people already share by hand.
 /map     https://map.sparrowmap.com/        302
 /app     https://map.sparrowmap.com/app     302
+
+# Sparrow Send. sparrowmap.com/send is what people will type - it is shorter than
+# map.sparrowmap.com/send and it is the domain on the cards and the nav.
+#
+# 🚨 A REDIRECT, NEVER A PROXY, and this one matters more than the others.
+# The Send app keeps the whole identity in localStorage: the private keys, the
+# contacts, the Double Ratchet state and the seen-message ids. localStorage is
+# per-ORIGIN. If sparrowmap.com/send SERVED the app instead of redirecting, that
+# would be a second origin with its own empty store - the user would look logged
+# out on a domain they typed correctly, could mint a duplicate identity, and would
+# register a second /send service worker. Two origins would also mean two devices
+# on one mailbox, and the relay deletes on read, so whichever polled first would
+# steal the message. Keep exactly ONE origin for the app: map.sparrowmap.com.
+#
+# The splat sends /send/anything to the app rather than to a 404 - the app has no
+# subpaths of its own, so there is nothing to preserve.
+#
+# ⚠️ WHAT IS ACTUALLY SERVING THIS TODAY: a zone Redirect Rule, not this file.
+# This Pages project is DIRECT UPLOAD, not git-connected (source: null, deploys are
+# ad_hoc), so pushing this repo does NOT deploy the landing site - it has to be sent
+# with `wrangler pages deploy landing --project-name=sparrowmap`. Rather than hand-
+# roll a direct upload of the whole site just to add one line (a botched upload takes
+# sparrowmap.com down), /send is live as a Cloudflare Redirect Rule on zone
+# 24d1f244aeb1df46303a7dfc9beaa962, ruleset 2465c0bfe895420d91301aa283a21d70,
+# phase http_request_dynamic_redirect, named "SparrowMap apex redirects".
+# It is scoped to apex+www ONLY - a zone-wide /send match would also catch
+# map.sparrowmap.com/send and redirect it to itself forever.
+# These two lines are kept anyway so this file stays the honest description of the
+# routing, and they become the live mechanism the next time the site is deployed.
+# Same destination and status either way, so the two cannot disagree.
+/send    https://map.sparrowmap.com/send    302
+/send/*  https://map.sparrowmap.com/send    302
