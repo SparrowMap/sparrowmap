@@ -66,6 +66,14 @@
   @keyframes pop{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
   .panel h4{margin:4px 2px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);display:flex;align-items:center;gap:8px}
   .panel .sub{color:var(--muted);font-size:12px;margin:2px}
+  /* 🚨 The iOS keyboard is TALLER than the keyboard: it carries an accessory bar
+     (the strip with Done / the arrows) on top, and visualViewport does not report it.
+     So --kb under-measures, and scrollIntoView({block:'nearest'}) parks a field flush
+     against what we THINK is the bottom edge - directly underneath that bar, which is
+     exactly what Matthew hit on the password box.
+     scroll-margin-bottom makes every scrollIntoView stop this far short of the bottom,
+     with no magic viewport arithmetic to keep in sync. Comfortably clears the bar. */
+  .panel input,.panel textarea,.panel select,.panel button{scroll-margin-bottom:72px;scroll-margin-top:16px}
   /* collapsible help: explanations hide behind a small "?" so the panel reads
      clean and compact; tap the "?" to reveal that section's help. */
   .panel .sub.hint{display:none;margin:2px 2px 8px;padding:8px 10px;border-radius:9px;
@@ -280,6 +288,14 @@
       border-radius:0 0 18px 18px;
       box-shadow:0 24px 60px rgba(0,0,0,.6);
       padding:14px;
+      /* 🚨 SCROLL SLACK. The password box is the LAST thing in this panel, so once
+         it is scrolled flush to the bottom the scroller is at its limit and no amount
+         of scroll-margin can lift it any higher - "i can't even scroll down its at its
+         limit". This adds empty space below the content, but ONLY while the keyboard
+         is up, so there is somewhere left to scroll into.
+         min() is the conditional: --kb is 0 with the keyboard down (min -> 0, no
+         change) and ~300px with it up (min -> 88px, one field's worth of slack). */
+      padding-bottom:calc(14px + min(var(--kb,0px), 88px));
       /* --kb ONLY shortens the panel, it never repositions it. Moving a focused
          field mid-keyboard-animation is what killed the keyboard. */
       max-height:calc(100dvh - env(safe-area-inset-top) - 56px - var(--kb,0px) - 12px);
