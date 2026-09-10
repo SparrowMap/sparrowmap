@@ -1604,44 +1604,77 @@ function redactPlateBand(cv, geom) {
         w.forEach(function(f){ try{ f(null); }catch(e){} });
       });
   }
+  /* 🚨 A blanket "Camera unavailable" threw away the one fact that identifies the
+     cause, which made a phone-only failure impossible to diagnose from a desk.
+     Name the reason instead - each of these needs a different thing from the user. */
+  function camErr(e){
+    var n=(e&&e.name)||'';
+    if(n==='NotAllowedError')      return 'Camera blocked — allow camera for this site in Settings';
+    if(n==='NotReadableError')     return 'Camera busy — another app has it. Close that app and retry';
+    if(n==='NotFoundError')        return 'No camera found on this device';
+    if(n==='SecurityError')        return 'Camera blocked by the browser (needs https)';
+    if(n==='AbortError')           return 'Camera stopped before it opened — retry';
+    return 'Camera unavailable'+(n?' ('+n+')':'');
+  }
   function camStart(){
     $('#camBtn').className='rbtn warn';
-    loadOrt().then(loadModel).then(function(){
-      /* 🚨 ASK FOR A RESOLUTION. THIS ASKED FOR NONE.
-       *
-       * With no width/height the browser hands back its default, which on a
-       * phone is typically 640x480. Everything downstream is a fraction of
-       * that: measured today, crops from phones reached the classifier at
-       * 52-200px wide, against 460px median from a fixed camera - and the
-       * head needs roughly 120px of vehicle before a livery is legible at all.
-       * That single difference is why every confirmed sighting in one town was
-       * from the one fixed camera and none from any phone.
-       *
-       * `ideal` rather than `exact`: a phone that cannot do 1920 returns its
-       * best instead of failing to open the camera at all, which is the right
-       * trade for a device we do not control. Detection still runs at 320px -
-       * this is about how many pixels the CROP keeps, not how hard the phone
-       * has to think.
-       *
-       * ⚠️ THIS CHANGES NOTHING ABOUT WHAT IS UPLOADED. SEND_EDGE still caps
-       * the crop at 200px before it leaves the device, so a private plate is
-       * as illegible as it was. A bigger sensor frame means the 200px we do
-       * send is 200px OF VEHICLE rather than 200px of street. */
-      return navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment',
-                 width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false});
-    }).then(function(s){
+    /* 🚨 ASK FOR A RESOLUTION. THIS ASKED FOR NONE.
+     *
+     * With no width/height the browser hands back its default, which on a
+     * phone is typically 640x480. Everything downstream is a fraction of
+     * that: measured today, crops from phones reached the classifier at
+     * 52-200px wide, against 460px median from a fixed camera - and the
+     * head needs roughly 120px of vehicle before a livery is legible at all.
+     * That single difference is why every confirmed sighting in one town was
+     * from the one fixed camera and none from any phone.
+     *
+     * `ideal` rather than `exact`: a phone that cannot do 1920 returns its
+     * best instead of failing to open the camera at all, which is the right
+     * trade for a device we do not control. Detection still runs at 320px -
+     * this is about how many pixels the CROP keeps, not how hard the phone
+     * has to think.
+     *
+     * ⚠️ THIS CHANGES NOTHING ABOUT WHAT IS UPLOADED. SEND_EDGE still caps
+     * the crop at 200px before it leaves the device, so a private plate is
+     * as illegible as it was. A bigger sensor frame means the 200px we do
+     * send is 200px OF VEHICLE rather than 200px of street. */
+    var IDEAL={video:{facingMode:'environment',width:{ideal:1920},height:{ideal:1080}},audio:false};
+    /* ⚠️ ...but never let the ASK cost us the camera entirely. Some devices reject
+       the constraint set outright, and a dashcam at the phone's default resolution is
+       worth far more than no dashcam. Only ever reached when the ideal request FAILED. */
+    function openCam(){
+      return navigator.mediaDevices.getUserMedia(IDEAL).catch(function(e){
+        if(e&&(e.name==='OverconstrainedError'||e.name==='NotFoundError'||e.name==='TypeError'))
+          return navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false})
+            .catch(function(){ return navigator.mediaDevices.getUserMedia({video:true,audio:false}); });
+        throw e;
+      });
+    }
+    /* 🚨 CAMERA FIRST, DETECTOR SECOND. This was
+         loadOrt().then(loadModel).then(getUserMedia)
+       so the preview could not appear until yolo11s.onnx - 37.9 MB - had finished
+       downloading, and if that download failed the chain rejected BEFORE getUserMedia
+       ever ran, so the camera never opened at all. On a phone on cellular, or on the
+       first run after the vendor cache is evicted, that is a long blank wait that
+       looks exactly like a broken camera.
+       Safe to flip: dloop() already returns early while `!session`, so the preview
+       runs with no model and detection joins the moment it is ready. */
+    openCam().then(function(s){
       camStream=s; var v=$('#dashvid'); v.srcObject=s;
       var p=v.play(); if(p&&p.catch)p.catch(function(){});
       camOn=true; $('#camBtn').className='rbtn on'; $('#camTile').style.display='block';
       keepAwake(); requestAnimationFrame(dloop); requestAnimationFrame(drawLoop);
-      toast('Dashcam on — watching the road');
+      toast('Camera on — loading the detector…');
       getDriveNode(function(nn){ driveNode=nn;
         if(!nn) toast('Dashcam running, but could not register to send'); });
+      loadOrt().then(loadModel).then(function(){
+        if(camOn) toast('Dashcam on — watching the road');
+      }).catch(function(){
+        if(camOn) toast('Camera on, but the detector failed to load — nothing will be sent');
+      });
     }).catch(function(e){
       $('#camBtn').className='rbtn';
-      toast(e&&e.name==='NotAllowedError'?'Camera permission denied':'Camera unavailable');
+      toast(camErr(e));
     });
   }
   function camStop(){
