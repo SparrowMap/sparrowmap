@@ -655,63 +655,68 @@ def sweep(courts: list, query: str, since: str = "", before: str = "",
     # page 3 did one page. The intent of the flag is "do this much work now".
     pages_now = 0
     while url:
+        # 🚨 The WHOLE page - fetch AND store - is guarded, not just the
+        # fetch. A store-side crash used to escape this handler, so the run
+        # stayed marked `running` with a cursor that had already been used:
+        # indistinguishable from a sweep still in flight, and `--report`
+        # showed it as healthy. A run that died must SAY it died.
         try:
             # _get retries 429s and network blips on its own; anything that
             # reaches here is real, and the cursor is already checkpointed.
             d = _get(url, token=token)
+
+            if run_id is None:
+                total = d.get("count")
+                run_id = oversight.start_run(TOOL, key, total=total)
+                print(f"run {run_id}: {total} cases match "
+                      f"[{court_param}] {query}"
+                      + (f" filed_after={since}" if since else ""))
+            if src_id is None:
+                # One source row per invocation, not per page. It records a
+                # retrieval - the query, when, and which run - so a reader can
+                # reproduce exactly the request these cases came from. A resumed
+                # sweep mints a second one, which is correct: it was a second
+                # retrieval, on a different day, and saying so is the point.
+                src_id = oversight.add_source(
+                    "court", "CourtListener RECAP",
+                    "https://www.courtlistener.com/recap/",
+                    json.dumps({"query": query, "court": court_param,
+                                "since": since, "run": run_id}))
+
+            results = d.get("results", [])
+            new_here = 0
+            for r in results:
+                nature = r.get("suitNature") or ""
+                cause = r.get("cause") or ""
+                is_prisoner = int("prisoner" in nature.lower()
+                                  or "prisoner" in cause.lower())
+                row = {
+                    "docket_id": r["docket_id"],
+                    "source_id": src_id,
+                    "court_id": r.get("court_id"),
+                    "court_name": r.get("court"),
+                    "docket_number": r.get("docketNumber"),
+                    "case_name": r.get("caseName"),
+                    "cause": cause,
+                    "suit_nature": nature,
+                    "date_filed": r.get("dateFiled"),
+                    "date_terminated": r.get("dateTerminated"),
+                    "assigned_to": r.get("assignedTo"),
+                    "jury_demand": r.get("juryDemand"),
+                    "absolute_url": r.get("docket_absolute_url"),
+                    "pacer_case_id": r.get("pacer_case_id"),
+                    "is_prisoner": is_prisoner,
+                }
+                if oversight.upsert_case(row):
+                    new_here += 1
+                oversight.upsert_parties(r["docket_id"], r.get("party") or [],
+                                         case_name=row["case_name"] or "",
+                                         cause=cause)
+            oversight.mark_seen(run_id, [r["docket_id"] for r in results])
         except Exception:
             if run_id:
                 oversight.update_run(run_id, state="error", cursor=url)
             raise
-
-        if run_id is None:
-            total = d.get("count")
-            run_id = oversight.start_run(TOOL, key, total=total)
-            print(f"run {run_id}: {total} cases match "
-                  f"[{court_param}] {query}"
-                  + (f" filed_after={since}" if since else ""))
-        if src_id is None:
-            # One source row per invocation, not per page. It records a
-            # retrieval - the query, when, and which run - so a reader can
-            # reproduce exactly the request these cases came from. A resumed
-            # sweep mints a second one, which is correct: it was a second
-            # retrieval, on a different day, and saying so is the point.
-            src_id = oversight.add_source(
-                "court", "CourtListener RECAP",
-                "https://www.courtlistener.com/recap/",
-                json.dumps({"query": query, "court": court_param,
-                            "since": since, "run": run_id}))
-
-        results = d.get("results", [])
-        new_here = 0
-        for r in results:
-            nature = r.get("suitNature") or ""
-            cause = r.get("cause") or ""
-            is_prisoner = int("prisoner" in nature.lower()
-                              or "prisoner" in cause.lower())
-            row = {
-                "docket_id": r["docket_id"],
-                "source_id": src_id,
-                "court_id": r.get("court_id"),
-                "court_name": r.get("court"),
-                "docket_number": r.get("docketNumber"),
-                "case_name": r.get("caseName"),
-                "cause": cause,
-                "suit_nature": nature,
-                "date_filed": r.get("dateFiled"),
-                "date_terminated": r.get("dateTerminated"),
-                "assigned_to": r.get("assignedTo"),
-                "jury_demand": r.get("juryDemand"),
-                "absolute_url": r.get("docket_absolute_url"),
-                "pacer_case_id": r.get("pacer_case_id"),
-                "is_prisoner": is_prisoner,
-            }
-            if oversight.upsert_case(row):
-                new_here += 1
-            oversight.upsert_parties(r["docket_id"], r.get("party") or [],
-                                     case_name=row["case_name"] or "",
-                                     cause=cause)
-        oversight.mark_seen(run_id, [r["docket_id"] for r in results])
 
         pages += 1
         pages_now += 1

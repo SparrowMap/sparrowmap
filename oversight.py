@@ -767,6 +767,39 @@ def add_source(kind: str, name: str, url: str = "", detail: str = "") -> int:
     return int(cur.lastrowid)
 
 
+_CASE_COLS = ("docket_id", "source_id", "court_id", "court_name",
+              "docket_number", "case_name", "cause", "suit_nature",
+              "date_filed", "date_terminated", "assigned_to", "jury_demand",
+              "absolute_url", "pacer_case_id", "is_prisoner", "match_basis",
+              "first_seen", "last_seen")
+
+# Columns a REFRESH is allowed to overwrite. `source_id`, `court_id` and
+# `first_seen` are deliberately absent: they record how and when this project
+# first came to hold the record, and a later sighting must not rewrite that.
+_CASE_REFRESH = ("court_name", "docket_number", "case_name", "cause",
+                 "suit_nature", "date_filed", "date_terminated", "assigned_to",
+                 "jury_demand", "absolute_url", "pacer_case_id", "is_prisoner",
+                 "last_seen")
+
+_CASE_UPSERT = (
+    "INSERT INTO cases (" + ", ".join(_CASE_COLS) + ") "
+    "VALUES (" + ",".join("?" * len(_CASE_COLS)) + ") "
+    "ON CONFLICT(docket_id) DO UPDATE SET "
+    + ", ".join(f"{c}=excluded.{c}" for c in _CASE_REFRESH)
+    + ", match_basis=COALESCE(cases.match_basis, excluded.match_basis)"
+)
+
+
+def _case_values(row: dict, t: float) -> tuple:
+    return (row["docket_id"], row["source_id"], row.get("court_id"),
+            row.get("court_name"), row.get("docket_number"),
+            row.get("case_name"), row.get("cause"), row.get("suit_nature"),
+            row.get("date_filed"), row.get("date_terminated"),
+            row.get("assigned_to"), row.get("jury_demand"),
+            row.get("absolute_url"), row.get("pacer_case_id"),
+            int(row.get("is_prisoner", 0)), row.get("match_basis"), t, t)
+
+
 def upsert_case(row: dict) -> bool:
     """Insert or refresh one case. Returns True if it was new to us.
 
@@ -774,90 +807,56 @@ def upsert_case(row: dict) -> bool:
     last year gets terminated, gets reassigned, gets its nature-of-suit code
     corrected. `first_seen` is preserved so the project can always say how long
     it has been holding a record.
+
+    ⚠️ ONE statement, never SELECT-then-INSERT. The old version asked
+    "do we have it?" and inserted if not, and **any** second writer landing the
+    same docket in that gap crashed the run with
+    `UNIQUE constraint failed: cases.docket_id`. That is not hypothetical - it
+    is reproducible with two threads and a barrier, and it is what killed the
+    Michigan enrichment sweep. An upsert has no gap to lose.
+
+    Newness comes back from the write itself: `first_seen` is not in the
+    refresh list, so the row RETURNS `t` only on the insert path.
     """
     c = connect()
-    existing = c.execute("SELECT first_seen FROM cases WHERE docket_id=?",
-                         (row["docket_id"],)).fetchone()
     t = now()
-    if existing:
-        c.execute(
-            "UPDATE cases SET court_name=?, docket_number=?, case_name=?, "
-            "cause=?, suit_nature=?, date_filed=?, date_terminated=?, "
-            "assigned_to=?, jury_demand=?, absolute_url=?, pacer_case_id=?, "
-            "is_prisoner=?, last_seen=? WHERE docket_id=?",
-            (row.get("court_name"), row.get("docket_number"),
-             row.get("case_name"), row.get("cause"), row.get("suit_nature"),
-             row.get("date_filed"), row.get("date_terminated"),
-             row.get("assigned_to"), row.get("jury_demand"),
-             row.get("absolute_url"), row.get("pacer_case_id"),
-             int(row.get("is_prisoner", 0)), t, row["docket_id"]))
-        c.commit()
-        return False
-    c.execute(
-        "INSERT INTO cases (docket_id, source_id, court_id, court_name, "
-        "docket_number, case_name, cause, suit_nature, date_filed, "
-        "date_terminated, assigned_to, jury_demand, absolute_url, "
-        "pacer_case_id, is_prisoner, first_seen, last_seen) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (row["docket_id"], row["source_id"], row.get("court_id"),
-         row.get("court_name"), row.get("docket_number"), row.get("case_name"),
-         row.get("cause"), row.get("suit_nature"), row.get("date_filed"),
-         row.get("date_terminated"), row.get("assigned_to"),
-         row.get("jury_demand"), row.get("absolute_url"),
-         row.get("pacer_case_id"), int(row.get("is_prisoner", 0)), t, t))
+    cur = c.execute(_CASE_UPSERT + " RETURNING first_seen", _case_values(row, t))
+    got = cur.fetchone()
     c.commit()
-    return True
+    return bool(got) and got[0] == t
 
 
 def upsert_cases(batch: list) -> int:
     """Insert or refresh many cases in ONE transaction. Returns rows new to us.
 
-    ⚠️ `upsert_case` commits per call, which is right for a 20-row API page and
-    catastrophic for a bulk load: tens of thousands of individual commits are
-    tens of thousands of fsyncs, and they dominate a run that should be bound
-    by decompression. Same logic, one transaction.
+    ⚠️ `upsert_case` commits per call, which is right for a 20-row API page
+    and catastrophic for a bulk load: tens of thousands of individual commits
+    are tens of thousands of fsyncs, and they dominate a run that should be
+    bound by decompression. Same logic, one transaction.
+
+    🚨 The batch is deduped against ITSELF, not just against the database.
+    The old version asked the database which ids it already had and inserted
+    the rest - so a docket appearing TWICE in the same batch was absent from
+    the database, "new" both times, and inserted twice. That crashes on the
+    primary key, and it is not a rare shape: the search cursor repeats rows
+    across pages whenever relevance scores tie, which is most of a pure filter
+    query. Last occurrence wins, because a later page is the fresher sighting.
     """
     if not batch:
         return 0
     c = connect()
     t = now()
-    ids = [row["docket_id"] for row in batch]
-    marks = ",".join("?" * len(ids))
+    uniq = {}
+    for row in batch:
+        uniq[row["docket_id"]] = row
+    rows = list(uniq.values())
+    marks = ",".join("?" * len(rows))
     known = {r[0] for r in c.execute(
-        f"SELECT docket_id FROM cases WHERE docket_id IN ({marks})", ids)}
-    new = [r for r in batch if r["docket_id"] not in known]
-    old = [r for r in batch if r["docket_id"] in known]
-    if new:
-        c.executemany(
-            "INSERT INTO cases (docket_id, source_id, court_id, court_name, "
-            "docket_number, case_name, cause, suit_nature, date_filed, "
-            "date_terminated, assigned_to, jury_demand, absolute_url, "
-            "pacer_case_id, is_prisoner, match_basis, first_seen, last_seen) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [(r["docket_id"], r["source_id"], r.get("court_id"),
-              r.get("court_name"), r.get("docket_number"), r.get("case_name"),
-              r.get("cause"), r.get("suit_nature"), r.get("date_filed"),
-              r.get("date_terminated"), r.get("assigned_to"),
-              r.get("jury_demand"), r.get("absolute_url"),
-              r.get("pacer_case_id"), int(r.get("is_prisoner", 0)),
-              r.get("match_basis"), t, t)
-             for r in new])
-    if old:
-        c.executemany(
-            "UPDATE cases SET court_name=?, docket_number=?, case_name=?, "
-            "cause=?, suit_nature=?, date_filed=?, date_terminated=?, "
-            "assigned_to=?, jury_demand=?, absolute_url=?, pacer_case_id=?, "
-            "is_prisoner=?, match_basis=COALESCE(match_basis,?), last_seen=? "
-            "WHERE docket_id=?",
-            [(r.get("court_name"), r.get("docket_number"), r.get("case_name"),
-              r.get("cause"), r.get("suit_nature"), r.get("date_filed"),
-              r.get("date_terminated"), r.get("assigned_to"),
-              r.get("jury_demand"), r.get("absolute_url"),
-              r.get("pacer_case_id"), int(r.get("is_prisoner", 0)),
-              r.get("match_basis"), t,
-              r["docket_id"]) for r in old])
+        f"SELECT docket_id FROM cases WHERE docket_id IN ({marks})",
+        list(uniq))}
+    c.executemany(_CASE_UPSERT, [_case_values(r, t) for r in rows])
     c.commit()
-    return len(new)
+    return sum(1 for did in uniq if did not in known)
 
 
 def upsert_parties(docket_id: int, names: Iterable[str], case_name: str = "",
