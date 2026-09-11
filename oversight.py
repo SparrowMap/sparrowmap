@@ -437,6 +437,21 @@ MIGRATIONS = [
     # identify yet. They stay NULL and get re-judged as enrichment fills in.
     ("cases", "police", "TEXT"),
     ("cases", "police_why", "TEXT"),
+    # 🚨 WHEN WE LAST ASKED FOR THIS CASE'S PARTIES - not whether it has any.
+    #
+    # These are two different facts and collapsing them is the mistake this
+    # column exists to prevent. A docket can come back from the search index
+    # with no parties because the index does not hold it (sealed, blocked,
+    # not yet ingested from PACER) - that is MISSING data, and it is not the
+    # same claim as "this case has no parties". Measured: a 20-id request
+    # returned 18. If "no parties stored" were the only marker of work left to
+    # do, those 2 would be re-requested forever, and the sweep would never
+    # finish while looking like it was making progress.
+    #
+    # Set for every id we ASKED about, answered or not. "Still to enrich" is
+    # `parties_checked IS NULL`, which is a fact about our own effort and
+    # needs no network call to evaluate.
+    ("cases", "parties_checked", "REAL"),
 ]
 
 
@@ -1135,3 +1150,65 @@ def stats() -> dict:
         "earliest": q("SELECT MIN(date_filed) FROM cases WHERE date_filed>''"),
         "latest": q("SELECT MAX(date_filed) FROM cases WHERE date_filed>''"),
     }
+
+
+def cases_needing_parties(scope: str = "police", limit: int = 0,
+                          courts: Optional[list] = None) -> list:
+    """Docket ids we have never asked the search index about.
+
+    🚨 `parties_checked IS NULL`, NOT "has no rows in case_parties". A docket
+    the index does not hold answers with nothing, forever; keying the work
+    queue on the ANSWER instead of on the ASKING makes those dockets immortal
+    and the sweep endless. See the column note in MIGRATIONS.
+
+    `scope` is a `cases.police` value, or "all" for every case regardless.
+    Police first is deliberate: it is 43k cases against 1.8M, and it is the
+    only slice the review surface actually needs to open.
+    """
+    c = connect()
+    where = ["parties_checked IS NULL"]
+    args: list = []
+    if scope != "all":
+        where.append("police IS ?" if scope == "unknown" else "police = ?")
+        args.append(None if scope == "unknown" else scope)
+    if courts:
+        where.append("court_id IN (%s)" % ",".join("?" * len(courts)))
+        args += list(courts)
+    sql = ("SELECT docket_id FROM cases WHERE " + " AND ".join(where)
+           + " ORDER BY date_filed DESC")
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return [r[0] for r in c.execute(sql, args)]
+
+
+def mark_parties_checked(docket_ids: Iterable[int]) -> int:
+    """Record that we asked about these dockets, whatever came back."""
+    ids = [(now(), d) for d in docket_ids]
+    if not ids:
+        return 0
+    c = connect()
+    c.executemany("UPDATE cases SET parties_checked=? WHERE docket_id=?", ids)
+    c.commit()
+    return len(ids)
+
+
+def enrich_progress(scope: str = "police") -> dict:
+    """How much of `scope` has been asked about, and what came back."""
+    c = connect()
+    pred = "1=1" if scope == "all" else (
+        "police IS NULL" if scope == "unknown" else "police = ?")
+    args = [] if scope in ("all", "unknown") else [scope]
+    q = lambda sql: c.execute(sql, args).fetchone()[0]  # noqa: E731
+    total = q(f"SELECT COUNT(*) FROM cases WHERE {pred}")
+    asked = q(f"SELECT COUNT(*) FROM cases WHERE {pred} "
+              "AND parties_checked IS NOT NULL")
+    named = q(f"SELECT COUNT(*) FROM cases c WHERE {pred} AND EXISTS("
+              "SELECT 1 FROM case_parties p WHERE p.docket_id=c.docket_id)")
+    # Asked and got nothing back: the index does not hold this docket. A real
+    # number worth watching - if it climbs, the seed source has a coverage
+    # hole and that is a finding, not a failure to retry harder.
+    silent = q(f"SELECT COUNT(*) FROM cases c WHERE {pred} "
+               "AND parties_checked IS NOT NULL AND NOT EXISTS("
+               "SELECT 1 FROM case_parties p WHERE p.docket_id=c.docket_id)")
+    return {"scope": scope, "total": total, "asked": asked, "named": named,
+            "silent": silent, "todo": total - asked}

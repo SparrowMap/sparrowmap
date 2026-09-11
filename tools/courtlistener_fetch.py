@@ -8,6 +8,16 @@
     python tools/courtlistener_fetch.py --report                # what we hold
     python tools/courtlistener_fetch.py --queue 40              # review queue
     python tools/courtlistener_fetch.py --reclassify            # re-derive
+    python tools/courtlistener_fetch.py --progress police       # how far along
+    python tools/courtlistener_fetch.py --enrich police         # NAMES, by id
+
+`--enrich` is the one that matters after a bulk load. Bulk data has no parties
+file, so every officer NAME still comes from the search API - and asking for
+specific docket ids (20 per request, one page, no cursor) reaches the 43k
+cases already evidenced as police in ~2,200 requests, where re-sweeping every
+jurisdiction to reach the same cases is ~89,500. It is resumable by simply
+being re-run: the work queue is "cases we have never asked about", which is a
+fact about our own effort and costs no network call to evaluate.
 
 `--states` sweeps one state at a time and SKIPS the ones already finished, so
 the national job is just the same command run again until it stops printing
@@ -606,6 +616,99 @@ def sweep_states(states: list, query: str, since: str = "", delay: float = 2.0,
         print(f"\nskipped {done_already} state(s) already complete")
 
 
+def _row(r: dict, src_id: int) -> dict:
+    """One search result -> one `cases` row.
+
+    ⚠️ ONE copy of this mapping. Every path that stores a search result goes
+    through here, because a second copy is how a field quietly stops being
+    filled on one path only - the same drift the loader guards against by
+    making `--purge` re-use `nos_in_scope()` instead of re-writing the rule.
+    """
+    nature = r.get("suitNature") or ""
+    cause = r.get("cause") or ""
+    return {
+        "docket_id": r["docket_id"],
+        "source_id": src_id,
+        "court_id": r.get("court_id"),
+        "court_name": r.get("court"),
+        "docket_number": r.get("docketNumber"),
+        "case_name": r.get("caseName"),
+        "cause": cause,
+        "suit_nature": nature,
+        "date_filed": r.get("dateFiled"),
+        "date_terminated": r.get("dateTerminated"),
+        "assigned_to": r.get("assignedTo"),
+        "jury_demand": r.get("juryDemand"),
+        "absolute_url": r.get("docket_absolute_url"),
+        "pacer_case_id": r.get("pacer_case_id"),
+        "is_prisoner": int("prisoner" in nature.lower()
+                           or "prisoner" in cause.lower()),
+    }
+
+
+ID_CHUNK = 20      # the search page size: one request, one page, no cursor
+
+
+def enrich_ids(docket_ids: list, delay: float = 8.0, token: str = "",
+               chunk: int = ID_CHUNK) -> dict:
+    """Fetch party names for specific dockets, by id.
+
+    🚨 THIS PATH HAS NO CURSOR, AND THAT IS THE POINT.
+
+    The date-window sweep pages through a whole jurisdiction, and paging is
+    where this tool has lost data twice: `cause:(1983)` is a pure filter, so
+    nearly every hit carries the SAME relevance score, and a cursor over tied
+    rows both repeats and SKIPS - a sweep once reported success 1,202 cases
+    short. Requesting exactly one page's worth of ids means `next` is always
+    null and there is no tie for a cursor to mis-order.
+
+    It is also 40x less work. Party names are the only thing the bulk dump
+    lacks, and 43,254 of the 43,559 cases already evidenced as police have
+    none. Asking for those directly is ~2,200 requests; re-sweeping every
+    jurisdiction to reach them is ~89,500.
+
+    ⚠️ A chunk of 20 ids does not always return 20 results - measured 18/20.
+    The missing dockets are not in the search index (sealed, blocked, or not
+    ingested from PACER). They are marked ASKED anyway, because the
+    alternative is retrying them on every future run forever. Missing data is
+    not negative data, so the marker records that we asked, never that the
+    case has no parties.
+    """
+    if not docket_ids:
+        return {"asked": 0, "answered": 0, "silent": 0, "parties": 0,
+                "requests": 0}
+    src_id = oversight.add_source(
+        "court", "CourtListener RECAP",
+        "https://www.courtlistener.com/recap/",
+        json.dumps({"mode": "enrich_ids", "ids": len(docket_ids)}))
+    asked = answered = parties = requests = 0
+    chunks = [docket_ids[i:i + chunk]
+              for i in range(0, len(docket_ids), chunk)]
+    for n, batch in enumerate(chunks, 1):
+        q = "docket_id:(%s)" % " OR ".join(str(i) for i in batch)
+        url = f"{API}/search/?" + urllib.parse.urlencode(
+            {"type": SEARCH_TYPE, "q": q})
+        d = _get(url, token=token)
+        requests += 1
+        got = d.get("results", [])
+        for r in got:
+            oversight.upsert_case(_row(r, src_id))
+            parties += oversight.upsert_parties(
+                r["docket_id"], r.get("party") or [],
+                case_name=r.get("caseName") or "", cause=r.get("cause") or "")
+        # Mark the WHOLE batch, not just what came back.
+        oversight.mark_parties_checked(batch)
+        asked += len(batch)
+        answered += len(got)
+        if n % 10 == 0 or n == len(chunks):
+            print(f"  {n}/{len(chunks)} requests: {asked} asked, "
+                  f"{answered} answered, {parties} party rows")
+        if n < len(chunks):
+            time.sleep(delay)
+    return {"asked": asked, "answered": answered, "silent": asked - answered,
+            "parties": parties, "requests": requests}
+
+
 def sweep(courts: list, query: str, since: str = "", before: str = "",
           delay: float = 2.0, max_pages: int = 0, token: str = "",
           resume: bool = False) -> tuple:
@@ -686,32 +789,12 @@ def sweep(courts: list, query: str, since: str = "", before: str = "",
             results = d.get("results", [])
             new_here = 0
             for r in results:
-                nature = r.get("suitNature") or ""
-                cause = r.get("cause") or ""
-                is_prisoner = int("prisoner" in nature.lower()
-                                  or "prisoner" in cause.lower())
-                row = {
-                    "docket_id": r["docket_id"],
-                    "source_id": src_id,
-                    "court_id": r.get("court_id"),
-                    "court_name": r.get("court"),
-                    "docket_number": r.get("docketNumber"),
-                    "case_name": r.get("caseName"),
-                    "cause": cause,
-                    "suit_nature": nature,
-                    "date_filed": r.get("dateFiled"),
-                    "date_terminated": r.get("dateTerminated"),
-                    "assigned_to": r.get("assignedTo"),
-                    "jury_demand": r.get("juryDemand"),
-                    "absolute_url": r.get("docket_absolute_url"),
-                    "pacer_case_id": r.get("pacer_case_id"),
-                    "is_prisoner": is_prisoner,
-                }
+                row = _row(r, src_id)
                 if oversight.upsert_case(row):
                     new_here += 1
                 oversight.upsert_parties(r["docket_id"], r.get("party") or [],
                                          case_name=row["case_name"] or "",
-                                         cause=cause)
+                                         cause=row["cause"])
             oversight.mark_seen(run_id, [r["docket_id"] for r in results])
         except Exception:
             if run_id:
@@ -878,6 +961,18 @@ def main() -> None:
                          "(skips rows a human has linked)")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --reclassify, count changes without writing")
+    ap.add_argument("--enrich", metavar="SCOPE", nargs="?", const="police",
+                    help="fetch party names BY DOCKET ID for cases we have "
+                         "never asked about. SCOPE is a police class "
+                         "(police, corrections, other, unknown) or 'all'; "
+                         "defaults to police, which is 43k cases instead of "
+                         "1.8M and is the only slice the review surface "
+                         "needs. No cursor, so no tied-score data loss. "
+                         "Resumable: just re-run it.")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="with --enrich, stop after N cases")
+    ap.add_argument("--progress", metavar="SCOPE", nargs="?", const="police",
+                    help="how much of a scope has been asked about")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--queue", type=int, metavar="N",
                     help="show the top N officer candidates")
@@ -908,6 +1003,41 @@ def main() -> None:
         if not a.dry_run:
             print()
             report()
+        return
+    if a.progress:
+        pr = oversight.enrich_progress(a.progress)
+        n = pr["total"] or 1
+        print(f"scope: {pr['scope']}   {pr['total']:,} cases")
+        print(f"  asked   {pr['asked']:>9,}  ({100.0*pr['asked']/n:5.1f}%)")
+        print(f"  named   {pr['named']:>9,}  ({100.0*pr['named']/n:5.1f}%)")
+        print(f"  silent  {pr['silent']:>9,}   asked, not in the search index")
+        print(f"  todo    {pr['todo']:>9,}   "
+              f"~{-(-pr['todo'] // ID_CHUNK):,} requests")
+        return
+    if a.enrich:
+        todo = oversight.cases_needing_parties(
+            a.enrich, limit=a.limit,
+            courts=(STATE_COURTS.get(a.state.strip().upper())
+                    if a.state else None))
+        if not todo:
+            print(f"nothing to enrich in scope '{a.enrich}'"
+                  + (f" for {a.state}" if a.state else ""))
+            return
+        reqs = -(-len(todo) // ID_CHUNK)
+        print(f"{len(todo):,} cases to enrich -> {reqs:,} requests "
+              f"@ {a.delay}s = ~{reqs * a.delay / 3600:.1f}h")
+        if a.dry_run:
+            return
+        st = enrich_ids(todo, delay=a.delay, token=a.token)
+        print()
+        print(f"{st['asked']:,} asked, {st['answered']:,} answered, "
+              f"{st['silent']:,} silent, {st['parties']:,} party rows added")
+        if st["silent"]:
+            print("  'silent' = the search index does not hold that docket. "
+                  "Marked asked, not retried.")
+        print()
+        print("now re-run with --police: cases move out of unknown as "
+              "names arrive.")
         return
     if a.report:
         report()
