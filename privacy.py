@@ -264,7 +264,8 @@ def redact(row: dict, viewer: str = "anon") -> dict:
         # redaction above is, on a database that never holds private plate
         # text. The belt is cheap and the failure mode is following somebody
         # home.
-        for k in ("vehicle_tag", "tag_conf", "tag_why", "tag_rev"):
+        for k in ("vehicle_tag", "tag_conf", "tag_why", "tag_rev",
+                  "markings", "markings_rev"):
             r.pop(k, None)
         # 🚨 AND THE PHOTOGRAPH. A private-tier row still carries `snap` (the
         # image filename, servable via /snap/<name>), and a photograph of a car

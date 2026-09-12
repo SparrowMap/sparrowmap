@@ -504,7 +504,11 @@ function redrawAll() {
 function renderList() {
   const cut = windowCut();
   let rows = [...state.sightings.values()].filter((s) => s.ts > cut && passes(s));
-  if (state.trackHash) rows = rows.filter((s) => s.plate_hash === state.trackHash);
+  if (state.trackHash) {
+    const k = state.trackHash;
+    rows = rows.filter((s) => k.startsWith('tag:') ? s.vehicle_tag === k.slice(4)
+                                                  : s.plate_hash === k);
+  }
   rows.sort((a, b) => b.ts - a.ts);
 
   // Public tier only. A private pass has no identifier, no detail page and no
@@ -891,6 +895,7 @@ async function openDetail(id) {
       <span>where</span><b>${wherePlace ? esc(wherePlace)
         : '<span class="sub">road and town not resolved yet</span>'}</b>
       <span>camera</span><b>${cameraLine}</b>
+      ${s.markings ? `<span>markings</span><b title="Read off the photo by a text recogniser. Check it against the picture.">${esc(s.markings)}</b>` : ''}
     </div>
     <div class="why"><b>Why this class:</b> ${esc(s.vclass_why || 'no signals recorded')}</div>
     <!-- 🚨 A LINK BETWEEN SIGHTINGS IS A GUESS AND MUST READ AS ONE.
@@ -900,8 +905,8 @@ async function openDetail(id) {
          extra steps. Only published police and government rows can carry one;
          db.tag_sighting refuses everything else. -->
     ${s.vehicle_tag ? `<div class="why"><b>Possibly the same vehicle</b> as
-      other sightings tagged <code>${esc(s.vehicle_tag)}</code>.
-      ${esc(s.tag_why || '')} <i>This is inferred, not confirmed.</i></div>` : ''}
+      other sightings<span id="tagCount"></span>.
+      ${esc(s.tag_why || '')} <i>This is inferred from the markings, not confirmed.</i></div>` : ''}
     ${pub ? '' : `<div class="why">This vehicle is private tier. Its plate was
       hashed at the camera and never stored, so there is no plate to show and
       no way to search for it. The identifier above is a rolling alias that
@@ -959,7 +964,18 @@ async function openDetail(id) {
       row.classList.remove('hidden');
     })
     .catch(() => { /* no link is fine; a broken one is not */ });
-  $('#btnTrail').onclick = () => { if (s.plate_hash) showTrail(s.plate_hash); };
+  // A plate is the strongest key; a tag (a link drawn from the markings) is the
+  // fallback that makes a trail possible for the patrol cars, none of which
+  // have a readable plate at the published crop size.
+  const trailKey = s.plate_hash || (s.vehicle_tag ? 'tag:' + s.vehicle_tag : null);
+  $('#btnTrail').onclick = () => { if (trailKey) showTrail(trailKey); };
+  if (s.vehicle_tag) {
+    fetch(`/api/track/${encodeURIComponent('tag:' + s.vehicle_tag)}`)
+      .then((r) => r.json())
+      .then((rows) => { const el = $('#tagCount');
+        if (el && rows.length > 1) el.textContent = ` (${rows.length - 1} more)`; })
+      .catch(() => {});
+  }
   if (pub) $('#btnReport').onclick = () => openReport(s.id);
   // There was no way out of the detail panel once it opened - it covered the
   // list and stayed until another sighting was clicked. A view you can enter
@@ -977,6 +993,36 @@ async function openDetail(id) {
 
 /* ---------------------------------------------------------------- trail -- */
 
+/* A sighting every poll cycle of a car that is PARKED is not a trail, it is
+   one place with four hundred timestamps - the busiest camera on the map has
+   405 police sightings of the same Explorer in the same bay. So consecutive
+   sightings from one camera closer than STAY_GAP_S apart fold into one STAY
+   with a first-seen and a last-seen, and the trail is drawn through stays. */
+const STAY_GAP_S = 20 * 60;
+
+function collapseStays(rows) {
+  const stays = [];
+  for (const r of rows) {
+    const last = stays[stays.length - 1];
+    if (last && last.node_id === r.node_id && r.ts - last.last_ts < STAY_GAP_S) {
+      last.last_ts = r.ts; last.n += 1; last.ids.push(r.id);
+    } else {
+      stays.push({ node_id: r.node_id, lat: r.lat, lon: r.lon, first_ts: r.ts,
+                   last_ts: r.ts, n: 1, ids: [r.id], vclass: r.vclass });
+    }
+  }
+  return stays;
+}
+
+function stayLabel(st) {
+  const f = new Date(st.first_ts * 1000), l = new Date(st.last_ts * 1000);
+  const t = (d) => d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const day = f.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  if (st.n === 1) return `${day} ${t(f)}`;
+  const mins = Math.round((st.last_ts - st.first_ts) / 60);
+  return `${day} ${t(f)} – ${t(l)} · seen ${st.n}× over ${mins} min`;
+}
+
 async function showTrail(hash) {
   if (!hash) return;
   const rows = await (await fetch(`/api/track/${encodeURIComponent(hash)}`)).json();
@@ -984,21 +1030,25 @@ async function showTrail(hash) {
   if (!rows.length) return;
 
   state.trackHash = hash;
-  const pts = rows.map((r) => [r.lat, r.lon]);
+  const stays = collapseStays(rows);
+  const pts = stays.map((st) => [st.lat, st.lon]);
   const col = COLOR[rows[0].vclass] || COLOR.unknown;
 
   // Pinned to SVG: its dashes come from .trail in the stylesheet, and a
   // canvas path has no class for CSS to reach.
-  L.polyline(pts, { color: col, weight: 2, opacity: 0.75, className: 'trail',
-                    renderer: L.svg() })
-    .addTo(state.trailLayer);
-  rows.forEach((r, i) => {
-    L.circleMarker([r.lat, r.lon], {
-      radius: i === rows.length - 1 ? 6 : 3.5, color: col, fillColor: col,
+  if (pts.length > 1) {
+    L.polyline(pts, { color: col, weight: 2, opacity: 0.75, className: 'trail',
+                      renderer: L.svg() })
+      .addTo(state.trailLayer);
+  }
+  stays.forEach((st, i) => {
+    L.circleMarker([st.lat, st.lon], {
+      radius: i === stays.length - 1 ? 6 : (st.n > 1 ? 5 : 3.5), color: col, fillColor: col,
       fillOpacity: 0.9, weight: 1,
-    }).on('click', () => openDetail(r.id)).addTo(state.trailLayer);
+    }).bindTooltip(stayLabel(st))
+      .on('click', () => openDetail(st.ids[st.ids.length - 1])).addTo(state.trailLayer);
   });
-  map.fitBounds(L.latLngBounds(pts).pad(0.25));
+  map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 16 });
 
   const ps = rows[0].patrol_score;
   if (ps != null && ps > 0.55) {
@@ -1007,6 +1057,12 @@ async function showTrail(hash) {
          <b>Patrol-shaped movement (${Math.round(ps * 100)}%).</b> Many passes,
          spread across the clock, reversing over the same stretch. Nobody's
          commute looks like this.</div>`);
+  }
+  if (stays.length !== rows.length) {
+    $('#detail').insertAdjacentHTML('beforeend',
+      `<div class="why"><b>${rows.length} sightings, ${stays.length} ${stays.length === 1 ? 'place' : 'places'}.</b>
+         A camera reports a parked car every few minutes; those are folded into
+         one stay with a first and last time. Hover a dot for the times.</div>`);
   }
   renderList();
 }

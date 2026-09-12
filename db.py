@@ -368,6 +368,13 @@ MIGRATIONS = [
     # the record still says which crop was the plate-illegible one, and so a
     # camera is never asked twice for a picture it has already handed over.
     ("sightings", "snap_full", "TEXT"),
+    # WHAT IS PAINTED ON THE VEHICLE, read off the published photo: the agency
+    # word, the unit number, the colours. Printed in the panel so a reader can
+    # check a link against the picture rather than take the machine's word.
+    # Same gate as vehicle_tag (set_markings refuses anything but a published
+    # police/gov row): the writing on a private car is as identifying as a tag.
+    ("sightings", "markings", "TEXT"),
+    ("sightings", "markings_rev", "TEXT"),
 ]
 
 # The setup funnel, in order. Progress only ever moves FORWARD through this
@@ -689,6 +696,25 @@ def tag_sighting(sighting_id: int, tag: str, conf: float, why: str,
     conn.execute("UPDATE sightings SET vehicle_tag = ?, tag_conf = ?, "
                  "tag_why = ?, tag_rev = ? WHERE id = ?",
                  (tag, float(conf), why.strip(), rev, sighting_id))
+    conn.commit()
+
+
+def set_markings(sighting_id: int, text: str, rev: str = TAG_REV) -> None:
+    """Record what was read off a published patrol-car photo ("POLICE · unit 312").
+
+    Refuses on the same rule as tag_sighting, checked against the stored row:
+    the text on a private vehicle is an identifier and is never kept.
+    """
+    conn = connect()
+    row = conn.execute("SELECT tier, vclass FROM sightings WHERE id = ?",
+                       (sighting_id,)).fetchone()
+    if not row:
+        raise NotTaggable(f"no sighting {sighting_id}")
+    if row["tier"] != "public" or (row["vclass"] or "") not in TAGGABLE:
+        raise NotTaggable(f"sighting {sighting_id} is tier={row['tier']} "
+                          f"vclass={row['vclass']}: its markings are not kept")
+    conn.execute("UPDATE sightings SET markings = ?, markings_rev = ? WHERE id = ?",
+                 ((text or "").strip() or None, rev, sighting_id))
     conn.commit()
 
 

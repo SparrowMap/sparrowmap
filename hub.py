@@ -2967,8 +2967,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(out)
 
             if p.startswith("/api/track/"):
-                h = _resolve_hash(unquote(p.rsplit("/", 1)[1]))
-                rows = db.track_for(h)
+                key = unquote(p.rsplit("/", 1)[1])
+                if key.startswith("tag:"):
+                    # A trail drawn from LINKS, not a plate. Every row in the
+                    # group carries tag_why, so the reader can see the reason
+                    # for each hop; the panel words it as "possibly the same
+                    # vehicle" and nothing here upgrades that to a fact.
+                    # tagged_group only returns public rows, and only
+                    # police/gov rows can ever carry a tag (db.tag_sighting).
+                    rows = db.tagged_group(key[4:])
+                else:
+                    rows = db.track_for(_resolve_hash(key))
                 if not rows:
                     return self._json([])
                 # 🚨 NOT AUDITED - and this one was the worst of the two.
