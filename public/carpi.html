@@ -121,7 +121,7 @@ gpsmon            # wait for a 2D/3D fix; the first one outdoors can take a few 
     <pre>ls /dev/video*                       # usually /dev/video0
 python3 ~/relay.py --source /dev/video0 --gps gpsd://127.0.0.1:2947 --dry-run</pre>
     <p>Wave a toy car in front of it, or point it at the street. You should see
-       lines like <code>would send car (seen 7x) at 42.63512,-83.81004</code>.
+       lines like <code>would send car (seen 7x) at LAT,LON</code>.
        If it says <code>no GPS fix</code>, it will not post: a crop with no fix is
        dropped rather than pinned to the last place the fix was, because a
        patrol car on the wrong street is worse than a missing one.</p></div>
