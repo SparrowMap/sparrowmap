@@ -263,6 +263,7 @@ main{position:fixed;inset:var(--headh) 0 var(--barh) 0;z-index:1;display:flex}
 .kv{display:grid;grid-template-columns:84px 1fr;gap:3px 8px;font-size:11.5px;margin-top:8px}
 .kv span{color:var(--muted)}
 .kv b{font-weight:600;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;color:var(--ink)}
+.kv b .sub{color:var(--muted);font-weight:400;font-family:inherit}
 
 /* "why this class" note */
 .why{margin-top:9px;padding:7px 9px;border-radius:8px;font-size:11.5px;line-height:1.45;

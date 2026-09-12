@@ -824,6 +824,22 @@ def _download_url():
     return DOWNLOAD_URL if ok else None
 
 
+def _cam_display_name(nd: dict) -> str:
+    """'Public traffic camera - 7200 BLK ELROY RD [atx:1452]' -> '7200 BLK ELROY RD'.
+
+    The enroller's prefix and its [network:id] tag are for operators; a reader
+    wants the street the department printed on the camera.
+    """
+    name = str(nd.get("name") or nd.get("id") or "").strip()
+    for pre in ("Public traffic camera - ", "Public traffic camera -", "Public traffic camera"):
+        if name.startswith(pre):
+            name = name[len(pre):].strip()
+            break
+    if name.endswith("]") and "[" in name:
+        name = name[:name.rfind("[")].strip()
+    return " ".join(name.split()) or str(nd.get("id") or "")
+
+
 def _public_rows(rows: list[dict]) -> list[dict]:
     # 🚨 DROP THE NULLS. A sighting row has 31 columns and only ~12 are ever set,
     # so 19 of them ship as `"plate_text":null` on every row of every response.
@@ -2933,7 +2949,22 @@ class Handler(BaseHTTPRequestHandler):
                 # not help - the disk is what gets copied or compelled.
                 # The audit log's purpose is to show what the OPERATOR did to
                 # the record, and operator actions are still audited below.
-                return self._json(_public_rows([r])[0])
+                out = _public_rows([r])[0]
+                # WHERE THE PHOTO WAS TAKEN, in words a reader can use.
+                # The panel used to print the node id and a heading. A public
+                # traffic camera is named and positioned by the transport
+                # department that runs it, so it gets its name; a volunteer
+                # camera is never named or placed - it gets the road and the
+                # town, which the map dot already discloses, and nothing more.
+                nd = db.node(r.get("node_id") or "") or {}
+                is_pub = nd.get("kind") == "public_cam"
+                out["where"] = {
+                    "kind": nd.get("kind") or "fixed",
+                    "camera": _cam_display_name(nd) if is_pub else None,
+                    "road": (nd.get("road_name") or "").strip() or None,
+                    "place": (nd.get("place") or "").strip() or None,
+                }
+                return self._json(out)
 
             if p.startswith("/api/track/"):
                 h = _resolve_hash(unquote(p.rsplit("/", 1)[1]))

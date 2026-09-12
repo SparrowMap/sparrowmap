@@ -586,7 +586,13 @@ def upsert_node(n: dict) -> None:
             kind=excluded.kind, status=excluded.status, contact=excluded.contact,
             span_lat1=excluded.span_lat1, span_lon1=excluded.span_lon1,
             span_lat2=excluded.span_lat2, span_lon2=excluded.span_lon2,
-            road_name=excluded.road_name, span_source=excluded.span_source
+            -- A re-enrol that says nothing about the road keeps what was
+            -- known. The public-camera enroller never passes road_name, and
+            -- backfill_where.py fills it from a lookup; wiping it on every
+            -- re-run turned the sighting panel back into `camera: n_1564f636`.
+            -- A snap that found NO road still sends '' and still wins.
+            road_name=COALESCE(excluded.road_name, nodes.road_name),
+            span_source=excluded.span_source
     """, {**{"pubkey": None, "token": None, "contact": None, "created": now(),
              "last_seen": None, "heading": 0, "fov": 60, "reach_m": 45,
              "kind": "fixed", "status": "active",

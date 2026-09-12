@@ -840,11 +840,42 @@ function showBubble(s) {
 
 async function openDetail(id) {
   state.selected = id;
-  const s = state.sightings.get(id) || await (await fetch(`/api/sighting/${id}`)).json();
+  // The list row is enough to draw the marker; the panel also wants WHERE the
+  // photo was taken (road, town, which camera), which only the single-sighting
+  // route resolves. Fetched once per sighting and kept on the cached row.
+  let s = state.sightings.get(id);
+  if (!s || !s.where) {
+    try { s = await (await fetch(`/api/sighting/${id}`)).json(); }
+    catch (e) { if (!s) return; }
+  }
   state.sightings.set(id, s);
 
   const pub = isPublic(s);
   const conf = s.vclass_conf != null ? `${Math.round(s.vclass_conf * 100)}%` : '—';
+
+  // WHEN, as a person says it: the day and the time, then how long ago. The
+  // old panel printed a locale timestamp and five rows nobody could use
+  // (classified/vehicle/heading/signed/detections) - the vehicle fields are
+  // empty on almost every police row and 'signed' means nothing to a reader.
+  const when = new Date(s.ts * 1000);
+  const whenDay = when.toLocaleDateString(undefined,
+    { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  const whenTime = when.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+  // WHERE: the road and the town. A public traffic camera is also NAMED,
+  // because the department that runs it publishes its name and position. A
+  // volunteer camera is never named or placed - the road of the dot on the
+  // map is all that is said, and that dot is already jittered.
+  const w = s.where || {};
+  const wherePlace = [w.road, w.place].filter(Boolean).join(', ');
+  let cameraLine;
+  if (w.kind === 'public_cam') {
+    cameraLine = `Public traffic camera${w.camera ? ` · ${esc(w.camera)}` : ''}`;
+  } else if (w.kind === 'phone' || w.kind === 'mobile') {
+    cameraLine = 'A volunteer’s phone or dashcam';
+  } else {
+    cameraLine = 'A volunteer’s camera <span class="sub">(its position is never published)</span>';
+  }
 
   $('#detail').innerHTML = `
     ${s.snap ? `<div class="shotwrap">
@@ -854,17 +885,12 @@ async function openDetail(id) {
     </div>` : ''}
     <div class="plate ${pub ? '' : 'priv'}">${esc(label(s))}</div>
     <div class="kv">
-      <span>class</span><b style="color:${COLOR[s.vclass] || COLOR.unknown}">${
+      <span>what</span><b style="color:${COLOR[s.vclass] || COLOR.unknown}">${
         esc(label_for(s.vclass))} · ${conf}</b>
-      <span>classified</span><b>${esc(s.vclass)}</b>
-      <span>seen</span><b>${new Date(s.ts * 1000).toLocaleString()}</b>
-      <span>camera</span><b>${esc(s.node_id)}</b>
-      <span>vehicle</span><b>${esc(s.color || '?')} ${esc(s.body || '')}</b>
-      <span>heading</span><b>${s.heading != null ? Math.round(s.heading) + '°' : '—'}</b>
-      <span>signed</span><b>${s.sig_ok ? 'yes' : 'no'}</b>
-      ${s.detections > 1 ? `<span>detections</span><b title="The tracker saw this
-        vehicle as several separate tracks while it crossed the frame. They are
-        one pass, folded together.">${s.detections} merged</b>` : ''}
+      <span>when</span><b>${esc(whenDay)} · ${esc(whenTime)} <span class="sub">(${esc(ago(s.ts))})</span></b>
+      <span>where</span><b>${wherePlace ? esc(wherePlace)
+        : '<span class="sub">road and town not resolved yet</span>'}</b>
+      <span>camera</span><b>${cameraLine}</b>
     </div>
     <div class="why"><b>Why this class:</b> ${esc(s.vclass_why || 'no signals recorded')}</div>
     <!-- 🚨 A LINK BETWEEN SIGHTINGS IS A GUESS AND MUST READ AS ONE.
@@ -884,7 +910,11 @@ async function openDetail(id) {
          because a dead link is worse than no link. -->
     <div class="why scanner hidden" id="scannerRow"></div>
     <div class="acts">
-      <button class="btn" id="btnTrail">${pub ? 'Show trail' : 'Show today’s trail'}</button>
+      ${(s.plate_hash || s.vehicle_tag)
+        ? `<button class="btn" id="btnTrail">${pub ? 'Show trail' : 'Show today’s trail'}</button>`
+        : `<button class="btn" id="btnTrail" disabled title="This vehicle had no readable plate, so
+             nothing links this sighting to another one yet. Linking patrol cars by
+             their markings is being built.">No trail yet</button>`}
       <button class="btn alt" id="btnCenter">Centre</button>
       ${pub ? '<button class="btn alt" id="btnReport">Report a problem</button>' : ''}
       <button class="btn alt" id="btnClose" title="Back to the list">Back</button>
@@ -929,7 +959,7 @@ async function openDetail(id) {
       row.classList.remove('hidden');
     })
     .catch(() => { /* no link is fine; a broken one is not */ });
-  $('#btnTrail').onclick = () => showTrail(s.plate_hash);
+  $('#btnTrail').onclick = () => { if (s.plate_hash) showTrail(s.plate_hash); };
   if (pub) $('#btnReport').onclick = () => openReport(s.id);
   // There was no way out of the detail panel once it opened - it covered the
   // list and stayed until another sighting was clicked. A view you can enter
