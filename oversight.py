@@ -64,14 +64,18 @@ record** - which is the only thing this is for.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from core import DATA, now
 
-DB_PATH = DATA / "oversight.db"
+# SPARROW_OVERSIGHT_DB points a test hub at a COPY, so an end-to-end check of
+# the review surface never mints into the real file.
+DB_PATH = Path(os.environ.get("SPARROW_OVERSIGHT_DB") or (DATA / "oversight.db"))
 
 _local = threading.local()
 

@@ -31,6 +31,7 @@ import db
 import mirror
 import node_label
 import operator_auth
+import oversight_api
 import qr
 import nodes as node_mod
 import privacy
@@ -2265,6 +2266,62 @@ class Handler(BaseHTTPRequestHandler):
                 # Served open; the token endpoints it drives are operator-gated,
                 # and the page shows an operator sign-in until you are.
                 return self._file(PUBLIC / "rv-admin.html")
+            # --- officer accountability review surface (/ov) -----------------
+            # Phase 2 of the oversight design. Gated on an OPERATOR-ISSUED pool
+            # token (review_api.is_trusted): these rows are about named human
+            # beings, and the self-service pool door that labels vehicle crops
+            # is not the door for that. Reads are gated too - an unverified
+            # party string is a court record, but a page of them sorted by
+            # frequency is an accusation waiting for a screenshot.
+            if p == "/ov":
+                return self._file(PUBLIC / "ov.html")
+            if p.startswith("/api/ov/"):
+                r = self._ov_reviewer()
+                if not r:
+                    return
+                if p == "/api/ov/stats":
+                    return self._json(oversight_api.stats())
+                if p == "/api/ov/queue":
+                    g = lambda k, d="": (q.get(k) or [d])[0]  # noqa: E731
+                    try:
+                        return self._json(oversight_api.queue(
+                            scope=g("scope", "police") or "police",
+                            state=g("state") or None, q=g("q")[:80],
+                            min_signal=int(g("min", "3") or 3),
+                            limit=int(g("limit", "60") or 60),
+                            offset=int(g("offset", "0") or 0)))
+                    except ValueError:
+                        return self._err(400, "bad number")
+                if p == "/api/ov/group":
+                    name = (q.get("name") or [""])[0]
+                    if not name:
+                        return self._err(400, "name required")
+                    return self._json(oversight_api.group(
+                        name, state=(q.get("state") or [None])[0],
+                        court=(q.get("court") or [None])[0],
+                        scope=(q.get("scope") or ["police"])[0] or "police"))
+                if p == "/api/ov/officers":
+                    return self._json(oversight_api.officers(
+                        q=(q.get("q") or [""])[0][:80],
+                        status=(q.get("status") or [None])[0],
+                        state=(q.get("state") or [None])[0]))
+                if p == "/api/ov/officer":
+                    try:
+                        o = oversight_api.officer(int((q.get("id") or ["0"])[0]))
+                    except ValueError:
+                        return self._err(400, "bad id")
+                    if not o:
+                        return self._err(404, "no such officer")
+                    return self._json(o)
+                if p == "/api/ov/log":
+                    try:
+                        return self._json(oversight_api.log(
+                            limit=int((q.get("limit") or ["100"])[0]),
+                            before=int((q.get("before") or ["0"])[0]) or None))
+                    except ValueError:
+                        return self._err(400, "bad number")
+                return self._err(404, "no such route")
+
             if p == "/api/rv/me":
                 r = review_auth.identify(self.headers)
                 if not r:
@@ -3072,7 +3129,9 @@ class Handler(BaseHTTPRequestHandler):
                        "/api/rv/tokens/new", "/api/rv/tokens/revoke",
                        "/api/rv/my-token", "/api/drive/report", "/api/drive/vote",
                        "/api/rv/retracted/delete", "/api/rv/held/fix",
-                       "/api/node/span", "/api/node/key"}
+                       "/api/node/span", "/api/node/key",
+                       "/api/ov/mint", "/api/ov/link", "/api/ov/unlink",
+                       "/api/ov/status", "/api/ov/edit"}
 
     def _do_POST_inner(self) -> None:
         try:
@@ -4481,6 +4540,55 @@ class Handler(BaseHTTPRequestHandler):
                     crop if isinstance(crop, dict) else None,
                     privacy.audit_ip(self.client_ip)))
 
+            if p.startswith("/api/ov/"):
+                r = self._ov_reviewer()
+                if not r:
+                    return
+                b = self._body()
+                who = r["label"]
+                if p == "/api/ov/mint":
+                    return self._json(oversight_api.mint_officer(
+                        who, str(b.get("display") or ""),
+                        surname=str(b.get("surname") or ""),
+                        given=str(b.get("given") or ""),
+                        agency=str(b.get("agency") or ""),
+                        agency_state=str(b.get("agency_state") or ""),
+                        rank=str(b.get("rank") or ""),
+                        notes=str(b.get("notes") or "")))
+                if p == "/api/ov/link":
+                    try:
+                        oid = int(b.get("officer_id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad officer_id")
+                    return self._json(oversight_api.link_parties(
+                        who, oid, b.get("party_ids") or [],
+                        confidence=str(b.get("confidence") or "probable"),
+                        reason=str(b.get("reason") or "")[:500]))
+                if p == "/api/ov/unlink":
+                    try:
+                        pid = int(b.get("party_id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad party_id")
+                    return self._json(oversight_api.unlink_party(
+                        who, pid, reason=str(b.get("reason") or "")[:500]))
+                if p == "/api/ov/status":
+                    try:
+                        oid = int(b.get("officer_id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad officer_id")
+                    return self._json(oversight_api.set_status(
+                        who, oid, str(b.get("status") or ""),
+                        reason=str(b.get("reason") or "")[:500]))
+                if p == "/api/ov/edit":
+                    try:
+                        oid = int(b.get("officer_id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad officer_id")
+                    f = b.get("fields")
+                    return self._json(oversight_api.edit_officer(
+                        who, oid, f if isinstance(f, dict) else {}))
+                return self._err(404, "no such route")
+
             if p == "/api/rv/verdict":
                 r = review_auth.identify(self.headers)
                 if not r:
@@ -4674,6 +4782,23 @@ class Handler(BaseHTTPRequestHandler):
             self._err(500, "internal error")
 
     # -- auth -----------------------------------------------------------
+    def _ov_reviewer(self):
+        """The trusted reviewer behind an /api/ov request, or None after
+        having already sent the refusal. 503 when the oversight database is
+        not on this host: a mirror or a fresh checkout must not answer with an
+        empty queue that reads as "all done"."""
+        if not oversight_api.available():
+            self._err(503, "oversight database not loaded on this host")
+            return None
+        r = review_auth.identify(self.headers)
+        if not r:
+            self._err(401, "not signed in")
+            return None
+        if not review_api.is_trusted(r):
+            self._err(403, "needs an operator-issued pool token")
+            return None
+        return r
+
     def _token_ok(self, nd: dict) -> bool:
         """Constant-time bearer check. A node with no token accepts anyone."""
         if not nd.get("token"):
