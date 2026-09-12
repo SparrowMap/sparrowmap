@@ -59,7 +59,13 @@ AGENCY = {
     "STATE POLICE": "state police", "CONSTABLE": "constable",
     "MARSHAL": "marshal", "PUBLIC SAFETY": "public safety",
 }
-NOT_UNITS = {"911", "311", "411", "2024", "2025", "2026"}
+NOT_UNITS = {"911", "011", "11", "311", "411", "2024", "2025", "2026"}
+# Text burned into the FRAME by the camera, or a road sign behind the car, reads
+# as digits too: "SH 358 @ FLOUR", "71 at SR-665", "EXIT 422B", "9:06",
+# "127/Hamilton Ave". Measured 2026-09-12: 5 of the first 24 "unit numbers" were
+# captions. A unit number on a car is a bare number, so anything that looks
+# like a caption or a sign is refused before the digits are even looked at.
+CAPTION = re.compile(r"[@/:]|(AT|SR|SH|US|HWY|EXIT|BLVD|AVE|ST|RD|MILE|MI|PKWY|DR|LN)", re.I)
 
 
 def clean(t: str) -> str:
@@ -91,15 +97,27 @@ def city_of(items: list) -> str | None:
     return None
 
 
-def units_of(items: list) -> list[tuple[str, float]]:
+def units_of(items: list, size=None) -> list[tuple[str, float]]:
     out = []
-    for txt, sc, _ in items:
+    w, h = (size or (0, 0))
+    for txt, sc, box in items:
         if sc < MIN_TEXT or len(re.findall(r"\d", txt)) > 5:
+            continue
+        if CAPTION.search(txt) or len(txt.strip()) > 6:
+            continue
+        # Captions are burned along the frame's top or bottom edge, and a road
+        # sign sits above the car; a number painted ON the car is in the middle.
+        if h and (box[1] < 0.12 * h or box[3] > 0.88 * h):
             continue
         for m in re.finditer(r"(?<!\d)(\d{2,4})(?!\d)", txt):
             n = m.group(1)
-            if n not in NOT_UNITS:
-                out.append((n, sc))
+            if n in NOT_UNITS:
+                continue
+            # Two digits are a unit number only when that is ALL the text says
+            # and the recogniser is sure; "28" inside a longer read is a fragment.
+            if len(n) == 2 and not (txt.strip() == n and sc >= 0.9):
+                continue
+            out.append((n, sc))
     return out
 
 
@@ -142,14 +160,23 @@ def main() -> None:
         items = ocr.get(str(f["id"]), [])
         agency, asc = agency_of(items)
         city = city_of(items)
-        units = units_of(items)
+        units = units_of(items, f.get("size"))
         unit = max(units, key=lambda u: u[1]) if units else None
         parts = []
         if agency: parts.append(agency.upper())
         if city: parts.append(city)
-        if unit: parts.append(f"unit {unit[0]}")
-        cols = [c for c in (f.get("colors") or []) if c not in ("grey",)][:2]
-        if cols: parts.append("/".join(cols))
+        # A number is only called a unit number when the same crop also says
+        # what it is a unit OF. Without the agency word, "4228" is as likely a
+        # road sign behind the car (it was: EXIT 422B) - precision over recall,
+        # because the row exists to be checked against the photo.
+        if unit and agency: parts.append(f"unit {unit[0]}")
+        elif unit: unit = None
+        # Colours only ride along with something READ. On their own they are a
+        # k-means guess on a night crop ("black/brown" for a white Explorer) and
+        # a markings row that says only that would teach readers to ignore it.
+        # No colours: measured 2026-09-12, k-means called a black-and-white
+        # Austin unit "green/silver" (windshield sunshade) - a wrong colour in
+        # the panel teaches readers to ignore the row that carries the number.
         marks[f["id"]] = {"agency": agency, "agency_sc": asc, "city": city,
                           "unit": unit, "text": " · ".join(parts) if parts else None}
 

@@ -112,9 +112,19 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = json.load(open(DATA / "reid_rows.json"))
+    # Resumable: keep what an earlier run embedded and only look at new ids,
+    # so the scheduled run costs seconds, not the ten CPU minutes of the first.
+    old_feats, old_embs = [], None
+    if (DATA / "features.json").exists() and (DATA / "embeddings.npy").exists():
+        old_feats = json.load(open(DATA / "features.json"))
+        old_embs = np.load(DATA / "embeddings.npy")
+        seen = {f["id"] for f in old_feats}
+        rows = [r for r in rows if r["id"] not in seen]
     if args.limit:
         rows = rows[:args.limit]
-    print(f"{len(rows)} sightings", flush=True)
+    print(f"{len(rows)} sightings to analyse ({len(old_feats)} kept)", flush=True)
+    if not rows:
+        return
 
     import torch
     import open_clip
@@ -129,7 +139,7 @@ def main() -> None:
         import easyocr
         reader = easyocr.Reader(["en"], gpu=(dev == "cuda"), verbose=False)
 
-    feats, embs = [], []
+    feats, embs = list(old_feats), ([] if old_embs is None else list(old_embs))
     t0 = time.time()
     for i, r in enumerate(rows):
         # Prefer the full-resolution picture when a reviewer's yes fetched one.
@@ -171,11 +181,7 @@ def main() -> None:
 
     np.save(DATA / "embeddings.npy", np.stack(embs))
     json.dump(feats, open(DATA / "features.json", "w"))
-    n_ag = sum(1 for f in feats if f["agency"])
-    n_dg = sum(1 for f in feats if f["digits"])
-    print(f"\n{len(feats)} analysed in {time.time() - t0:.0f}s: "
-          f"agency word read on {n_ag} ({100 * n_ag / max(1, len(feats)):.0f}%), "
-          f"a 2-4 digit group on {n_dg} ({100 * n_dg / max(1, len(feats)):.0f}%)")
+    print(f"\n{len(feats)} analysed ({len(rows)} new) in {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":
