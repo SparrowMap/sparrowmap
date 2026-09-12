@@ -7,6 +7,7 @@
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <meta name="theme-color" content="#0B0E13">
 <link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <style>
 :root{--bg:#0B0E13;--panel:#131822;--line:#1e2634;--ink:#e8edf5;--dim:#8794a8;
       --gov:#ffb547;--le:#ff3b47;--orbit:#3ddc97;--plain:#55637a}
@@ -78,14 +79,17 @@ aside{flex:0 0 340px;max-width:44vw;overflow-y:auto;background:var(--panel);
 </main>
 
 <script src="/vendor/leaflet.js"></script>
+<!-- MapLibre GL + the Leaflet bridge + the shared basemap, so this page draws the
+     self-hosted vector map and never the Carto "API KEY REQUIRED" tiles. -->
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/vendor/leaflet-maplibre-gl.js"></script>
+<script src="/static/basemap.js?v=1"></script>
 <script>
 (function(){
 'use strict';
 var $ = function(s){ return document.querySelector(s); };
 var map = L.map('map', { zoomControl:true }).setView([42.6,-83.9], 9);
-L.tileLayer('/api/tile/{z}/{x}/{y}.png', { maxZoom:20,
-  attribution:'&copy; OpenStreetMap contributors &copy; CARTO &middot; SparrowMap'
-}).addTo(map);
+sparrowBasemap(map);   // shared self-hosted vector basemap, Carto only as fallback
 
 var layer = L.layerGroup().addTo(map);
 var markers = {};

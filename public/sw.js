@@ -18,7 +18,7 @@
  * JS fix quietly knocked every phone camera offline until it finished pulling
  * the model over mobile data. Version the code; never the thing that takes a
  * minute to fetch. */
-const CACHE = 'sparrow-app-v10';
+const CACHE = 'sparrow-app-v11';
 // Deliberately the LAST app cache name rather than a fresh one: devices already
 // hold the model under it, and renaming would throw away the very download this
 // split exists to protect. Bump ONLY when the vendored model itself changes.
@@ -53,6 +53,12 @@ const SHELL = [
   // app that cannot open offline does not deliver it.
   '/',
   '/static/app.js',
+  // The shared basemap app.js calls on load: without it cached, an offline map
+  // open would die on a ReferenceError before drawing a single marker.
+  '/static/basemap.js',
+  '/vendor/maplibre-gl.js',
+  '/vendor/maplibre-gl.css',
+  '/vendor/leaflet-maplibre-gl.js',
   '/static/sitenav.js',
   '/static/install.js',
   '/static/offline.js',

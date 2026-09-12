@@ -6,6 +6,7 @@
 <title>Add an IP Camera — SparrowMap</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <link rel="stylesheet" href="/static/style.css?v=107">
 <style>
   body{overflow:auto}
@@ -225,6 +226,11 @@
 </div>
 
 <script src="/vendor/leaflet.js"></script>
+<!-- MapLibre GL + the Leaflet bridge + the shared basemap, so this page draws the
+     self-hosted vector map and never the Carto "API KEY REQUIRED" tiles. -->
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/vendor/leaflet-maplibre-gl.js"></script>
+<script src="/static/basemap.js?v=1"></script>
 <script>
 (function(){
   "use strict";
@@ -263,9 +269,7 @@
 
   function start(c, z){
     map = L.map("map").setView(c, z);
-    L.tileLayer("/api/tile/{z}/{x}/{y}.png", { maxZoom: 20,
-      attribution: "&copy; OpenStreetMap contributors &copy; CARTO &middot; SparrowMap"
-    }).addTo(map);
+    sparrowBasemap(map);   // shared self-hosted vector basemap, Carto only as fallback
     // ⚠️ LEAFLET'S DEFAULT MARKER IMAGE DOES NOT RESOLVE HERE, and it showed
     // as a broken-image box on the live page. Leaflet derives the icon path
     // from where it thinks its own CSS lives, which is wrong for a vendored

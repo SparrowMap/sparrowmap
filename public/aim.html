@@ -7,6 +7,7 @@
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <meta name="theme-color" content="#0B0E13">
 <link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <style>
 /* Deliberately self-contained: style.css?v=107 pins html,body{height:100%;overflow:hidden}
    for the map app, and a page with a scrolling panel under a map has to undo
@@ -159,6 +160,11 @@ input[type=password],input[type=text]{width:100%;padding:11px;border-radius:9px;
 </div>
 
 <script src="/vendor/leaflet.js"></script>
+<!-- MapLibre GL + the Leaflet bridge + the shared basemap, so this page draws the
+     self-hosted vector map and never the Carto "API KEY REQUIRED" tiles. -->
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/vendor/leaflet-maplibre-gl.js"></script>
+<script src="/static/basemap.js?v=1"></script>
 <script>
 (function(){
 'use strict';
@@ -317,9 +323,7 @@ function boot(p){
   $('#who').textContent = p.name + ' · ' + p.id;
 
   map = L.map('map', { zoomControl:true }).setView(pos, 18);
-  L.tileLayer('/api/tile/{z}/{x}/{y}.png', { maxZoom:20,
-    attribution:'&copy; OpenStreetMap contributors &copy; CARTO &middot; SparrowMap'
-  }).addTo(map);
+  sparrowBasemap(map);   // shared self-hosted vector basemap, Carto only as fallback
 
   if (p.span && p.span.length){
     span = L.polyline(p.span, { color:'#3ddc97', weight:4, opacity:.55 }).addTo(map);

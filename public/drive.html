@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Driving mode">
 <link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <style>
   :root{
     --bg:#0B0E13; --panel:#0d1219; --panel2:#141b24; --ink:#e8eef5;
@@ -322,6 +323,11 @@
      driving script measures anything against the viewport. -->
 <script src="/static/sitenav.js?v=39"></script>
 <script src="/vendor/leaflet.js"></script>
+<!-- MapLibre GL + the Leaflet bridge + the shared basemap, so this page draws the
+     self-hosted vector map and never the Carto "API KEY REQUIRED" tiles. -->
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/vendor/leaflet-maplibre-gl.js"></script>
+<script src="/static/basemap.js?v=1"></script>
 <script>
 (function(){
   "use strict";
@@ -331,8 +337,10 @@
 
   var map=L.map('map',{zoomControl:false,attributionControl:true})
     .setView(FALLBACK,FZOOM);
-  L.tileLayer('/api/tile/{z}/{x}/{y}.png',{
-    attribution:'&copy; OpenStreetMap &copy; CARTO · SparrowMap',maxZoom:19}).addTo(map);
+  // Self-hosted vector basemap (shared /static/basemap.js). The Carto proxy is
+  // only its fallback: on 2026-09-11 driving mode was the page he saw plastered
+  // with "API KEY REQUIRED" while the main map, already on vector, was clean.
+  sparrowBasemap(map,{maxZoom:19});
   var verifiedLayer=L.layerGroup().addTo(map);
   var liveLayer=L.layerGroup().addTo(map);
   var trailLayer=L.layerGroup().addTo(map);
