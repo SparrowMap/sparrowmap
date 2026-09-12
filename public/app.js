@@ -883,10 +883,10 @@ async function openDetail(id) {
       <button class="viewbtn" id="btnBigger" title="View this photo larger"
         aria-label="View this photo larger">⤢ View</button>
     </div>` : ''}
-    <div class="plate ${pub ? '' : 'priv'}">${esc(label(s))}</div>
+    ${label(s) !== '—' ? `<div class="plate ${pub ? '' : 'priv'}">${esc(label(s))}</div>` : ''}
     <div class="kv">
       <span>what</span><b style="color:${COLOR[s.vclass] || COLOR.unknown}">${
-        esc(label_for(s.vclass))} · ${conf}</b>
+        esc(label_for(s.vclass))}${s.vclass_conf != null ? ` · ${conf}` : ''}</b>
       <span>when</span><b>${esc(whenDay)} · ${esc(whenTime)} <span class="sub">(${esc(ago(s.ts))})</span></b>
       <span>where</span><b>${wherePlace ? esc(wherePlace)
         : '<span class="sub">road and town not resolved yet</span>'}</b>
