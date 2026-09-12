@@ -57,8 +57,12 @@
       map and patrol alerts. Build a Pi when you want a camera that starts with
       the ignition and needs nobody in the car to touch it.</span></div>
     <div><b>Nothing is recorded</b><span>The Pi keeps no video and no log of
-      where you drove. What leaves it is a crop at most 200 px wide, which
-      cannot carry a readable plate, plus the position of that one moment.</span></div>
+      where you drove. Without <code>--plates</code> what leaves it is a crop at
+      most 200 px wide, which cannot carry a readable plate. With
+      <code>--plates</code> it reads the plate on the Pi and sends the text and
+      a legible crop; the map keeps those <em>only</em> for a vehicle it
+      publishes as government, and hashes and discards everyone else's. See
+      <a href="#plates">reading plates</a>.</span></div>
     <div><b>You are never on the map</b><span>A dashcam is enrolled as a
       <em>mobile</em> camera. Mobile cameras get no watched road, no marker,
       and no home; only the vehicles it saw appear, at the spot it saw them.</span></div>
@@ -70,10 +74,16 @@
     <tr><td>Computer</td><td>Raspberry Pi 5 (4 GB)</td>
         <td>Runs the vehicle detector at a usable rate. A Pi 4 works at about
             half the frame rate; a Zero 2 W is too slow.</td></tr>
-    <tr><td>Camera</td><td>Any USB webcam, 720p or better, with a suction or
-        clip mount. Logitech C920-class is plenty.</td>
-        <td>USB is simpler than the Pi camera module in a car: one cable, no
-            ribbon, and a mount you can aim.</td></tr>
+    <tr><td>Camera, to spot patrol cars</td><td>Any USB webcam, 720p or better,
+        with a suction or clip mount. Logitech C920-class is plenty.</td>
+        <td>One cable, a mount you can aim. Enough to tell a patrol car from
+            a car; not enough to read a plate on a moving vehicle.</td></tr>
+    <tr><td>Camera, to read plates</td><td><b>Reolink RLC-810A</b> (4K, 12 V DC)
+        or <b>RLC-811A</b> (adds optical zoom). Plus a 12 V barrel lead from the
+        car and one Ethernet cable to the Pi.</td>
+        <td>Four times the pixels on the plate, a real lens, and a manual
+            shutter so a plate at 40 mph is not a smear. It runs off the car's
+            12 V directly; no PoE injector. The relay already speaks its RTSP.</td></tr>
     <tr><td>GPS</td><td>A USB GPS dongle (u-blox 7 or 8 based, "VK-172" style,
         under $15)</td>
         <td>Plugs in and shows up as <code>/dev/ttyACM0</code>. Put it on the
@@ -163,6 +173,48 @@ journalctl -u sparrow-dashcam -f          # watch it post</pre>
        power is harmless. Turn it off again (same menu) when you want to change
        anything, then back on.</p></div>
 
+  <h2 id="plates">Reading plates (the Reolink build)</h2>
+  <p class="body">This is what the system was designed to do: read every
+     plate at the camera, keep the government ones, and never store a
+     private one. Turning it on changes what leaves the Pi, so it is a flag,
+     not a default.</p>
+
+  <div class="step"><h3><span class="n">A</span> Wire the Reolink to the Pi</h3>
+    <p>Power the camera from the car's 12 V (a barrel lead to a fused socket).
+       Run Ethernet from the camera to the Pi and give the Pi's port a fixed
+       address so the two can talk without a router:</p>
+    <pre>sudo nmcli con add type ethernet ifname eth0 con-name cam ip4 192.168.2.1/24
+sudo nmcli con up cam</pre>
+    <p>In the Reolink app (over the camera's Wi-Fi setup, or plugged into your
+       home router first) give the camera the static address
+       <code>192.168.2.10</code>, set a password, and turn RTSP on. Then in
+       <em>Display &rarr; Exposure</em> choose <b>Manual</b> and a shutter of
+       <b>1/1000 s</b> or faster: motion blur, not resolution, is what makes a
+       plate on a moving car unreadable.</p></div>
+
+  <div class="step"><h3><span class="n">B</span> Install the two plate models and run with <code>--plates</code></h3>
+    <pre>pip3 install --break-system-packages fast-plate-ocr open-image-models
+python3 ~/relay.py --source "rtsp://admin:YOURPASS&#64;192.168.2.10:554/h264Preview_01_main"     --gps gpsd://127.0.0.1:2947 --plates --dry-run</pre>
+    <p>Both models are ONNX and run on the Pi's CPU; a plate read takes about a
+       second, once per vehicle. When it works, drop <code>--dry-run</code>,
+       add <code>--plates</code> to the <code>ExecStart</code> line in the
+       service from step 6, and <code>sudo systemctl restart sparrow-dashcam</code>.</p>
+    <p>A read is only sent when it is plate-shaped (not the word POLICE off a
+       door), at least three characters, and the recogniser is at least 50 %
+       sure of its least certain character. Anything weaker goes out as an
+       ordinary 200 px crop instead.</p></div>
+
+  <div class="note warn"><b>What leaves the Pi with <code>--plates</code>, stated
+    plainly.</b> For every vehicle it finishes tracking: the plate text it read,
+    where the plate is in the picture, a crop of the vehicle up to 900 px wide,
+    the class it saw (car, truck) and the GPS position. Over TLS, to
+    map.sparrowmap.com only. The map then decides: a vehicle it publishes as
+    government keeps its plate and its picture; every other vehicle's plate is
+    hashed and the text discarded before anything is stored, and its picture is
+    stored with the plate blacked out. That decision is made by
+    <a href="https://github.com/SparrowMap/sparrowmap/blob/main/hub.py">code you
+    can read</a>, and the private hash cannot be searched.</div>
+
   <h2>What you will see on the map</h2>
   <p class="body">Nothing, at first. A dashcam crop goes into the review queue
      like a phone's does; a reviewer marks it as a patrol vehicle or not, and
@@ -190,7 +242,7 @@ journalctl -u sparrow-dashcam -f          # watch it post</pre>
   <p class="body" style="margin-top:28px">The relay is
      <a href="https://github.com/SparrowMap/sparrowmap/blob/main/detect/relay.py">one
      readable file</a>. If you want to check what leaves the Pi, read it; the
-     crop cap and the no-fix rule are both in there in plain sight.</p>
+     crop cap, the no-fix rule and the plate contract are all in there in plain sight.</p>
 </div>
 <script src="/static/sitenav.js?v=39"></script>
 </body>

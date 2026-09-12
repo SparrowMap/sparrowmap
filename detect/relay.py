@@ -278,6 +278,176 @@ def crop_of(frame, box):
 
 
 # --------------------------------------------------------------------------
+# reading the plate (optional: --plates)
+# --------------------------------------------------------------------------
+# 🚨 THIS CHANGES WHAT LEAVES THE MACHINE, AND THE GUIDE SAYS SO.
+# Without --plates the relay is a phone-style node: a 200 px crop with the
+# plate area painted out, and nothing else. With --plates it is a CAMERA node,
+# the same contract his own porch camera runs: it reads the plate here, and
+# posts the text, the plate box and a legible vehicle crop. The hub then keeps
+# the text ONLY for a vehicle it publishes as government; a private vehicle's
+# plate is hashed and the text discarded, and its crop is stored with the
+# plate blacked out (snapshot.store_submitted). That is the design: read every
+# plate, keep the government ones.
+#
+# The two models are ONNX and run on a Pi 5 CPU (plate detector ~1 MB input
+# 608 px, OCR ~10 MB). Both packages are optional; without them --plates just
+# says so and the relay runs as before.
+PLATE_MAX_ASPECT = 3.5          # a 2:1 plate plus box slop; door livery runs 4:1+
+PLATE_MAX_WIDTH_FRAC = 0.55     # of the vehicle box; livery spans the door
+PLATE_MIN_CONF = 0.5            # worst-character probability
+FULL_EDGE = 900                 # the legible crop, same as the browser node's hold
+_LIVERY_WORDS = {"POLICE", "SHERIFF", "STATEPOLICE", "STATETROOPER", "TROOPER",
+                 "STATEPATROL", "HIGHWAYPATROL", "PATROL", "CONSTABLE", "MARSHAL",
+                 "FIRE", "FIREDEPT", "FIREDEPARTMENT", "RESCUE", "AMBULANCE", "EMS",
+                 "EMERGENCY", "K9", "CANINE", "SECURITY", "DEPUTY", "PD", "SO"}
+
+
+def _looks_like_plate(text: str) -> bool:
+    t = "".join(ch for ch in (text or "").upper() if ch.isalnum())
+    if not (3 <= len(t) <= 9):
+        return False
+    if any(c.isalpha() for c in t) and any(c.isdigit() for c in t):
+        return True
+    return len(t) <= 5
+
+
+class Plates:
+    """Find the plate on a vehicle and read it. The same rules as detect/pipeline.py,
+    carried here because this file must run alone."""
+
+    def __init__(self) -> None:
+        from open_image_models import create_detector          # noqa: F401
+        from fast_plate_ocr import LicensePlateRecognizer      # noqa: F401
+        self.det = create_detector("yolo-v9-s-608-license-plate-end2end",
+                                   conf_thresh=0.30, providers=["CPUExecutionProvider"])
+        self.ocr = LicensePlateRecognizer("cct-s-v2-global-model", device="cpu")
+        cfg = getattr(self.ocr, "config", None)
+        self.gray = (getattr(cfg, "image_color_mode", "rgb") or "rgb") == "grayscale"
+        self.errors = 0
+
+    def read(self, frame, vbox):
+        """(text, conf, box, boxes) in FRAME coordinates; text '' when nothing plate-like."""
+        h, w = frame.shape[:2]
+        x0, y0 = max(0, int(vbox[0])), max(0, int(vbox[1]))
+        x1, y1 = min(w, int(vbox[2])), min(h, int(vbox[3]))
+        if x1 - x0 < 24 or y1 - y0 < 24:
+            return "", 0.0, None, []
+        try:
+            dets = self.det.predict(frame[y0:y1, x0:x1])
+        except Exception:
+            return "", 0.0, None, []
+        best, boxes = ("", 0.0, None), []
+        for d in dets:
+            b = d.bounding_box
+            fx0, fy0, fx1, fy1 = x0 + int(b.x1), y0 + int(b.y1), x0 + int(b.x2), y0 + int(b.y2)
+            pw, ph = fx1 - fx0, fy1 - fy0
+            if pw < 12 or ph < 6:
+                continue
+            # Shape and scale separate a plate from a word on a door. A read
+            # that IS an agency word is livery whatever shape its box was.
+            if pw / max(1, ph) > PLATE_MAX_ASPECT or pw > (x1 - x0) * PLATE_MAX_WIDTH_FRAC:
+                continue
+            boxes.append([fx0, fy0, fx1, fy1])          # every plate-like box gets redacted
+            img = frame[max(0, fy0):fy1, max(0, fx0):fx1]
+            if img.size == 0:
+                continue
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY if self.gray else cv2.COLOR_BGR2RGB)
+            try:
+                preds = self.ocr.run(img, return_confidence=True)
+            except Exception as exc:
+                self.errors += 1
+                if self.errors == 1:
+                    print(f"  ! plate OCR error (counted silently from now on): {exc}")
+                continue
+            if not preds:
+                continue
+            pr = preds[0]
+            text = (pr.plate or "").strip().upper()
+            probs = getattr(pr, "char_probs", None)
+            conf = float(np.asarray(probs, dtype=float).min()) if probs is not None and len(probs) else 0.0
+            t = "".join(ch for ch in text if ch.isalnum())
+            if t in _LIVERY_WORDS or not _looks_like_plate(text):
+                continue
+            if conf > best[1]:
+                best = (text, conf, [fx0, fy0, fx1, fy1])
+        return best[0], best[1], best[2], boxes
+
+
+def legible_crop(frame, box, pad: float = 0.15):
+    """The vehicle with a margin, at up to FULL_EDGE px, and the boxes re-based
+    to it. This is what a plate-reading node posts; the hub crops to the
+    vehicle box and blacks out the plate boxes unless the vehicle is published."""
+    fh, fw = frame.shape[:2]
+    x0, y0, x1, y1 = box
+    px, py = (x1 - x0) * pad, (y1 - y0) * pad
+    sx, sy = max(0, int(x0 - px)), max(0, int(y0 - py * 2))
+    ex, ey = min(fw, int(x1 + px)), min(fh, int(y1 + py))
+    sub = frame[sy:ey, sx:ex]
+    s = min(1.0, FULL_EDGE / max(sub.shape[0], sub.shape[1]))
+    if s < 1.0:
+        sub = cv2.resize(sub, (max(1, int(sub.shape[1] * s)), max(1, int(sub.shape[0] * s))),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        return None, None
+    rebase = lambda b: [int((b[0] - sx) * s), int((b[1] - sy) * s),
+                        int((b[2] - sx) * s), int((b[3] - sy) * s)]
+    return ("data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()), rebase
+
+
+# --------------------------------------------------------------------------
+# the good picture, on request (want_full)
+# --------------------------------------------------------------------------
+# A phone-style post is 200 px. When the hub later PUBLISHES that vehicle as
+# government it asks the camera - the only device that ever had the original -
+# for a legible copy, in the reply to the heartbeat. Held for an hour, like the
+# browser node, because a reviewer gets to it minutes or hours after the pass.
+FULL_KEEP, FULL_TTL_S = 48, 3600.0
+HELD: dict = {}                 # sighting id -> (data_url, ts)
+
+
+def hold_full(sid: int, data_url: str) -> None:
+    if not sid or not data_url:
+        return
+    HELD[sid] = (data_url, time.time())
+    while len(HELD) > FULL_KEEP:
+        HELD.pop(next(iter(HELD)))
+
+
+def beat_loop(hub: str, node: str, token: str) -> None:
+    """Heartbeat every 20 s; answer want_full from what is still held."""
+    while True:
+        try:
+            req = urllib.request.Request(
+                hub.rstrip("/") + "/api/heartbeat", method="POST",
+                data=json.dumps({"node_id": node}).encode(),
+                headers={"Content-Type": "application/json", "User-Agent": UA,
+                         "Authorization": "Bearer " + token})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                d = json.loads(r.read() or b"{}")
+            cut = time.time() - FULL_TTL_S
+            for k in [k for k, v in HELD.items() if v[1] < cut]:
+                HELD.pop(k, None)
+            for sid in d.get("want_full") or []:
+                held = HELD.pop(int(sid), None)
+                if not held:
+                    continue
+                req = urllib.request.Request(
+                    hub.rstrip("/") + "/api/sighting/fullres", method="POST",
+                    data=json.dumps({"node_id": node, "id": int(sid),
+                                     "snap_b64": held[0]}).encode(),
+                    headers={"Content-Type": "application/json", "User-Agent": UA,
+                             "Authorization": "Bearer " + token})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    r.read()
+                print(f"  full-res sent for {sid}")
+        except Exception as exc:
+            print(f"  heartbeat: {exc.__class__.__name__}")
+        time.sleep(20)
+
+
+# --------------------------------------------------------------------------
 # a camera that MOVES: GPS
 # --------------------------------------------------------------------------
 # A dashcam node posts every crop with the fix it had at that moment, and the
@@ -414,11 +584,18 @@ def enroll(hub: str, name: str, kind: str, lat: float, lon: float) -> dict:
 # posting
 # --------------------------------------------------------------------------
 def post(hub: str, node: str, token: str, lat: float, lon: float,
-         crop: str, cls_name: str, score: float) -> dict:
+         crop: str, cls_name: str, score: float, plate: Optional[dict] = None) -> dict:
     body = {"node_id": node, "ts": time.time(), "source": "phone_node",
             "body": cls_name, "det_conf": round(float(score), 3),
             "plate_text": "", "plate_conf": 0, "evidence": {},
             "snap_b64": crop, "lat": lat, "lon": lon}
+    if plate:
+        # The camera contract: a legible crop, the vehicle box inside it, the
+        # plate box(es) to redact, and the read. The hub decides the tier.
+        body.update({"source": "camera", "snap_b64": plate["image"],
+                     "vehicle_box": plate["vehicle_box"],
+                     "plate_box": plate["box"], "plate_boxes": plate["boxes"],
+                     "plate_text": plate["text"], "plate_conf": round(float(plate["conf"]), 3)})
     req = urllib.request.Request(
         hub.rstrip("/") + "/api/sightings", method="POST",
         data=json.dumps(body).encode(),
@@ -449,6 +626,9 @@ def main() -> int:
                          "it in ~/.sparrowmap/node.json; later runs need no --node/--token")
     ap.add_argument("--kind", default=None, choices=["fixed", "mobile"],
                     help="with --enroll: 'mobile' for a dashcam (default when --gps is set)")
+    ap.add_argument("--plates", action="store_true",
+                    help="read plates here and post them (needs fast-plate-ocr + "
+                         "open-image-models). Changes what leaves this machine: see /carpi.")
     ap.add_argument("--every", type=float, default=SEND_EVERY_S,
                     help="minimum seconds between uploads")
     ap.add_argument("--dry-run", action="store_true",
@@ -504,6 +684,22 @@ def main() -> int:
     print(f"relay: {redact(a.source)} -> {a.hub} as {a.node or '(dry run)'}"
           f"{' via ' + a.gps if a.gps else ''}{' (dry run)' if a.dry_run else ''}")
 
+    plates = None
+    if a.plates:
+        try:
+            plates = Plates()
+            print("  plate reader loaded (plates are read here; the hub keeps government ones)")
+        except ImportError as exc:
+            print(f"  --plates needs two packages: pip3 install fast-plate-ocr open-image-models "
+                  f"({exc}). Running without plates.")
+        except Exception as exc:
+            print(f"  plate reader failed to load ({exc.__class__.__name__}: {exc}). "
+                  "Running without plates.")
+
+    if a.node and a.token and not a.dry_run:
+        import threading
+        threading.Thread(target=beat_loop, args=(a.hub, a.node, a.token), daemon=True).start()
+
     cap = open_stream(a.source)
     if cap is None:
         print("could not open the stream. Run tools/test_stream.py on this URL.")
@@ -555,6 +751,10 @@ def main() -> int:
                 if area > match["best"]:
                     match["best"] = area
                     match["crop"] = crop_of(frame, h["box"])
+                    # The frame itself, for the plate reader and the legible
+                    # hold. One frame per track, replaced as the car grows.
+                    match["frame"] = frame.copy()
+                    match["fbox"] = h["box"]
 
             for t in list(tracks):
                 if now - t.get("last", 0) < GONE_S:
@@ -563,6 +763,7 @@ def main() -> int:
                 # MIN_FRAMES kills the one-frame flickers that would otherwise
                 # each become a sighting.
                 if t["seen"] < MIN_FRAMES or not t["crop"] or t["sent"]:
+                    t.pop("frame", None)
                     continue
                 if now - last_send < a.every:
                     continue
@@ -584,16 +785,30 @@ def main() -> int:
                     last_send = now
                     continue
                 try:
+                    pl = None
+                    full_url = None
+                    if t.get("frame") is not None:
+                        full_url, rebase = legible_crop(t["frame"], t["fbox"])
+                        if plates is not None and full_url:
+                            text, conf, box, boxes = plates.read(t["frame"], t["fbox"])
+                            if text and conf >= PLATE_MIN_CONF and box:
+                                pl = {"image": full_url, "vehicle_box": rebase(t["fbox"]),
+                                      "box": rebase(box), "boxes": [rebase(b) for b in boxes],
+                                      "text": text, "conf": conf}
                     r = post(a.hub, a.node, a.token, lat, lon,
-                             t["crop"], t["cls"], 0.9)
+                             t["crop"], t["cls"], 0.9, plate=pl)
                     last_send = now
                     t["sent"] = True
                     sent += 1
                     if r.get("error"):
                         print(f"  hub refused: {r['error']}")
                     else:
-                        print(f"  sent {t['cls']} -> sighting {r.get('id')}"
-                              f"  (total {sent})")
+                        # A 200 px post may be published later; keep the good
+                        # picture so the hub can ask for it.
+                        if pl is None and full_url and r.get("id"):
+                            hold_full(int(r["id"]), full_url)
+                        print(f"  sent {t['cls']}{' plate ' + pl['text'] if pl else ''}"
+                              f" -> sighting {r.get('id')}  (total {sent})")
                 except urllib.error.HTTPError as e:
                     print(f"  HTTP {e.code}: {e.read()[:120]!r}")
                 except Exception as exc:
