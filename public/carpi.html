@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>A Raspberry Pi dashcam node — SparrowMap</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="stylesheet" href="/static/style.css?v=107">
+<style>
+  body{overflow:auto}
+  .doc{max-width:820px;margin:0 auto;padding:30px 20px 90px}
+  h1{font-size:28px;margin:0 0 6px}
+  .sub{color:var(--dim2);margin:0 0 24px;font-size:14.5px;line-height:1.6}
+  h2{font:600 11.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+     color:var(--dim2);margin:34px 0 12px}
+  p.body{font-size:14px;color:var(--dim);line-height:1.65}
+  .back{display:inline-block;margin-bottom:18px;font:11px var(--mono);
+        letter-spacing:.12em;text-transform:uppercase;color:var(--dim);text-decoration:none}
+  .deal{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:0 0 8px}
+  .deal div{background:#0d1219;border:1px solid var(--line2);border-radius:10px;padding:14px 16px}
+  .deal b{display:block;color:var(--ink);margin-bottom:5px;font-size:14px}
+  .deal span{font-size:12.5px;color:var(--dim2);line-height:1.55}
+  .step{border:1px solid var(--line2);border-radius:12px;padding:16px 18px;margin:0 0 14px;
+        background:#0b1017}
+  .step > h3{margin:0 0 10px;font-size:16px;color:var(--ink);display:flex;gap:9px;align-items:center}
+  .step .n{width:24px;height:24px;border-radius:50%;background:#1b2432;color:var(--dim);
+           font:600 12px/24px var(--mono);text-align:center;flex:none}
+  .step p{font-size:13.5px;color:var(--dim);line-height:1.6;margin:8px 0}
+  pre{margin:8px 0 0;padding:13px 14px;background:#080b10;border:1px solid var(--line2);
+      border-radius:9px;overflow-x:auto;font:12.5px/1.6 var(--mono);color:#b9c6d8;white-space:pre}
+  .note{font-size:12.5px;color:var(--dim);background:#0a1018;border-left:2px solid var(--line2);
+        padding:11px 14px;border-radius:0 7px 7px 0;margin:14px 0;line-height:1.6}
+  .warn{border-left-color:#c9832b}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  td,th{padding:8px 10px;border-bottom:1px solid var(--line2);text-align:left;vertical-align:top}
+  th{font:600 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim2)}
+  td:last-child{color:var(--dim2)}
+  a{color:var(--cam)}
+  code{font:12.5px var(--mono);color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="doc">
+  <a class="back" href="/guides">&larr; all guides</a>
+  <h1>A Raspberry Pi dashcam node</h1>
+  <p class="sub">A small computer on the dash that spots vehicles as you drive,
+     posts a plate-illegible crop with the GPS position it had at that moment,
+     and lets the map's reviewers decide whether it was a patrol car. No phone
+     in a mount, no screen to keep awake, nothing to tap.</p>
+
+  <!-- 🚨 THE DEAL FIRST, and the honest comparison with the phone page. Most
+       people asking for this should just open /drive; a page that sells them
+       hardware without saying so would be the wrong kind of page. -->
+  <div class="deal">
+    <div><b>You may not need this</b><span>A phone in a mount running
+      <a href="/drive">driving mode</a> already does all of this, with a live
+      map and patrol alerts. Build a Pi when you want a camera that starts with
+      the ignition and needs nobody in the car to touch it.</span></div>
+    <div><b>Nothing is recorded</b><span>The Pi keeps no video and no log of
+      where you drove. What leaves it is a crop at most 200 px wide, which
+      cannot carry a readable plate, plus the position of that one moment.</span></div>
+    <div><b>You are never on the map</b><span>A dashcam is enrolled as a
+      <em>mobile</em> camera. Mobile cameras get no watched road, no marker,
+      and no home; only the vehicles it saw appear, at the spot it saw them.</span></div>
+  </div>
+
+  <h2>What to buy</h2>
+  <table>
+    <tr><th>Part</th><th>Pick</th><th>Why</th></tr>
+    <tr><td>Computer</td><td>Raspberry Pi 5 (4 GB)</td>
+        <td>Runs the vehicle detector at a usable rate. A Pi 4 works at about
+            half the frame rate; a Zero 2 W is too slow.</td></tr>
+    <tr><td>Camera</td><td>Any USB webcam, 720p or better, with a suction or
+        clip mount. Logitech C920-class is plenty.</td>
+        <td>USB is simpler than the Pi camera module in a car: one cable, no
+            ribbon, and a mount you can aim.</td></tr>
+    <tr><td>GPS</td><td>A USB GPS dongle (u-blox 7 or 8 based, "VK-172" style,
+        under $15)</td>
+        <td>Plugs in and shows up as <code>/dev/ttyACM0</code>. Put it on the
+            dash where it can see the sky.</td></tr>
+    <tr><td>Internet</td><td>Your phone's hotspot, or a USB LTE stick</td>
+        <td>A crop every few seconds is a few kilobytes; a day of driving is
+            well under 50 MB.</td></tr>
+    <tr><td>Power</td><td>A 12 V-to-USB-C adapter rated <b>5 V / 5 A</b> for the
+        Pi 5 (3 A for a Pi 4)</td>
+        <td>A cheap 2 A phone charger browns the Pi out under load and corrupts
+            the card. Buy the rated one.</td></tr>
+    <tr><td>Storage</td><td>A 32 GB A2 microSD</td><td>Nothing big is stored.</td></tr>
+  </table>
+  <div class="note warn"><b>Power, honestly.</b> A Pi on a 12 V socket is only as
+    safe as the socket. Cutting power mid-write corrupts SD cards; the setup
+    below mounts the card read-only for the running system so a hard ignition-off
+    is fine. If your socket is live with the engine off, unplug the Pi when you
+    park for the night or a flat battery is on you, not us.</div>
+
+  <h2>Set it up</h2>
+
+  <div class="step"><h3><span class="n">1</span> Flash Raspberry Pi OS Lite (64-bit)</h3>
+    <p>Use Raspberry Pi Imager. In its settings set a hostname, a user, your
+       phone hotspot's Wi-Fi name and password, and turn SSH on. Boot the Pi
+       once at home on the same hotspot and SSH in.</p></div>
+
+  <div class="step"><h3><span class="n">2</span> Install the three packages the relay needs, plus gpsd</h3>
+    <pre>sudo apt update
+sudo apt install -y python3-opencv python3-numpy python3-pip gpsd gpsd-clients
+pip3 install --break-system-packages onnxruntime
+curl -fsSLo ~/relay.py https://map.sparrowmap.com/relay.py</pre>
+    <p>That is the whole dependency list. The relay is one file that imports
+       nothing else from this project; it fetches the 38 MB vehicle detector
+       from the map the first time it runs and checks its hash every run.</p></div>
+
+  <div class="step"><h3><span class="n">3</span> Point gpsd at the dongle and check for a fix</h3>
+    <pre>sudo sed -i 's#^DEVICES=.*#DEVICES="/dev/ttyACM0"#; s#^GPSD_OPTIONS=.*#GPSD_OPTIONS="-n"#' /etc/default/gpsd
+sudo systemctl enable --now gpsd
+gpsmon            # wait for a 2D/3D fix; the first one outdoors can take a few minutes</pre>
+    <p>If the dongle is a UART HAT on the GPIO header instead of USB, the device
+       is <code>/dev/serial0</code> and it needs <code>sudo raspi-config</code>
+       &rarr; Interface &rarr; Serial (login shell off, port on) first.</p></div>
+
+  <div class="step"><h3><span class="n">4</span> Find the camera and try the relay without sending anything</h3>
+    <pre>ls /dev/video*                       # usually /dev/video0
+python3 ~/relay.py --source /dev/video0 --gps gpsd://127.0.0.1:2947 --dry-run</pre>
+    <p>Wave a toy car in front of it, or point it at the street. You should see
+       lines like <code>would send car (seen 7x) at 42.63512,-83.81004</code>.
+       If it says <code>no GPS fix</code>, it will not post: a crop with no fix is
+       dropped rather than pinned to the last place the fix was, because a
+       patrol car on the wrong street is worse than a missing one.</p></div>
+
+  <div class="step"><h3><span class="n">5</span> Enrol it once, for real</h3>
+    <pre>python3 ~/relay.py --source /dev/video0 --gps gpsd://127.0.0.1:2947 --enroll "Dashcam"</pre>
+    <p>The first run waits for a fix, registers the camera with the map as a
+       <em>mobile</em> node, and remembers its id and token in
+       <code>~/.sparrowmap/node.json</code>. Every later run needs only
+       <code>--source</code> and <code>--gps</code>. The token is the camera's
+       identity: keep the file, and if the card is ever lost, enrol again with a
+       new name.</p></div>
+
+  <div class="step"><h3><span class="n">6</span> Start with the ignition</h3>
+    <pre>sudo tee /etc/systemd/system/sparrow-dashcam.service &gt;/dev/null &lt;&lt;'EOF'
+[Unit]
+Description=SparrowMap dashcam relay
+After=network-online.target gpsd.service
+Wants=network-online.target
+
+[Service]
+User=%i
+ExecStart=/usr/bin/python3 /home/USER/relay.py --source /dev/video0 --gps gpsd://127.0.0.1:2947
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo sed -i "s#%i#$USER#; s#/home/USER#$HOME#" /etc/systemd/system/sparrow-dashcam.service
+sudo systemctl enable --now sparrow-dashcam
+journalctl -u sparrow-dashcam -f          # watch it post</pre>
+    <p>Now it boots when the car does, reconnects to the hotspot on its own,
+       and keeps going when the camera or GPS drops out for a moment.</p></div>
+
+  <div class="step"><h3><span class="n">7</span> Make the card survive ignition-off</h3>
+    <pre>sudo raspi-config     # Performance Options -> Overlay File System -> enable, and make /boot read-only</pre>
+    <p>With the overlay on, nothing writes to the card while driving, so pulling
+       power is harmless. Turn it off again (same menu) when you want to change
+       anything, then back on.</p></div>
+
+  <h2>What you will see on the map</h2>
+  <p class="body">Nothing, at first. A dashcam crop goes into the review queue
+     like a phone's does; a reviewer marks it as a patrol vehicle or not, and
+     only confirmed government vehicles are published, at the position your Pi
+     reported. Your route is never stored and your camera has no marker.
+     <a href="/rv">Reviewing</a> is open to anyone, so the fastest way to see
+     your own catches land is to review.</p>
+
+  <h2>If it does not work</h2>
+  <table>
+    <tr><td><code>could not open the stream</code></td>
+        <td>Another program has the camera, or it is <code>/dev/video1</code>.
+            <code>v4l2-ctl --list-devices</code> shows which.</td></tr>
+    <tr><td><code>no GPS fix</code> for more than a few minutes</td>
+        <td>The dongle cannot see the sky, or gpsd is not running:
+            <code>systemctl status gpsd</code>, then <code>gpsmon</code>.</td></tr>
+    <tr><td><code>HTTP 429</code></td>
+        <td>The map is rate-limiting enrolments. Wait an hour; a saved
+            <code>node.json</code> never needs to enrol again.</td></tr>
+    <tr><td>It posts but nothing ever appears</td>
+        <td>Expected until a reviewer confirms a catch. Cars that are not
+            government vehicles are never published.</td></tr>
+  </table>
+
+  <p class="body" style="margin-top:28px">The relay is
+     <a href="https://github.com/SparrowMap/sparrowmap/blob/main/detect/relay.py">one
+     readable file</a>. If you want to check what leaves the Pi, read it; the
+     crop cap and the no-fix rule are both in there in plain sight.</p>
+</div>
+<script src="/static/sitenav.js?v=39"></script>
+</body>
+</html>

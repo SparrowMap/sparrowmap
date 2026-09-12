@@ -1851,6 +1851,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             if p == "/IPCamera":        return self._file(PUBLIC / "ipcamera.html")
+            # A Raspberry Pi in a car: the relay with --gps and --enroll, as a
+            # guide somebody can follow from a parts list to a systemd unit.
+            if p in ("/carpi", "/CarPi", "/dashcam-pi"):
+                return self._file(PUBLIC / "carpi.html")
             # 🚨 THE RELAY, AS ONE FILE. It imports nothing from this project
             # and fetches its own model, so a business needs this file and three
             # pip packages - not a git checkout. Telling somebody to clone a

@@ -3,6 +3,10 @@
     python -m detect.relay --source rtsp://USER:PASS@CAMERA:554/stream1 \\
         --node n_xxxx --token TOKEN --hub https://map.sparrowmap.com
 
+    # a Raspberry Pi in a car: a USB camera and a GPS dongle, one command
+    python3 relay.py --source /dev/video0 --gps gpsd://127.0.0.1:2947 \\
+        --enroll "Dashcam"          # first run registers it; later runs just --source and --gps
+
 🚨 WHY THIS IS A RELAY AND NOT A NODE.
 `run_live.py` classifies on the spot, which needs CLIP and the trained head -
 a reasonable ask for the machine that already runs the project, and an
@@ -38,6 +42,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 # 🚨 SET BEFORE cv2 IS IMPORTED, AND NOT THE OPTION THE DOCS SUGGEST.
 # Measured on this build: a dead RTSP host blocks for 30.1s and the documented
@@ -134,6 +139,19 @@ UA = "SparrowMap-relay/0.1"
 # stream
 # --------------------------------------------------------------------------
 def open_stream(url: str):
+    # A camera plugged into THIS machine: a USB webcam (`0`, `/dev/video0`) or a
+    # Pi camera module bridged to V4L2. No ffmpeg, no timeouts to bind - the
+    # kernel either hands frames over or it does not.
+    if url.isdigit() or url.startswith("/dev/video"):
+        cap = cv2.VideoCapture(int(url) if url.isdigit() else url, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        # Ask for a modest frame: the detector runs at 320 px anyway, and a Pi
+        # decoding 1080p to find a 320 px car is a Pi that runs hot for nothing.
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        return cap
     cap = cv2.VideoCapture()
     cap.open(url, cv2.CAP_FFMPEG,
              [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
@@ -260,6 +278,139 @@ def crop_of(frame, box):
 
 
 # --------------------------------------------------------------------------
+# a camera that MOVES: GPS
+# --------------------------------------------------------------------------
+# A dashcam node posts every crop with the fix it had at that moment, and the
+# hub plots a `mobile` node's sightings at the posted point (nodes.sighting_position
+# keys on kind). Two sources, both without extra packages:
+#   gpsd://host:port   gpsd's JSON stream (the usual Pi setup: a USB dongle,
+#                      `sudo apt install gpsd`, and gpsd owns the device)
+#   /dev/ttyACM0       raw NMEA straight from the dongle when gpsd is not running
+# 🚨 NO FIX, NO DOT. A crop taken while the receiver was still searching is not
+# posted at the last known point: a car that has driven two miles since the fix
+# would put a patrol sighting on the wrong street, and a wrong street on this
+# map is worse than a missing one. FIX_MAX_AGE_S is the whole allowance.
+FIX_MAX_AGE_S = 15.0
+GPS = {"lat": None, "lon": None, "ts": 0.0, "speed": None, "err": ""}
+
+
+def _nmea_deg(v: str, hemi: str) -> Optional[float]:
+    if not v:
+        return None
+    d, m = divmod(float(v), 100.0)
+    deg = int(d) + m / 60.0
+    return -deg if hemi in ("S", "W") else deg
+
+
+def _gps_nmea(dev: str) -> None:
+    """Read $..RMC / $..GGA lines from a serial device, forever."""
+    while True:
+        try:
+            try:
+                import serial                                # pyserial, if present
+                f = serial.Serial(dev, 9600, timeout=5)
+            except Exception:
+                # No pyserial, or a device it cannot configure: read it as a
+                # file. A USB CDC dongle ignores baud; a UART HAT needs
+                # `stty -F /dev/serial0 9600` once (the guide says so).
+                f = open(dev, "rb", buffering=0)
+            for raw in iter(lambda: f.readline(), b""):
+                line = raw.decode("ascii", "ignore").strip()
+                if not line.startswith("$") or "*" not in line:
+                    continue
+                parts = line[1:].split("*")[0].split(",")
+                kind = parts[0][2:]
+                if kind == "RMC" and len(parts) > 7 and parts[2] == "A":
+                    lat, lon = _nmea_deg(parts[3], parts[4]), _nmea_deg(parts[5], parts[6])
+                    if lat is not None and lon is not None:
+                        GPS.update(lat=lat, lon=lon, ts=time.time(),
+                                   speed=float(parts[7] or 0) * 0.514444, err="")
+                elif kind == "GGA" and len(parts) > 6 and parts[6] not in ("", "0"):
+                    lat, lon = _nmea_deg(parts[2], parts[3]), _nmea_deg(parts[4], parts[5])
+                    if lat is not None and lon is not None:
+                        GPS.update(lat=lat, lon=lon, ts=time.time(), err="")
+            GPS["err"] = "serial closed"
+        except Exception as exc:
+            GPS["err"] = f"{exc.__class__.__name__}: {exc}"
+        time.sleep(3)
+
+
+def _gps_gpsd(host: str, port: int) -> None:
+    """Follow gpsd's JSON stream (TPV reports), forever."""
+    import socket
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=10) as sk:
+                sk.sendall(b'?WATCH={"enable":true,"json":true}\n')
+                sk.settimeout(30)
+                buf = b""
+                while True:
+                    chunk = sk.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        try:
+                            d = json.loads(line)
+                        except ValueError:
+                            continue
+                        if d.get("class") == "TPV" and d.get("mode", 0) >= 2 \
+                                and "lat" in d and "lon" in d:
+                            GPS.update(lat=float(d["lat"]), lon=float(d["lon"]),
+                                       ts=time.time(), speed=d.get("speed"), err="")
+            GPS["err"] = "gpsd closed"
+        except Exception as exc:
+            GPS["err"] = f"{exc.__class__.__name__}: {exc}"
+        time.sleep(3)
+
+
+def start_gps(spec: str) -> None:
+    import threading
+    if spec.startswith("gpsd://"):
+        hp = spec[len("gpsd://"):] or "127.0.0.1:2947"
+        host, _, port = hp.partition(":")
+        t = threading.Thread(target=_gps_gpsd, args=(host or "127.0.0.1", int(port or 2947)),
+                             daemon=True)
+    else:
+        t = threading.Thread(target=_gps_nmea, args=(spec,), daemon=True)
+    t.start()
+
+
+def gps_fix() -> Optional[tuple]:
+    if GPS["lat"] is None or time.time() - GPS["ts"] > FIX_MAX_AGE_S:
+        return None
+    return GPS["lat"], GPS["lon"]
+
+
+# --------------------------------------------------------------------------
+# enrolment - so a Pi in a car is ONE command, not a form on another device
+# --------------------------------------------------------------------------
+NODE_FILE = Path.home() / ".sparrowmap" / "node.json"
+
+
+def enroll(hub: str, name: str, kind: str, lat: float, lon: float) -> dict:
+    """Register this camera with the hub once and remember the id + token."""
+    body = {"name": name[:80], "kind": kind, "lat": lat, "lon": lon}
+    req = urllib.request.Request(
+        hub.rstrip("/") + "/api/enroll", method="POST",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        d = json.loads(r.read() or b"{}")
+    if not d.get("id") or not d.get("token"):
+        raise RuntimeError(f"hub did not enrol the camera: {d.get('error') or d}")
+    NODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    NODE_FILE.write_text(json.dumps({"id": d["id"], "token": d["token"],
+                                     "name": name, "kind": kind, "hub": hub}))
+    try:
+        NODE_FILE.chmod(0o600)          # the token is the camera's identity
+    except OSError:
+        pass
+    return d
+
+
+# --------------------------------------------------------------------------
 # posting
 # --------------------------------------------------------------------------
 def post(hub: str, node: str, token: str, lat: float, lon: float,
@@ -283,17 +434,63 @@ def post(hub: str, node: str, token: str, lat: float, lon: float,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", required=True, help="rtsp:// or http:// stream")
-    ap.add_argument("--node", required=True, help="camera id from enrolment")
-    ap.add_argument("--token", required=True, help="that camera's token")
+    ap.add_argument("--source", required=True,
+                    help="rtsp:// or http:// stream, or a local camera: 0, /dev/video0")
+    ap.add_argument("--node", help="camera id from enrolment (or use --enroll once)")
+    ap.add_argument("--token", help="that camera's token")
     ap.add_argument("--hub", default="https://map.sparrowmap.com")
-    ap.add_argument("--lat", type=float, required=True)
-    ap.add_argument("--lon", type=float, required=True)
+    ap.add_argument("--lat", type=float, help="fixed camera: where it is")
+    ap.add_argument("--lon", type=float)
+    ap.add_argument("--gps", metavar="SRC",
+                    help="moving camera: gpsd://127.0.0.1:2947 or a serial device "
+                         "like /dev/ttyACM0. Each crop is posted at the current fix.")
+    ap.add_argument("--enroll", metavar="NAME",
+                    help="register this camera with the hub on first run and remember "
+                         "it in ~/.sparrowmap/node.json; later runs need no --node/--token")
+    ap.add_argument("--kind", default=None, choices=["fixed", "mobile"],
+                    help="with --enroll: 'mobile' for a dashcam (default when --gps is set)")
     ap.add_argument("--every", type=float, default=SEND_EVERY_S,
                     help="minimum seconds between uploads")
     ap.add_argument("--dry-run", action="store_true",
                     help="detect and report, but send nothing")
     a = ap.parse_args()
+
+    # Where am I? A fixed camera is told once; a dashcam asks the receiver.
+    if a.gps:
+        start_gps(a.gps)
+    elif a.lat is None or a.lon is None:
+        ap.error("give --lat and --lon for a fixed camera, or --gps for a moving one")
+
+    # Who am I? Remembered from a previous --enroll, given on the command line,
+    # or registered right now.
+    if not a.node and not a.enroll and NODE_FILE.exists():
+        try:
+            saved = json.loads(NODE_FILE.read_text())
+            if saved.get("hub", a.hub) == a.hub:
+                a.node, a.token = saved["id"], saved["token"]
+                print(f"  this camera is {a.node} ({saved.get('name')}, {saved.get('kind')})")
+        except (ValueError, KeyError):
+            pass
+    if a.enroll and not a.dry_run:
+        kind = a.kind or ("mobile" if a.gps else "fixed")
+        if a.gps:
+            print("  waiting for a GPS fix to enrol at...", flush=True)
+            deadline = time.time() + 180
+            while gps_fix() is None and time.time() < deadline:
+                time.sleep(1)
+            fix = gps_fix()
+            if fix is None:
+                print(f"  no GPS fix in 3 minutes ({GPS['err'] or 'receiver still searching'}). "
+                      "Put the antenna where it can see the sky and try again.")
+                return 1
+            lat0, lon0 = fix
+        else:
+            lat0, lon0 = a.lat, a.lon
+        d = enroll(a.hub, a.enroll, kind, lat0, lon0)
+        a.node, a.token = d["id"], d["token"]
+        print(f"  enrolled as {a.node} ({kind}); remembered in {NODE_FILE}")
+    if not a.dry_run and (not a.node or not a.token):
+        ap.error("no camera identity: pass --node and --token, or --enroll NAME once")
 
     mp = model_path(a.hub)
     import onnxruntime as ort
@@ -304,8 +501,8 @@ def main() -> int:
     if isinstance(shape[-1], int) and shape[-1] > 0:
         SIZE = int(shape[-1])
     print(f"  model input {SIZE}x{SIZE}")
-    print(f"relay: {redact(a.source)} -> {a.hub} as {a.node}"
-          f"{' (dry run)' if a.dry_run else ''}")
+    print(f"relay: {redact(a.source)} -> {a.hub} as {a.node or '(dry run)'}"
+          f"{' via ' + a.gps if a.gps else ''}{' (dry run)' if a.dry_run else ''}")
 
     cap = open_stream(a.source)
     if cap is None:
@@ -314,7 +511,7 @@ def main() -> int:
 
     tracks: list = []
     nid = 0
-    last_send = 0.0
+    last_send = last_nofix = 0.0
     sent = seen = 0
     try:
         while True:
@@ -370,12 +567,24 @@ def main() -> int:
                 if now - last_send < a.every:
                     continue
                 seen += 1
+                # A moving camera posts where it IS, or not at all.
+                if a.gps:
+                    fix = gps_fix()
+                    if fix is None:
+                        if now - last_nofix > 30:
+                            print(f"  no GPS fix ({GPS['err'] or 'searching'}); "
+                                  f"a {t['cls']} went unposted")
+                            last_nofix = now
+                        continue
+                    lat, lon = fix
+                else:
+                    lat, lon = a.lat, a.lon
                 if a.dry_run:
-                    print(f"  would send {t['cls']} (seen {t['seen']}x)")
+                    print(f"  would send {t['cls']} (seen {t['seen']}x) at {lat:.5f},{lon:.5f}")
                     last_send = now
                     continue
                 try:
-                    r = post(a.hub, a.node, a.token, a.lat, a.lon,
+                    r = post(a.hub, a.node, a.token, lat, lon,
                              t["crop"], t["cls"], 0.9)
                     last_send = now
                     t["sent"] = True
