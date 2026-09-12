@@ -824,6 +824,35 @@ def _download_url():
     return DOWNLOAD_URL if ok else None
 
 
+def _plate_from_node(b: dict, row: dict, sid: int) -> bool:
+    """Record a plate a camera read, for a row that is ALREADY public.
+
+    🚨 THE PLATE, READ AT THE CAMERA, HANDED OVER ONLY NOW. A plate-reading
+    node (relay.py --plates) reads every plate at capture and transmits none
+    of them; it holds the read beside the good picture and sends it with the
+    want_full answer, which /api/sighting/fullres only lets through for a row
+    that is already tier='public'. So the text can never be stored for a
+    private vehicle: the decision that it is government was taken before the
+    text existed here. Recorded with its hash so the plate-keyed trail
+    (track_for) works for a patrol car, which no published police row had.
+    """
+    if row.get("tier") != "public" or row.get("plate_text"):
+        return False
+    ptxt = "".join(ch for ch in str(b.get("plate_text") or "").upper() if ch.isalnum())
+    if not (3 <= len(ptxt) <= 9):
+        return False
+    try:
+        pconf = float(b.get("plate_conf") or 0)
+    except (TypeError, ValueError):
+        pconf = 0.0
+    conn = db.connect()
+    conn.execute("UPDATE sightings SET plate_text = ?, plate_conf = ?, "
+                 "plate_hash = COALESCE(plate_hash, ?) WHERE id = ? AND tier = 'public'",
+                 (ptxt, pconf, privacy.plate_hash(ptxt, ""), int(sid)))
+    conn.commit()
+    return True
+
+
 def _cam_display_name(nd: dict) -> str:
     """'Public traffic camera - 7200 BLK ELROY RD [atx:1452]' -> '7200 BLK ELROY RD'.
 
@@ -3790,7 +3819,8 @@ class Handler(BaseHTTPRequestHandler):
                 if row.get("tier") != "public":
                     return self._err(403, "not published; the small crop stands")
                 if row.get("snap_full"):
-                    return self._json({"ok": True, "already": True})
+                    return self._json({"ok": True, "already": True,
+                                       "plate": _plate_from_node(b, row, sid)})
                 if not b.get("snap_b64"):
                     return self._err(400, "no image")
                 try:
@@ -3802,7 +3832,8 @@ class Handler(BaseHTTPRequestHandler):
                                 else "gov"))
                     if name:
                         db.mark_fullres(sid, name)
-                    return self._json({"ok": bool(name), "snap": name})
+                    return self._json({"ok": bool(name), "snap": name,
+                                       "plate": _plate_from_node(b, row, sid)})
                 except Exception as exc:
                     # ⚠️ The vehicle is on the map either way. A rejected
                     # picture must never un-publish it.

@@ -280,15 +280,17 @@ def crop_of(frame, box):
 # --------------------------------------------------------------------------
 # reading the plate (optional: --plates)
 # --------------------------------------------------------------------------
-# 🚨 THIS CHANGES WHAT LEAVES THE MACHINE, AND THE GUIDE SAYS SO.
-# Without --plates the relay is a phone-style node: a 200 px crop with the
-# plate area painted out, and nothing else. With --plates it is a CAMERA node,
-# the same contract his own porch camera runs: it reads the plate here, and
-# posts the text, the plate box and a legible vehicle crop. The hub then keeps
-# the text ONLY for a vehicle it publishes as government; a private vehicle's
-# plate is hashed and the text discarded, and its crop is stored with the
-# plate blacked out (snapshot.store_submitted). That is the design: read every
-# plate, keep the government ones.
+# 🚨 READ EVERY PLATE HERE; SEND ONLY THE GOVERNMENT ONES, AND ONLY AFTERWARDS.
+# The plate is read at capture and HELD on this machine with the legible crop.
+# What goes to the hub at that moment is still the phone-style post: a 200 px
+# crop the plate cannot survive, and no text. The hub's classifier and a
+# reviewer decide whether the vehicle is a marked government one; when the hub
+# PUBLISHES it, its next heartbeat reply asks this camera for the good picture
+# (want_full), and only then does the text travel, riding on that upload to a
+# route that refuses anything not already public. A private vehicle's plate
+# never leaves the Pi at all - it ages out of the hold in an hour, unread by
+# anyone. That is the design, done the safe way round: read everything, keep
+# the government ones, and never transmit the rest.
 #
 # The two models are ONNX and run on a Pi 5 CPU (plate detector ~1 MB input
 # 608 px, OCR ~10 MB). Both packages are optional; without them --plates just
@@ -375,9 +377,8 @@ class Plates:
 
 
 def legible_crop(frame, box, pad: float = 0.15):
-    """The vehicle with a margin, at up to FULL_EDGE px, and the boxes re-based
-    to it. This is what a plate-reading node posts; the hub crops to the
-    vehicle box and blacks out the plate boxes unless the vehicle is published."""
+    """The vehicle with a margin, at up to FULL_EDGE px, and a function that
+    re-bases a frame box into it. Held here; handed over only on want_full."""
     fh, fw = frame.shape[:2]
     x0, y0, x1, y1 = box
     px, py = (x1 - x0) * pad, (y1 - y0) * pad
@@ -404,13 +405,13 @@ def legible_crop(frame, box, pad: float = 0.15):
 # for a legible copy, in the reply to the heartbeat. Held for an hour, like the
 # browser node, because a reviewer gets to it minutes or hours after the pass.
 FULL_KEEP, FULL_TTL_S = 48, 3600.0
-HELD: dict = {}                 # sighting id -> (data_url, ts)
+HELD: dict = {}                 # sighting id -> (data_url, ts, plate or None)
 
 
-def hold_full(sid: int, data_url: str) -> None:
+def hold_full(sid: int, data_url: str, plate: Optional[dict] = None) -> None:
     if not sid or not data_url:
         return
-    HELD[sid] = (data_url, time.time())
+    HELD[sid] = (data_url, time.time(), plate)
     while len(HELD) > FULL_KEEP:
         HELD.pop(next(iter(HELD)))
 
@@ -433,15 +434,23 @@ def beat_loop(hub: str, node: str, token: str) -> None:
                 held = HELD.pop(int(sid), None)
                 if not held:
                     continue
+                body = {"node_id": node, "id": int(sid), "snap_b64": held[0]}
+                if held[2]:
+                    # The hub only asks for a vehicle it has PUBLISHED, and the
+                    # route refuses any other; this is the one moment a plate
+                    # read leaves this machine.
+                    body.update({"plate_text": held[2]["text"],
+                                 "plate_conf": round(float(held[2]["conf"]), 3),
+                                 "plate_box": held[2]["box"]})
                 req = urllib.request.Request(
                     hub.rstrip("/") + "/api/sighting/fullres", method="POST",
-                    data=json.dumps({"node_id": node, "id": int(sid),
-                                     "snap_b64": held[0]}).encode(),
+                    data=json.dumps(body).encode(),
                     headers={"Content-Type": "application/json", "User-Agent": UA,
                              "Authorization": "Bearer " + token})
                 with urllib.request.urlopen(req, timeout=30) as r:
                     r.read()
-                print(f"  full-res sent for {sid}")
+                print(f"  full-res sent for {sid}"
+                      f"{' with plate ' + held[2]['text'] if held[2] else ''}")
         except Exception as exc:
             print(f"  heartbeat: {exc.__class__.__name__}")
         time.sleep(20)
@@ -584,18 +593,11 @@ def enroll(hub: str, name: str, kind: str, lat: float, lon: float) -> dict:
 # posting
 # --------------------------------------------------------------------------
 def post(hub: str, node: str, token: str, lat: float, lon: float,
-         crop: str, cls_name: str, score: float, plate: Optional[dict] = None) -> dict:
+         crop: str, cls_name: str, score: float) -> dict:
     body = {"node_id": node, "ts": time.time(), "source": "phone_node",
             "body": cls_name, "det_conf": round(float(score), 3),
             "plate_text": "", "plate_conf": 0, "evidence": {},
             "snap_b64": crop, "lat": lat, "lon": lon}
-    if plate:
-        # The camera contract: a legible crop, the vehicle box inside it, the
-        # plate box(es) to redact, and the read. The hub decides the tier.
-        body.update({"source": "camera", "snap_b64": plate["image"],
-                     "vehicle_box": plate["vehicle_box"],
-                     "plate_box": plate["box"], "plate_boxes": plate["boxes"],
-                     "plate_text": plate["text"], "plate_conf": round(float(plate["conf"]), 3)})
     req = urllib.request.Request(
         hub.rstrip("/") + "/api/sightings", method="POST",
         data=json.dumps(body).encode(),
@@ -790,25 +792,23 @@ def main() -> int:
                     if t.get("frame") is not None:
                         full_url, rebase = legible_crop(t["frame"], t["fbox"])
                         if plates is not None and full_url:
-                            text, conf, box, boxes = plates.read(t["frame"], t["fbox"])
+                            text, conf, box, _boxes = plates.read(t["frame"], t["fbox"])
                             if text and conf >= PLATE_MIN_CONF and box:
-                                pl = {"image": full_url, "vehicle_box": rebase(t["fbox"]),
-                                      "box": rebase(box), "boxes": [rebase(b) for b in boxes],
-                                      "text": text, "conf": conf}
+                                pl = {"text": text, "conf": conf, "box": rebase(box)}
                     r = post(a.hub, a.node, a.token, lat, lon,
-                             t["crop"], t["cls"], 0.9, plate=pl)
+                             t["crop"], t["cls"], 0.9)
                     last_send = now
                     t["sent"] = True
                     sent += 1
                     if r.get("error"):
                         print(f"  hub refused: {r['error']}")
                     else:
-                        # A 200 px post may be published later; keep the good
-                        # picture so the hub can ask for it.
-                        if pl is None and full_url and r.get("id"):
-                            hold_full(int(r["id"]), full_url)
-                        print(f"  sent {t['cls']}{' plate ' + pl['text'] if pl else ''}"
-                              f" -> sighting {r.get('id')}  (total {sent})")
+                        # Keep the good picture (and the read, if any) so the
+                        # hub can ask for it once it publishes the vehicle.
+                        if full_url and r.get("id"):
+                            hold_full(int(r["id"]), full_url, pl)
+                        print(f"  sent {t['cls']} -> sighting {r.get('id')}"
+                              f"{'  (plate read, held)' if pl else ''}  (total {sent})")
                 except urllib.error.HTTPError as e:
                     print(f"  HTTP {e.code}: {e.read()[:120]!r}")
                 except Exception as exc:
