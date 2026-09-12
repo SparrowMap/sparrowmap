@@ -31,6 +31,9 @@ DATA = REPO / "data" / "reid"
 BOX = os.environ.get("SPARROW_BOX", "")
 KEY = os.environ.get("SPARROW_KEY", "")
 REMOTE = "/opt/sparrowmap"
+# The box-side scratch dir: owned by the sparrow user, so a root-owned leftover
+# in /tmp can never block the export.
+ROUT = f"{REMOTE}/data/reid_out"
 OCR_PY = Path(os.environ.get("REID_OCR_PY", r"D:\LLM\reid_venv\Scripts\python.exe"))
 MAIN_PY = Path(os.environ.get("REID_MAIN_PY", r"D:\LLM\.venv\Scripts\python.exe"))
 
@@ -59,9 +62,9 @@ def main() -> None:
     if (DATA / "reid_rows.json").exists():
         have = json.load(open(DATA / "reid_rows.json"))
     since = max((r["ts"] for r in have), default=0.0)
-    ssh(f"cd {REMOTE} && sudo -u sparrow .venv/bin/python3 tools/reid/export.py --since {since}")
-    sh(["scp", "-q", "-i", KEY, f"{BOX}:/tmp/reid_rows.json", str(DATA / "reid_rows.new.json")])
-    sh(["scp", "-q", "-i", KEY, f"{BOX}:/tmp/reid_snaps.tar", str(DATA / "reid_snaps.tar")])
+    ssh(f"cd {REMOTE} && sudo -u sparrow mkdir -p {ROUT} && sudo -u sparrow .venv/bin/python3 tools/reid/export.py --since {since} --out {ROUT}")
+    sh(["scp", "-q", "-i", KEY, f"{BOX}:{ROUT}/reid_rows.json", str(DATA / "reid_rows.new.json")])
+    sh(["scp", "-q", "-i", KEY, f"{BOX}:{ROUT}/reid_snaps.tar", str(DATA / "reid_snaps.tar")])
     new = json.load(open(DATA / "reid_rows.new.json"))
     seen = {r["id"] for r in have}
     merged = have + [r for r in new if r["id"] not in seen]
@@ -79,8 +82,8 @@ def main() -> None:
     if args.dry_run:
         print("dry run: tags.json not applied")
     else:
-        sh(["scp", "-q", "-i", KEY, str(DATA / "tags.json"), f"{BOX}:/tmp/tags.json"])
-        ssh(f"cd {REMOTE} && sudo -u sparrow .venv/bin/python3 tools/reid/apply.py /tmp/tags.json")
+        sh(["scp", "-q", "-i", KEY, str(DATA / "tags.json"), f"{BOX}:{ROUT}/tags.json"])
+        ssh(f"cd {REMOTE} && sudo -u sparrow .venv/bin/python3 tools/reid/apply.py {ROUT}/tags.json")
     print(f"done in {time.time() - t0:.0f}s", flush=True)
 
 
