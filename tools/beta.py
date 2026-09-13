@@ -40,8 +40,13 @@ TOKEN_FILE = ROOT / "data" / "beta_token.txt"
 def ssh(cmd: str, stdin: str = "") -> subprocess.CompletedProcess:
     if not BOX or not KEY:
         sys.exit("set SPARROW_BOX and SPARROW_KEY (see the sparrow-deploy skill)")
-    return subprocess.run(["ssh", "-i", KEY, "-o", "BatchMode=yes", BOX, cmd],
-                          input=stdin, capture_output=True, text=True)
+    # Bytes, not text=True: on Windows a text-mode pipe rewrites every "\n" as
+    # "\r\n", and bash on the box then reads "pipefail\r" and stops on line 1.
+    r = subprocess.run(["ssh", "-i", KEY, "-o", "BatchMode=yes", BOX, cmd],
+                       input=stdin.encode(), capture_output=True)
+    r.stdout = r.stdout.decode(errors="replace")   # type: ignore[assignment]
+    r.stderr = r.stderr.decode(errors="replace")   # type: ignore[assignment]
+    return r
 
 
 def box_py(code: str) -> str:
@@ -54,7 +59,9 @@ def box_py(code: str) -> str:
 
 
 def cmd_setup() -> None:
-    script = (ROOT / "tools" / "beta_setup.sh").read_text()
+    # Git on Windows checks the script out with CRLF; bash on the box reads
+    # "pipefail\r" and stops on line 1. Send it as the box expects it.
+    script = (ROOT / "tools" / "beta_setup.sh").read_text().replace("\r\n", "\n")
     r = ssh("bash -s", stdin=script)
     print(r.stdout)
     if r.returncode:
