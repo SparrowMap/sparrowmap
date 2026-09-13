@@ -53,6 +53,7 @@ BOX = os.environ.get("SPARROW_BOX", "")
 KEY = os.environ.get("SPARROW_KEY", "")
 REMOTE = "/opt/sparrowmap"
 SERVICE = "sparrowmap.service"
+BETA_SERVICE = "sparrowmap-beta.service"   # optional; see tools/beta_setup.sh
 SITE = "https://map.sparrowmap.com"
 
 # Imported once at startup: changing these means the running process is stale.
@@ -509,6 +510,16 @@ def main() -> None:
         print("\n6. restart (python changed, so the running process is stale)")
         r = ssh(f"systemctl restart {SERVICE} && sleep 4 && systemctl is-active {SERVICE}")
         say(" ok " if "active" in r.stdout else "fail", r.stdout.strip() or "no reply")
+        # The contributor beta runs the SAME checkout on its own data dir
+        # (tools/beta_setup.sh). Same commit, same staleness: if it exists it
+        # restarts with the live hub, or it would be the stale process the
+        # never-run-stale-code rule is about.
+        r = ssh(f"if systemctl cat {BETA_SERVICE} >/dev/null 2>&1; then "
+                f"systemctl restart {BETA_SERVICE} && sleep 3 && "
+                f"systemctl is-active {BETA_SERVICE}; else echo absent; fi")
+        out = r.stdout.strip()
+        say("skip" if out == "absent" else (" ok " if "active" in out else "fail"),
+            "no beta on this box" if out == "absent" else f"beta {out or 'no reply'}")
     else:
         print("\n6. restart")
         say("skip", "not needed" if not needs_restart else "--no-restart given")

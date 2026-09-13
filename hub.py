@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+import board
 import bugs
 import classify
 import db
@@ -1371,7 +1372,22 @@ class Handler(BaseHTTPRequestHandler):
             # placeholder and let _send fill it. Only bare <script> tags are
             # touched; ones with a src attribute are already covered by 'self'.
             body = body.replace(b"<script>", b"<script nonce=\"@@NONCE@@\">")
+            if CONFIG.get("beta") and path.name != "beta-signin.html":
+                # Every page on a beta says so. Injected here rather than in
+                # each template so a page added next month cannot forget, and
+                # nobody can mistake a screenshot of synthetic data for the map.
+                i = body.lower().rfind(b"</body>")
+                if i > 0:
+                    body = body[:i] + self._BETA_RIBBON + body[i:]
         self._send(200, body, ctype)
+
+    _BETA_RIBBON = (
+        b'<div id="beta-ribbon" style="position:fixed;top:0;left:50%;transform:'
+        b'translateX(-50%);z-index:2147483000;font:11px ui-monospace,Menlo,Consolas,'
+        b'monospace;letter-spacing:.08em;padding:3px 12px;background:#7c3aed;color:#fff;'
+        b'border-radius:0 0 9px 9px;box-shadow:0 2px 8px rgba(0,0,0,.4);opacity:.92">'
+        b'BETA &middot; synthetic data &middot; <a href="/board" style="color:#fff">board</a>'
+        b'</div>')
 
     # A sighting carries a base64 vehicle crop, which is the only large body this
     # server has any reason to accept. 8 MB covers a generous JPEG with base64's
@@ -1699,6 +1715,8 @@ class Handler(BaseHTTPRequestHandler):
         return "/".join(out)[:48]
 
     def do_GET(self) -> None:
+        if self._beta_block():
+            return
         if self.path.startswith(Handler._UNGATED):
             return self._do_GET_inner()
 
@@ -2266,6 +2284,33 @@ class Handler(BaseHTTPRequestHandler):
                 # Served open; the token endpoints it drives are operator-gated,
                 # and the page shows an operator sign-in until you are.
                 return self._file(PUBLIC / "rv-admin.html")
+            # --- beta: sign-in page + contributor board --------------------------
+            if p == "/beta":
+                return self._file(PUBLIC / "beta-signin.html")
+            if CONFIG.get("beta") and (p == "/board" or p.startswith("/api/board/")):
+                if p == "/board":
+                    return self._file(PUBLIC / "board.html")
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                if p == "/api/board/me":
+                    return self._json({"ok": True, "label": r["label"],
+                                       "trusted": self._board_decides(r)})
+                if p == "/api/board/list":
+                    return self._json({"rows": board.listing(
+                        status=(q.get("status") or [None])[0] or None,
+                        kind=(q.get("kind") or [None])[0] or None),
+                        "counts": board.counts()})
+                if p == "/api/board/item":
+                    try:
+                        it = board.item(int((q.get("id") or ["0"])[0]))
+                    except ValueError:
+                        return self._err(400, "bad id")
+                    if not it:
+                        return self._err(404, "no such request")
+                    return self._json(it)
+                return self._err(404, "no such route")
+
             # --- officer accountability review surface (/ov) -----------------
             # Phase 2 of the oversight design. Gated on an OPERATOR-ISSUED pool
             # token (review_api.is_trusted): these rows are about named human
@@ -3131,11 +3176,15 @@ class Handler(BaseHTTPRequestHandler):
                        "/api/rv/retracted/delete", "/api/rv/held/fix",
                        "/api/node/span", "/api/node/key",
                        "/api/ov/mint", "/api/ov/link", "/api/ov/unlink",
-                       "/api/ov/status", "/api/ov/edit"}
+                       "/api/ov/status", "/api/ov/edit",
+                       "/api/board/add", "/api/board/note", "/api/board/status",
+                       "/api/board/retitle"}
 
     def _do_POST_inner(self) -> None:
         try:
             p = urlparse(self.path).path
+            if self._beta_block():
+                return
 
             # 🚨 CSRF: require a real application/json Content-Type on cookie-
             # authed routes. `_body` parses JSON regardless of type, so without
@@ -4540,6 +4589,39 @@ class Handler(BaseHTTPRequestHandler):
                     crop if isinstance(crop, dict) else None,
                     privacy.audit_ip(self.client_ip)))
 
+            if CONFIG.get("beta") and p.startswith("/api/board/"):
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                b = self._body()
+                who = r["label"]
+                if p == "/api/board/add":
+                    return self._json(board.add(who, str(b.get("title") or ""),
+                                                body=str(b.get("body") or ""),
+                                                kind=str(b.get("kind") or "request")))
+                if p == "/api/board/note":
+                    try:
+                        rid = int(b.get("id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad id")
+                    return self._json(board.note(who, rid, str(b.get("body") or "")))
+                if p in ("/api/board/status", "/api/board/retitle"):
+                    # The decision. Matthew's token, or the operator cookie.
+                    if not self._board_decides(r):
+                        return self._err(403, "only the operator decides")
+                    try:
+                        rid = int(b.get("id"))
+                    except (TypeError, ValueError):
+                        return self._err(400, "bad id")
+                    if p == "/api/board/status":
+                        return self._json(board.set_status(
+                            who, rid, str(b.get("status") or ""),
+                            why=str(b.get("why") or "")))
+                    return self._json(board.retitle(
+                        who, rid, str(b.get("title") or ""),
+                        body=b.get("body") if isinstance(b.get("body"), str) else None))
+                return self._err(404, "no such route")
+
             if p.startswith("/api/ov/"):
                 r = self._ov_reviewer()
                 if not r:
@@ -4780,6 +4862,43 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             traceback.print_exc()
             self._err(500, "internal error")
+
+    # -- beta gate ------------------------------------------------------
+    # Paths a signed-out visitor may reach on a beta: the sign-in page, the
+    # login/logout routes it drives, and the static bits that page needs.
+    _BETA_OPEN = ("/beta", "/api/rv/login", "/api/rv/logout", "/favicon.ico",
+                  "/style.css", "/shell.css", "/icon-", "/apple-touch-icon",
+                  "/manifest", "/static/", "/vendor/", "/api/tile/")
+
+    def _beta_block(self) -> bool:
+        """On a beta instance, refuse everything to anyone without a reviewer
+        token; True means the refusal has been sent.
+
+        The beta runs the least-vetted code in the project, on synthetic data,
+        for a handful of invited people. So the wall is at the door, not per
+        route: a browser without the cookie sees the sign-in page whatever URL
+        it asked for, and an API call without a token gets 401. Camera keys
+        count as tokens (review_auth.identify accepts them), so a contributor's
+        test node can still post.
+        """
+        if not CONFIG.get("beta"):
+            return False
+        p = urlparse(self.path).path
+        if p.startswith(self._BETA_OPEN):
+            return False
+        if review_auth.identify(self.headers):
+            return False
+        if self.command != "GET" or p.startswith("/api/"):
+            self._err(401, "beta: sign in at /beta")
+            return True
+        self._file(PUBLIC / "beta-signin.html")
+        return True
+
+    def _board_decides(self, r: dict) -> bool:
+        """May this reviewer change a request's status? Operator-issued pool
+        token (the same trust as /ov) or the operator cookie."""
+        return bool(review_api.is_trusted(r)
+                    or operator_auth.check(self.headers, self.client_ip))
 
     # -- auth -----------------------------------------------------------
     def _ov_reviewer(self):

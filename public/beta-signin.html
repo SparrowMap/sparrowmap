@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>SparrowMap · Beta</title>
+<style>
+  :root{--bg:#0d1219;--panel:#141b25;--panel2:#1b2432;--line:#25303f;--ink:#e8eef6;--dim:#8a97a8;--accent:#3b82f6;--accent2:#2563eb;--violet:#a78bfa;--not:#ef4444;
+        --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 26px 22px;max-width:440px;width:100%}
+  h1{margin:0 0 4px;font-size:20px;display:flex;align-items:center;gap:9px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--violet);box-shadow:0 0 12px var(--violet)}
+  .pill{font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--violet);border:1px solid #3b2a6b;border-radius:999px;padding:2px 8px}
+  p{color:var(--dim);font-size:13.5px;line-height:1.6;margin:10px 0}
+  p b{color:var(--ink)}
+  input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:10px 12px;font:inherit;font-size:14px;font-family:var(--mono);margin:8px 0}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{appearance:none;width:100%;border:0;background:var(--accent2);color:#fff;border-radius:9px;padding:11px;font:inherit;font-size:14px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.5}
+  .msg{font-size:13px;min-height:18px;margin-top:8px}
+  .msg.bad{color:#fca5a5} .msg.ok{color:#86efac}
+  .fine{font-size:11.5px;color:var(--dim);margin-top:14px;line-height:1.55}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1><span class="dot"></span> SparrowMap <span class="pill">beta</span></h1>
+  <p>This is the contributor build. <b>Everything on it is synthetic</b>: invented town, simulated cameras,
+     watermarked pictures. Nothing here is a real vehicle or a real place.</p>
+  <div id="in">
+    <input id="tok" placeholder="paste your beta token" autocomplete="off" spellcheck="false">
+    <button id="go">Enter the beta</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <div id="already" hidden>
+    <p class="msg ok">Signed in as <b id="who"></b>.</p>
+    <button id="enter">Open the map</button>
+    <p class="fine"><a href="/board">Request board</a> · <a href="#" id="out">sign out</a></p>
+  </div>
+  <p class="fine">The token was issued to you by name and every action on this build is logged under it.
+     Do not share it. Lost it? Ask on Sparrow Send and a new one is minted; the old one stops working.</p>
+</div>
+<script>
+(function(){
+  "use strict";
+  var $ = function(s){ return document.querySelector(s); };
+  var WKEY = "sparrow_rv_wallet";
+  // The hub serves this page IN PLACE of whatever a signed-out browser asked
+  // for, so the address bar already says where to go afterwards.
+  var next = (location.pathname && location.pathname !== "/beta") ? location.pathname + location.search : "/";
+  try { var u = new URL(location.href); if(u.searchParams.get("next") && u.searchParams.get("next").indexOf("/") === 0) next = u.searchParams.get("next"); } catch(e){}
+
+  function show(id){ $("#in").hidden = id !== "in"; $("#already").hidden = id !== "already"; }
+  function keep(tok){
+    // Same wallet the review pages read, so one paste signs in everything.
+    var w = []; try { w = JSON.parse(localStorage.getItem(WKEY) || "[]"); } catch(e){}
+    w = w.filter(function(e){ return e.token !== tok; });
+    w.unshift({token:tok, label:"beta", scope:"own", nodes:[]});
+    try { localStorage.setItem(WKEY, JSON.stringify(w)); } catch(e){}
+  }
+  fetch("/api/rv/me").then(function(r){ return r.ok ? r.json() : null; }).then(function(m){
+    if(m && m.ok){ $("#who").textContent = m.label || "?"; show("already"); }
+  }).catch(function(){});
+
+  $("#go").addEventListener("click", function(){
+    var tok = $("#tok").value.trim(); if(!tok) return;
+    $("#go").disabled = true; $("#msg").className = "msg"; $("#msg").textContent = "checking…";
+    fetch("/api/rv/login", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({token:tok})})
+      .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(x){
+        if(!x.ok){ throw new Error(x.j.error || "not accepted"); }
+        keep(tok); $("#msg").className = "msg ok"; $("#msg").textContent = "welcome";
+        location.replace(next);
+      }).catch(function(e){ $("#msg").className = "msg bad"; $("#msg").textContent = e.message; $("#go").disabled = false; });
+  });
+  $("#tok").addEventListener("keydown", function(ev){ if(ev.key === "Enter") $("#go").click(); });
+  $("#enter").addEventListener("click", function(){ location.href = next; });
+  $("#out").addEventListener("click", function(ev){ ev.preventDefault();
+    fetch("/api/rv/logout", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"}).then(function(){ try { localStorage.removeItem(WKEY); } catch(e){} location.reload(); }); });
+})();
+</script>
+</body>
+</html>

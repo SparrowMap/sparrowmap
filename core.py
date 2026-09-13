@@ -18,7 +18,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
+# SPARROW_DATA lets a second instance (the contributor beta) run from the SAME
+# checkout with its own data directory and its own config, so the beta is never
+# a fork that drifts. Unset = the classic layout, data/ beside the code.
+DATA = Path(os.environ.get("SPARROW_DATA") or (ROOT / "data")).resolve()
 SNAPS = DATA / "snaps"
 
 # Photographs pulled off the map but not yet destroyed.
@@ -110,7 +113,7 @@ EVIDENCE_TTL_S = 72 * 3600
 NODE_UA = "SparrowMap-Node/1.0 (+https://sparrowmap.com)"
 PUBLIC = ROOT / "public"
 DB_PATH = DATA / "sparrow.db"
-CONFIG_PATH = ROOT / "config.json"
+CONFIG_PATH = Path(os.environ.get("SPARROW_CONFIG") or (ROOT / "config.json"))
 
 for _d in (DATA, SNAPS):
     _d.mkdir(parents=True, exist_ok=True)
