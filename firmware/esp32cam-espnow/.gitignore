@@ -1,0 +1,4 @@
+# Per-link keys and MACs. Copy config.example.h -> config.h and fill in.
+config.h
+# What the Pi-side bridge writes.
+pi/camera/

@@ -54,6 +54,51 @@ import cv2
 import numpy as np
 
 
+class _StillFile:
+    """cv2.VideoCapture-shaped reader for ONE image file that is rewritten.
+
+    `read()` blocks until the file's mtime or size changes, then decodes it,
+    so the grabber thread sees exactly one frame per new picture. It gives
+    up (ok=False) after `stale_after` seconds without a change, which the
+    grabber treats like a dead stream and reopens - a bridge that has stopped
+    writing is a camera that has stopped, and must show up as one.
+    """
+
+    def __init__(self, path: str, stale_after: float = 90.0, poll: float = 0.05) -> None:
+        self.path = path
+        self.stale_after = stale_after
+        self.poll = poll
+        self._last: tuple[float, int] = (0.0, -1)
+        self._open = True
+
+    def _stat(self):
+        try:
+            st = __import__("os").stat(self.path)
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return None
+
+    def isOpened(self) -> bool:   # noqa: N802 - cv2's spelling
+        return self._open and self._stat() is not None
+
+    def read(self):
+        deadline = time.time() + self.stale_after
+        while time.time() < deadline:
+            st = self._stat()
+            if st is not None and st != self._last and st[1] > 0:
+                # The writer replaces the file atomically (os.replace), so a
+                # changed stat means a whole new picture, never a half one.
+                frame = cv2.imread(self.path, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self._last = st
+                    return True, frame
+            time.sleep(self.poll)
+        return False, None
+
+    def release(self) -> None:
+        self._open = False
+
+
 class FrameGrabber:
     """Latest-frame-wins reader for a live stream.
 
@@ -97,6 +142,13 @@ class FrameGrabber:
         """
         if isinstance(src, str) and src.strip().isdigit():
             return cv2.VideoCapture(int(src.strip()))
+        if isinstance(src, str) and src.lower().endswith((".jpg", ".jpeg", ".png")):
+            # A still that something else keeps fresh - the ESP-NOW camera
+            # bridge (firmware/esp32cam-espnow) writes camera/latest.jpg
+            # atomically every few seconds. cv2.VideoCapture would read it
+            # once and report end-of-stream; this reads it again each time
+            # the file changes and nothing in between.
+            return _StillFile(src)
         return cv2.VideoCapture(src)
 
     def start(self) -> "FrameGrabber":
