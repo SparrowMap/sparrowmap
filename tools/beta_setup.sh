@@ -67,7 +67,10 @@ Environment=SPARROW_BIND=127.0.0.1
 Environment=SPARROW_DATA=$BETA/data
 Environment=SPARROW_CONFIG=$BETA/config.json
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$PY $SRC/hub.py --port $PORT --https-port $((PORT+1))
+# --sim keeps the synthetic town LIVING: the map's live view is the last hour,
+# so a one-off fixture run leaves the beta looking empty by lunchtime. Every
+# row it writes is source='synthetic'.
+ExecStart=$PY $SRC/hub.py --port $PORT --https-port $((PORT+1)) --sim
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
