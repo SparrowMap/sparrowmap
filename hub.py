@@ -1903,6 +1903,10 @@ class Handler(BaseHTTPRequestHandler):
             # guide somebody can follow from a parts list to a systemd unit.
             if p in ("/carpi", "/CarPi", "/dashcam-pi"):
                 return self._file(PUBLIC / "carpi.html")
+            # Lucian's ESP32-CAM over ESP-NOW: the first contributed camera.
+            # Firmware + Pi bridge live in firmware/esp32cam-espnow.
+            if p in ("/espcam", "/esp32cam", "/espnow"):
+                return self._file(PUBLIC / "espcam.html")
             # 🚨 THE RELAY, AS ONE FILE. It imports nothing from this project
             # and fetches its own model, so a business needs this file and three
             # pip packages - not a git checkout. Telling somebody to clone a

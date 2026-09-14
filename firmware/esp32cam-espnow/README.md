@@ -2,6 +2,9 @@
 
 Designed and built by **Lucian H ([@lucianbuilds](https://github.com/lucianbuilds))**,
 September 2026. The first SparrowMap camera node not built by the project's author.
+His own repo, with the build photos and his tutorial, is
+[lucianbuilds/espnow-image-bridge](https://github.com/lucianbuilds/espnow-image-bridge).
+The website guide built from it is [map.sparrowmap.com/espcam](https://map.sparrowmap.com/espcam).
 
 An AI-Thinker ESP32-CAM takes a still every few seconds and sends it, in
 220-byte ESP-NOW packets with per-packet acknowledgement and retry, to a

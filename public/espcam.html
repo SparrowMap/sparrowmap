@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>An ESP32-CAM with no network — SparrowMap</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="stylesheet" href="/static/style.css?v=107">
+<style>
+  body{overflow:auto}
+  .doc{max-width:820px;margin:0 auto;padding:30px 20px 90px}
+  h1{font-size:28px;margin:0 0 6px}
+  .sub{color:var(--dim2);margin:0 0 24px;font-size:14.5px;line-height:1.6}
+  h2{font:600 11.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;
+     color:var(--dim2);margin:34px 0 12px}
+  p.body{font-size:14px;color:var(--dim);line-height:1.65}
+  .back{display:inline-block;margin-bottom:18px;font:11px var(--mono);
+        letter-spacing:.12em;text-transform:uppercase;color:var(--dim);text-decoration:none}
+  .deal{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:0 0 8px}
+  .deal div{background:#0d1219;border:1px solid var(--line2);border-radius:10px;padding:14px 16px}
+  .deal b{display:block;color:var(--ink);margin-bottom:5px;font-size:14px}
+  .deal span{font-size:12.5px;color:var(--dim2);line-height:1.55}
+  .step{border:1px solid var(--line2);border-radius:12px;padding:16px 18px;margin:0 0 14px;
+        background:#0b1017}
+  .step > h3{margin:0 0 10px;font-size:16px;color:var(--ink);display:flex;gap:9px;align-items:center}
+  .step .n{width:24px;height:24px;border-radius:50%;background:#1b2432;color:var(--dim);
+           font:600 12px/24px var(--mono);text-align:center;flex:none}
+  .step p{font-size:13.5px;color:var(--dim);line-height:1.6;margin:8px 0}
+  pre{margin:8px 0 0;padding:13px 14px;background:#080b10;border:1px solid var(--line2);
+      border-radius:9px;overflow-x:auto;font:12.5px/1.6 var(--mono);color:#b9c6d8;white-space:pre}
+  .note{font-size:12.5px;color:var(--dim);background:#0a1018;border-left:2px solid var(--line2);
+        padding:11px 14px;border-radius:0 7px 7px 0;margin:14px 0;line-height:1.6}
+  .warn{border-left-color:#c9832b}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+  td,th{padding:8px 10px;border-bottom:1px solid var(--line2);text-align:left;vertical-align:top}
+  th{font:600 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim2)}
+  td:last-child{color:var(--dim2)}
+  a{color:var(--cam)}
+  code{font:12.5px var(--mono);color:var(--ink)}
+  .credit{font-size:13px;color:var(--dim2);border:1px solid var(--line2);border-radius:10px;
+          padding:12px 16px;margin:0 0 22px;line-height:1.6}
+  .credit b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="doc">
+  <a class="back" href="/guides">&larr; all guides</a>
+  <h1>An ESP32-CAM with no network</h1>
+  <p class="sub">A camera the size of a postage stamp that never joins WiFi and
+     has no route to the internet. It sends stills over the air to a second
+     board plugged into a Raspberry Pi, and the Pi does the rest like any other
+     SparrowMap node. For the spot with no wire and no signal.</p>
+
+  <div class="credit">
+    <b>Designed and built by Lucian H.</b> This is the first SparrowMap camera
+    not built by the project's author. His own repo with the build photos is
+    <a href="https://github.com/lucianbuilds/espnow-image-bridge" rel="noopener">lucianbuilds/espnow-image-bridge</a>;
+    the SparrowMap copy with the encryption and Pi-side changes described below is
+    <a href="https://github.com/SparrowMap/sparrowmap/tree/main/firmware/esp32cam-espnow" rel="noopener">firmware/esp32cam-espnow</a>.
+  </div>
+
+  <!-- The deal first, and the honest limit. This is a snapshot camera. A
+       page that let someone believe it is a detector feed would be the wrong
+       kind of page. -->
+  <div class="deal">
+    <div><b>What it is good for</b><span>A gate, a checkpoint, a road end, a
+      place a patrol parks. Anywhere you cannot run a wire or reach WiFi. Range
+      is set by the receiver's antenna, not the camera.</span></div>
+    <div><b>What it is not</b><span>A detector feed. A VGA still is about 150
+      radio packets and takes one to two seconds to cross, plus the capture
+      interval, so expect <b>one frame every 6 to 7 seconds</b>. A car passes in
+      one or two. Think snapshot sentinel, not traffic camera.</span></div>
+    <div><b>Nothing leaves readable</b><span>The radio hop is encrypted with keys
+      you generate once. The Pi crops and blurs exactly as every other node
+      does, and no video exists anywhere in the chain.</span></div>
+  </div>
+
+  <h2>What to buy</h2>
+  <table>
+    <tr><th>Part</th><th>Which one</th><th>Why</th></tr>
+    <tr><td>Camera</td><td>AI-Thinker ESP32-CAM with the OV2640 lens. Lucian used the
+      <a href="https://www.amazon.com/dp/B09TB1GJ7P" rel="noopener">Hosyond kit</a>.</td>
+      <td>The board's PSRAM is what allows VGA stills.</td></tr>
+    <tr><td>USB-TTL dongle</td><td>A CP2102 adapter, e.g.
+      <a href="https://www.amazon.com/dp/B0BCYRFZJD" rel="noopener">this one</a>.
+      Some kits include one.</td><td>The camera board has no USB port of its own.</td></tr>
+    <tr><td>Receiver</td><td>Any ESP32. Lucian used an
+      <a href="https://www.amazon.com/dp/B0CKXJKQ1F" rel="noopener">ESP32-S3 DevKit</a>
+      with an external IPEX antenna.</td><td>That antenna is the range. Any board with a good link to the camera works.</td></tr>
+    <tr><td>Host</td><td>A Raspberry Pi, or any computer with a USB port.</td>
+      <td>Runs the bridge script and the SparrowMap node.</td></tr>
+  </table>
+
+  <h2>Set it up</h2>
+  <p class="body">Order matters: the receiver first, because the camera needs its
+     address; then the keys; then the camera; then the receiver once more with the
+     camera's address. Every board prints what the next step needs on its serial
+     console.</p>
+
+  <div class="step">
+    <h3><span class="n">1</span> Arduino IDE</h3>
+    <p>Install the <b>esp32 by Espressif</b> board package, version 3.x. No other
+       libraries are needed. Download the two sketch folders and the Pi script from
+       <a href="https://github.com/SparrowMap/sparrowmap/tree/main/firmware/esp32cam-espnow" rel="noopener">firmware/esp32cam-espnow</a>.</p>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">2</span> Flash the receiver, copy its address</h3>
+    <p>Copy <code>receiver/config.example.h</code> to <code>receiver/config.h</code>
+       next to it. Board: <b>ESP32S3 Dev Module</b> for an S3 (USB CDC On Boot:
+       Enabled), or <b>ESP32 Dev Module</b> for a plain ESP32. Upload. Open the
+       Serial Monitor at <b>921600</b>, Both NL &amp; CR. If you see garbage, unplug
+       and replug. It prints:</p>
+<pre>Receiver MAC: AC:27:6E:A4:D3:38
+WARNING: no transmitters in ALLOWED_TRANSMITTERS - nothing will be accepted</pre>
+    <p>Keep that address. The warning is expected until step 5.</p>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">3</span> Make the two keys</h3>
+    <p>The radio hop is encrypted with two 16-character keys, one shared by the
+       link and one per pair of boards. Generate two random ones and paste them
+       into <b>both</b> <code>config.h</code> files, identical:</p>
+<pre>python -c "import secrets; print(secrets.token_urlsafe(12)[:16])"
+python -c "import secrets; print(secrets.token_urlsafe(12)[:16])"</pre>
+    <p>Sixteen characters exactly; the sketch refuses to compile otherwise.</p>
+    <div class="note warn">Why this is not optional: the picture on the air is a
+      full still of a public road with every plate readable. Without the keys,
+      anyone in 2.4 GHz range could reassemble it, and the receiver would accept
+      pictures from any board that learned the packet format. With them, a board
+      without the keys decrypts to noise and is dropped, and a board not on the
+      receiver's list is dropped before it is even read.</div>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">4</span> Wire and flash the camera</h3>
+    <p>The dongle to the camera board:</p>
+    <table>
+      <tr><th>Dongle</th><th>ESP32-CAM</th></tr>
+      <tr><td>5V</td><td>5V</td></tr>
+      <tr><td>GND</td><td>GND</td></tr>
+      <tr><td>TXD</td><td>U0R</td></tr>
+      <tr><td>RXD</td><td>U0T</td></tr>
+    </table>
+    <p>Connect <b>IO0 to GND</b> to enter the bootloader. Only while programming.</p>
+    <p>Copy <code>transmitter/config.example.h</code> to <code>transmitter/config.h</code>.
+       Fill in the two keys and the receiver address from step 2 as
+       <code>{0xAC, 0x27, 0x6E, 0xA4, 0xD3, 0x38}</code>. Board: <b>AI Thinker
+       ESP32-CAM</b>, or <b>ESP32 Dev Module</b> with <b>PSRAM: Enabled</b> and
+       partition scheme <b>Huge APP</b>. Upload at 115200.</p>
+    <p>Remove the IO0 jumper, unplug and replug the dongle, open the Serial
+       Monitor at <b>115200</b>:</p>
+<pre>Transmitter MAC: 24:6F:28:AA:BB:CC
+Camera initialized
+Link: encrypted (PMK+LMK)
+Transmitter ready.</pre>
+    <p>Keep that address too.</p>
+    <div class="note">Channel 6 is the default on both boards. In the US, 1, 6 and
+      11 are the clean choices. Change it in both <code>config.h</code> files or
+      not at all.</div>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">5</span> Tell the receiver which cameras to trust</h3>
+    <p>Put the camera's address into <code>receiver/config.h</code>:</p>
+<pre>#define ALLOWED_TRANSMITTERS { \
+    {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC}, \
+}</pre>
+    <p>Up to six cameras per receiver. Upload the receiver again. Its console now
+       prints <code>Allowed transmitter: 24:6F:28:AA:BB:CC</code>, and once the
+       camera boots you will see <code>Image transmission successful.</code> on the
+       camera's console every few seconds.</p>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">6</span> The Pi rebuilds the pictures</h3>
+    <p>Plug the receiver into the Pi. Find its port with
+       <code>ls /dev/ttyUSB* /dev/ttyACM*</code>, unplug, list again; the one that
+       vanished is it. Then:</p>
+<pre>pip install pyserial
+python3 espnow_bridge.py --port /dev/ttyUSB0 --out camera</pre>
+    <p>It prints one line per saved frame and keeps <code>camera/latest.jpg</code>
+       fresh. A frame that fails its length or checksum check is rejected, and a
+       frame the camera gave up on is abandoned the moment the next one starts.</p>
+  </div>
+
+  <div class="step">
+    <h3><span class="n">7</span> Point SparrowMap at it</h3>
+    <p>The node reader accepts an image path and re-reads it every time the file
+       changes, so nothing else is special about this camera:</p>
+<pre>python3 detect/run_live.py --source camera/latest.jpg</pre>
+    <p>Enrol the node the same way as any other camera on the
+       <a href="/contribute">contribute</a> page. Aim it at a public road from
+       your own property, like every node on the map.</p>
+  </div>
+
+  <h2>If it does not work</h2>
+  <table>
+    <tr><th>You see</th><th>It means</th></tr>
+    <tr><td><code>Retry start (attempt 8)</code> then <code>FAILED at frame start</code></td>
+      <td>The receiver is not answering. Wrong receiver address in the camera's config, the camera is not in the receiver's list, the keys differ, or the channels differ.</td></tr>
+    <tr><td><code>Camera init failed</code></td><td>Ribbon cable not seated, or the wrong board selected. Reseat the lens ribbon and pick the AI Thinker board.</td></tr>
+    <tr><td><code>WARNING: PSRAM not found</code></td><td>PSRAM disabled in the board settings. It falls back to QVGA, which works but reads plates less far.</td></tr>
+    <tr><td>Garbage in the receiver's serial monitor</td><td>Wrong baud. It is 921600 on the receiver and 115200 on the camera.</td></tr>
+    <tr><td><code>rejected frame N: crc ...</code> on the Pi</td><td>A chunk arrived corrupted. Rare; the next frame will be fine. Constant rejections mean interference on the channel.</td></tr>
+    <tr><td>Frames arrive but nothing reaches the map</td><td>The node is not running or points at the wrong path. <code>latest.jpg</code> must be the file the bridge is writing.</td></tr>
+  </table>
+
+  <p class="body" style="margin-top:28px">If you build one, tell us on the
+     <a href="/contribute">contribute</a> page, and if you improve it, open a pull
+     request. Lucian's original three files are kept unchanged in the repo beside
+     the reviewed ones, so you can always see exactly what came from him.</p>
+</div>
+</body>
+</html>
