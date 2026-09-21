@@ -3549,14 +3549,21 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(400, out["error"])
                 # Tell the operator it exists. The alert carries an ID and
                 # NOTHING ELSE - the default alert repo is the public one.
+                # stdout/stderr are INHERITED (the journal), not swallowed:
+                # when the map moved boxes on 2026-08-18 the token file did
+                # not move with it, and every alert for a month died with
+                # stderr on DEVNULL. Twelve reports, including a journalist,
+                # sat unread. bug_alert.py prints "NOBODY WAS TOLD" for
+                # exactly this case; it has to land somewhere readable.
                 try:
                     import subprocess
                     subprocess.Popen(
                         [sys.executable, str(DATA.parent / "tools" / "bug_alert.py"),
-                         out["id"]],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass          # a failed alert must never lose the report
+                         out["id"]])
+                except Exception as e:
+                    print(f"[bug] report {out['id']} stored, alert did not "
+                          f"launch: {e}", file=sys.stderr, flush=True)
+                    # a failed alert must never lose the report
                 return self._json({"ok": True, "id": out["id"]})
 
             if p == "/api/bug/close":
