@@ -43,6 +43,26 @@ CASES = [
     ("Finnish livery",     [mid("522"), mid("POLIISI")],                True),
 ]
 
+#: The agency a livery is published as, and the town beside it. His catch
+#: 2026-09-23: a Seattle patrol car was published as STATE POLICE.
+#: (items, camera's place, expected agency, expected town)
+AGENCY_CASES = [
+    ([mid("SEATTLEPOLICE")], "Seattle, Washington",  "police",       "Seattle"),
+    ([mid("SEATILEPOLICE")], "Seattle, Washington",  "police",       "Seattle"),
+    # a mangled prefix must not invent the town of Ttle
+    ([mid("TTLEPOLICE")],    "Seattle, Washington",  "police",       None),
+    # the town is corroborated by the camera, never taken on the read alone
+    ([mid("SEATTLEPOLICE")], "Columbus, Ohio",       "police",       None),
+    ([mid("SEATTLEPOLICE")], None,                   "police",       None),
+    # a real state car still reads as one
+    ([mid("STATEPOLICE")],   "Lansing, Michigan",    "state police", None),
+    ([mid("HIGHWAYPATROL")], None,                   "highway patrol", None),
+    # damage the fuzz exists for
+    ([mid("POLCE")],         None,                   "police",       None),
+    ([mid("OSHERIFF")],      None,                   "sheriff",      None),
+    ([mid("CITY OF LINDEN")], "Linden, Michigan",    None,           "City Of Linden"),
+]
+
 
 def main() -> int:
     bad = 0
@@ -60,10 +80,20 @@ def main() -> int:
         bad += not ok
         print(f"{'ok  ' if ok else 'FAIL'} {name:22s} {' / '.join(parts) or '-':24s} "
               f"trail={'yes' if got else 'no':3s} want={'yes' if want else 'no'}")
+    for items, place, want_agency, want_town in AGENCY_CASES:
+        agency, _, _ = link.agency_of(items)
+        town = link.city_of(items, place)
+        ok = agency == want_agency and town == want_town
+        bad += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {items[0][0]:16s} @ {str(place):20s} "
+              f"agency={str(agency):14s} town={str(town):15s} "
+              f"want {want_agency} / {want_town}")
+
     # 911 in the markings must never read as a unit number
     assert "911" not in [u[0] for u in link.units_of([mid("911")], (H, H))], \
         "911 must never be a unit number"
-    print(f"\n{len(CASES) - bad}/{len(CASES)} pass")
+    total = len(CASES) + len(AGENCY_CASES)
+    print(f"\n{total - bad}/{total} pass")
     return 1 if bad else 0
 
 

@@ -58,7 +58,13 @@ DATA = REPO / "data" / "reid"
 #   r5-911       a read of "911" on the car counts as an agency signal, so a
 #                number beside it forms a trail; markings print the word that
 #                was read, not the fleet it implies.
-REV = "r5-911"
+#   r6-seattle   agency matching is CONTAINMENT-first: difflib's whole-string
+#                ratio scored "SEATTLEPOLICE" 0.632 against POLICE but 0.800
+#                against STATE POLICE, publishing Seattle cars as STATE POLICE.
+#                A multi-word agency now needs every one of its words. The town
+#                painted beside the agency word is published when the camera's
+#                own town corroborates it.
+REV = "r6-seattle"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -95,6 +101,47 @@ def clean(t: str) -> str:
     return re.sub(r"[^A-Z ]", "", t.upper()).strip()
 
 
+def _word_match(tok: str, word: str) -> bool:
+    """Is `word` on the car, allowing for a mangled read but not for a longer
+    name that merely resembles it?
+
+    🚨 CONTAINMENT FIRST, FUZZ ONLY FOR DAMAGE, AND ONLY AT COMPARABLE LENGTH.
+    This is the whole of the SEATTLE POLICE bug (his catch, 2026-09-23): OCR
+    read "SEATTLEPOLICE" at 0.96 and difflib scored it 0.632 against POLICE but
+    0.800 against STATE POLICE, so a Seattle patrol car was published as STATE
+    POLICE. difflib's whole-string ratio rewards similar LENGTH, so a
+    city-plus-POLICE livery always resembles a longer agency name more than the
+    short word it literally contains - the matcher was structurally biased
+    towards the wrong answer, and the more crops it read the more often it
+    would be wrong.
+
+    So an exact containment is the evidence, and difflib is kept only for the
+    case it was actually wanted for - a dropped or hallucinated letter
+    ("POLCE", "OSHERIFF") - where the two strings are within two characters of
+    each other and the comparison is meaningful.
+    """
+    if word in tok:
+        return True
+    return (abs(len(tok) - len(word)) <= 2
+            and difflib.SequenceMatcher(None, tok, word).ratio() >= 0.8)
+
+
+def _phrase_match(text: str, phrase: str) -> int:
+    """How many words of an agency phrase are on the car (0 = not this agency).
+
+    A multi-word agency is only matched when EVERY word of it is there, so
+    "STATE POLICE" needs STATE, and "SEATTLE POLICE" can never satisfy it.
+    """
+    parts = phrase.split()
+    toks = [t for t in [text] + text.split() if len(t) >= 4]
+    if not toks:
+        return 0
+    for p in parts:
+        if not any(_word_match(t, p) for t in toks):
+            return 0
+    return len(parts)
+
+
 def agency_of(items: list) -> tuple[str | None, float, str | None]:
     """What the livery says this vehicle IS. 911 counts (his call, 2026-09-23).
 
@@ -112,18 +159,21 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
     is the word actually READ ("POLICE", "POLIISI", "911"), so the markings row
     can say 911 rather than claim POLICE was on the car.
     """
-    best, score, seen = None, 0.0, None
+    best, score, seen, words = None, 0.0, None, 0
     for txt, sc, _ in items:
         if sc < MIN_TEXT:
             continue
         c = clean(txt)
-        for word, kind in AGENCY.items():
-            # A leading logo letter ("OSHERIFF") or a dropped one ("POLCE")
-            # is still the word; ask for 80% agreement, not equality.
-            for tok in [c] + c.split():
-                if len(tok) >= 4 and difflib.SequenceMatcher(None, tok, word).ratio() >= 0.8:
-                    if sc > score:
-                        best, score, seen = kind, sc, word
+        for phrase, kind in AGENCY.items():
+            n = _phrase_match(c, phrase)
+            if not n:
+                continue
+            # 🚨 THE MORE SPECIFIC PHRASE WINS, THEN THE BETTER READ - NOT
+            # WHICHEVER CAME FIRST. "STATE POLICE" only matches text that
+            # actually contains STATE, so preferring it over plain POLICE is
+            # safe, and it is what a reader of the photo would say.
+            if (n, sc) > (words, score):
+                best, score, seen, words = kind, sc, phrase, n
     if best:
         return best, score, seen
     for txt, sc, box in items:
@@ -135,12 +185,36 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
     return ("police" if seen else None), score, seen
 
 
-def city_of(items: list) -> str | None:
+def city_of(items: list, place: str | None = None) -> str | None:
+    """Whose fleet it is: "City Of Linden", or the town painted beside the
+    agency word when the camera's own town CONFIRMS it.
+
+    The second rule is what the SEATTLE POLICE bug exposed: the livery said
+    SEATTLE POLICE and the only thing published was the agency, so the most
+    identifying words on the car were thrown away. The town is not taken on the
+    recogniser's word - "TTLEPOLICE" would otherwise publish a car belonging to
+    the town of Ttle. It is only used when it matches the town the camera is
+    already known to be in, which makes it corroborated rather than read.
+    """
     for txt, sc, _ in items:
         c = clean(txt)
         m = re.search(r"(?:CITY|TOWN|VILLAGE|COUNTY) OF ([A-Z ]{3,})", c)
         if m and sc >= 0.5:
             return m.group(0).title()
+    town = (place or "").split(",")[0].strip()
+    if len(town) < 4:
+        return None
+    up = clean(town)
+    for txt, sc, _ in items:
+        if sc < MIN_TEXT:
+            continue
+        c = clean(txt)
+        for word in AGENCY:
+            if not c.endswith(word) or len(c) <= len(word):
+                continue
+            prefix = c[:-len(word)].strip()
+            if len(prefix) >= 4 and _word_match(prefix, up):
+                return town
     return None
 
 
@@ -206,7 +280,7 @@ def main() -> None:
     for f in feats:
         items = ocr.get(str(f["id"]), [])
         agency, asc, agency_word = agency_of(items)
-        city = city_of(items)
+        city = city_of(items, f.get("place"))
         units = units_of(items, f.get("size"))
         unit = max(units, key=lambda u: u[1]) if units else None
         parts = []
