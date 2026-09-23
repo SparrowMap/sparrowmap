@@ -391,7 +391,15 @@ def main() -> None:
                          "why": "; ".join(why[f["id"]]) or "part of a run of matching sightings"})
 
     markings = [{"id": i, "text": m["text"]} for i, m in marks.items() if m["text"]]
-    json.dump({"rev": REV, "markings": markings, "tags": tags},
+    # 🚨 SAY WHICH ROWS WERE JUDGED, NOT ONLY WHICH ONES GOT A MARKING.
+    # A row that HAD a marking under the old rules and gets none under the new
+    # ones is never named in this file, so apply.py used to leave the old value
+    # in place for ever and the column quietly held two generations of guess.
+    # That is how a Seattle car stayed labelled STATE POLICE after the rules
+    # that produced the label were replaced. "considered" lets apply.py clear
+    # exactly the rows this run looked at and decided had nothing to say.
+    json.dump({"rev": REV, "markings": markings, "tags": tags,
+               "considered": [f["id"] for f in feats]},
               open(DATA / "tags.json", "w"), indent=0)
 
     n_ag = sum(1 for m in marks.values() if m["agency"])

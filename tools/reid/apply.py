@@ -40,7 +40,27 @@ def main() -> None:
 
     d = json.load(open(args.file))
     rev = d["rev"]
-    tagged = marked = refused = 0
+    tagged = marked = refused = stale = 0
+
+    # Rows this run LOOKED AT and decided have no marking must lose whatever an
+    # earlier revision believed. Without it, retiring a revision depends on
+    # remembering to run --clear-rev for every superseded one, and forgetting
+    # leaves a row asserting something the current rules would not assert.
+    # Measured 2026-09-23: 28 rows still read STATE POLICE at rev r4 after r6
+    # had already corrected them, because r6 gives those crops no marking at
+    # all and so never names them.
+    considered = d.get("considered")
+    if considered:
+        keep = {int(m["id"]) for m in d.get("markings", [])}
+        drop = [i for i in (int(x) for x in considered) if i not in keep]
+        conn = db.connect()
+        for chunk in (drop[k:k + 400] for k in range(0, len(drop), 400)):
+            stale += conn.execute(
+                "UPDATE sightings SET markings=NULL, markings_rev=NULL "
+                f"WHERE markings IS NOT NULL AND markings_rev IS NOT ? "
+                f"AND id IN ({','.join('?' * len(chunk))})",
+                (rev, *chunk)).rowcount
+        conn.commit()
     for m in d.get("markings", []):
         try:
             db.set_markings(int(m["id"]), m["text"], rev)
@@ -55,7 +75,7 @@ def main() -> None:
         except (db.NotTaggable, ValueError) as e:
             refused += 1
             print("  refused:", e)
-    print(f"rev {rev}: {marked} markings, {tagged} tags written, {refused} refused")
+    print(f"rev {rev}: {marked} markings, {stale} stale cleared, {tagged} tags written, {refused} refused")
 
 
 if __name__ == "__main__":
