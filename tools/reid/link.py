@@ -13,7 +13,9 @@ THE RULES, in the order a reader could check them against the photo:
      both carry an agency word (POLICE / SHERIFF / ...) that agrees, and they
      are in the same region (same state, or the same 1-degree cell when the
      town is unknown). "312" in Austin and "312" in Columbus are two cars.
-     911 is never a unit number: it is painted on half the fleet.
+     911 is never a unit NUMBER - it is painted on half the fleet - but a
+     read of 911 on the car IS an agency signal, so "4715 + 911" trails
+     exactly as "4715 + POLICE" does (his call, 2026-09-23).
 
   S  SAME CAMERA, SAME CAR, STILL THERE. Consecutive sightings from ONE
      camera under STAY_GAP apart whose CLIP embeddings agree at >= SIM_STAY.
@@ -53,7 +55,10 @@ DATA = REPO / "data" / "reid"
 #                rather than "unit N"); POLIISI/POLIS are agency words.
 #   r4-serverocr the OCR underneath is the PaddleOCR SERVER model, which reads
 #                a roof number the mobile model returns as noise (see ocr.py).
-REV = "r4-serverocr"
+#   r5-911       a read of "911" on the car counts as an agency signal, so a
+#                number beside it forms a trail; markings print the word that
+#                was read, not the fleet it implies.
+REV = "r5-911"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -77,15 +82,37 @@ NOT_UNITS = {"911", "011", "11", "311", "411", "2024", "2025", "2026"}
 # "127/Hamilton Ave". Measured 2026-09-12: 5 of the first 24 "unit numbers" were
 # captions. A unit number on a car is a bare number, so anything that looks
 # like a caption or a sign is refused before the digits are even looked at.
-CAPTION = re.compile(r"[@/:]|(AT|SR|SH|US|HWY|EXIT|BLVD|AVE|ST|RD|MILE|MI|PKWY|DR|LN)", re.I)
+# 🚨 THE WORD-BOUNDARY ESCAPES HERE WERE LITERAL BACKSPACE BYTES UNTIL 2026-09-23, so the whole
+# word list never matched anything and only [@/:] was doing any work. It went
+# unnoticed because units_of has a second guard - text longer than 6 characters
+# is refused - and every caption this was written for ("911 at SR-665",
+# "EXIT 422B") is longer than 6. The rule only became load-bearing when
+# agency_of started reading 911 off the car, which has no length guard.
+CAPTION = re.compile(r"[@/:]|\b(AT|SR|SH|US|HWY|EXIT|BLVD|AVE|ST|RD|MILE|MI|PKWY|DR|LN)\b", re.I)
 
 
 def clean(t: str) -> str:
     return re.sub(r"[^A-Z ]", "", t.upper()).strip()
 
 
-def agency_of(items: list) -> tuple[str | None, float]:
-    best, score = None, 0.0
+def agency_of(items: list) -> tuple[str | None, float, str | None]:
+    """What the livery says this vehicle IS. 911 counts (his call, 2026-09-23).
+
+    🚨 "911" IS AN AGENCY SIGNAL, NEVER A UNIT NUMBER. NOT_UNITS already refuses
+    it as a unit because it is painted on half the fleet - but that same
+    ubiquity is exactly what makes it evidence of WHAT the car is. A crop that
+    reads "4715" and "911" is a numbered emergency vehicle just as plainly as
+    one that reads "4715" and "POLICE", and before this it produced no trail at
+    all, because rule U needs an agency and 911 gave it none.
+
+    It maps to "police" rather than to a kind of its own so that a car read as
+    911 at one camera and POLICE at the next lands in the SAME rule-U key -
+    two names for one fleet would silently prevent the very link this is for.
+    Lowest precedence: a real agency word always wins. The third return value
+    is the word actually READ ("POLICE", "POLIISI", "911"), so the markings row
+    can say 911 rather than claim POLICE was on the car.
+    """
+    best, score, seen = None, 0.0, None
     for txt, sc, _ in items:
         if sc < MIN_TEXT:
             continue
@@ -96,8 +123,16 @@ def agency_of(items: list) -> tuple[str | None, float]:
             for tok in [c] + c.split():
                 if len(tok) >= 4 and difflib.SequenceMatcher(None, tok, word).ratio() >= 0.8:
                     if sc > score:
-                        best, score = kind, sc
-    return best, score
+                        best, score, seen = kind, sc, word
+    if best:
+        return best, score, seen
+    for txt, sc, box in items:
+        # Same placement test a unit number gets: a caption burned along the
+        # frame edge saying 911 is the camera talking, not the car.
+        if sc >= MIN_TEXT and re.search(r"(?<!\d)911(?!\d)", txt) and not CAPTION.search(txt):
+            seen = "911"
+            score = max(score, sc)
+    return ("police" if seen else None), score, seen
 
 
 def city_of(items: list) -> str | None:
@@ -170,12 +205,15 @@ def main() -> None:
     marks = {}
     for f in feats:
         items = ocr.get(str(f["id"]), [])
-        agency, asc = agency_of(items)
+        agency, asc, agency_word = agency_of(items)
         city = city_of(items)
         units = units_of(items, f.get("size"))
         unit = max(units, key=lambda u: u[1]) if units else None
         parts = []
-        if agency: parts.append(agency.upper())
+        # The WORD that was read, not the fleet it implies: a crop whose only
+        # evidence is "911" must not print "POLICE" as though the word were on
+        # the car. The markings row exists to be checked against the photo.
+        if agency: parts.append((agency_word or agency).upper())
         if city: parts.append(city)
         # 🚨 A NUMBER READ OFF A CAR IS KEPT WHETHER OR NOT THE AGENCY WORD WAS
         # READ TOO (his call, 2026-09-23: "numbers on cars even not plates
@@ -202,6 +240,7 @@ def main() -> None:
         # Austin unit "green/silver" (windshield sunshade) - a wrong colour in
         # the panel teaches readers to ignore the row that carries the number.
         marks[f["id"]] = {"agency": agency, "agency_sc": asc, "city": city,
+                          "agency_word": agency_word,
                           "unit": unit, "text": " · ".join(parts) if parts else None}
 
     dsu = DSU()
@@ -225,8 +264,9 @@ def main() -> None:
                 continue
             dsu.union(anchor["id"], f["id"])
             m = marks[f["id"]]
+            _ev = (m.get("agency_word") or agency).upper()
             why[f["id"]].append(f"unit number {n} read on the photo ({m['unit'][1]:.2f}), "
-                                f"{agency.upper()} livery, {region.replace('-', ' ').title()}")
+                                f"{_ev} livery, {region.replace('-', ' ').title()}")
             conf[f["id"]] = max(conf[f["id"]], min(0.9, 0.5 + 0.4 * m["unit"][1]))
             u_links += 1
 
