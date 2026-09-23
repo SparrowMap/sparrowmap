@@ -80,7 +80,14 @@ def main() -> None:
     if done.pop("_model", "unmarked") != model:
         print(f"model changed -> {model}: re-reading every crop", flush=True)
         done = {}
+    # 🚨 NEWEST CROP FIRST. reid_rows.json is oldest-first, and a full re-read
+    # is hours on a busy machine (measured 2026-09-23: 6.6 s a crop with the
+    # detector holding the CPU at 88%, so ~7 h for 3,963). Oldest-first spends
+    # those hours on sightings from five weeks ago before it reaches the car
+    # somebody is looking at today. Resumable either way; this only chooses
+    # which end of the queue pays off first.
     todo = [r for r in rows if str(r["id"]) not in done]
+    todo.sort(key=lambda r: r.get("ts") or 0, reverse=True)
     if args.limit:
         todo = todo[:args.limit]
     print(f"{len(rows)} rows, {len(done)} already read, {len(todo)} to do", flush=True)
