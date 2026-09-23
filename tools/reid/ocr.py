@@ -72,7 +72,12 @@ def main() -> None:
     # invalidates the lot rather than mixing. Measured 2026-09-23: mobile read
     # "25" and "aonod" off the crop where server reads "4715" at 1.00.
     model = "mobile" if args.mobile else "server"
-    if done.pop("_model", model) != model:
+    # An UNMARKED file is not a matching file. Defaulting the missing marker to
+    # the current model made the guard a no-op on exactly the file it exists
+    # for - the legacy one, written before any marker was recorded, by the
+    # mobile models. If we cannot say which model made a read, we cannot trust
+    # it, so it is re-read.
+    if done.pop("_model", "unmarked") != model:
         print(f"model changed -> {model}: re-reading every crop", flush=True)
         done = {}
     todo = [r for r in rows if str(r["id"]) not in done]
