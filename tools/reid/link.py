@@ -46,11 +46,13 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent.parent
 DATA = REPO / "data" / "reid"
-# r3: a number read off a car is kept without the agency word (and written
-# "number N" rather than "unit N"), POLIISI/POLIS are agency words. A new rev
-# because the rules changed, so `apply.py --clear-rev r2-markings` retires
-# everything the old rules believed instead of leaving two vocabularies mixed
-# in one column.
+# A new rev whenever the rules or the recogniser change, so apply.py
+# --clear-rev retires what the old ones believed instead of leaving two
+# vocabularies mixed in one column.
+#   r3-numbers   a number is kept without the agency word (written "number N"
+#                rather than "unit N"); POLIISI/POLIS are agency words.
+#   r4-serverocr the OCR underneath is the PaddleOCR SERVER model, which reads
+#                a roof number the mobile model returns as noise (see ocr.py).
 REV = "r4-serverocr"
 
 STAY_GAP_S = 20 * 60
