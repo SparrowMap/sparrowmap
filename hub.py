@@ -2681,6 +2681,26 @@ class Handler(BaseHTTPRequestHandler):
                 rows = db.search_plate(query)
                 return self._json({"query": query,
                                    "results": _public_rows(rows)})
+
+            if p == "/api/markings":
+                # Search what was READ OFF the photograph - the unit number on
+                # the roof or door, and the agency word beside it.
+                #
+                # 🚨 THIS IS THE SEARCH THAT ACTUALLY FINDS THINGS. Measured on
+                # the live database 2026-09-23: 3,992 published police rows,
+                # ZERO with any plate text, 539 with markings. The plate box has
+                # never been able to answer anything, because the cameras read
+                # liveries, not plates. A roof number is the identifier these
+                # photographs actually carry, so it is searchable on the same
+                # terms - public tier, operator-confirmed, photo attached.
+                #
+                # Not logged, exactly as /api/plate is not logged, and for the
+                # same reason: who asked a question about a public record is
+                # nobody's business but theirs.
+                query = (q.get("q") or [""])[0]
+                rows = db.search_markings(query)
+                return self._json({"query": query,
+                                   "results": _public_rows(rows)})
             if p == "/api/stats":
                 return self._json(db.stats())
 

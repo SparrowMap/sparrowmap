@@ -107,7 +107,7 @@
   <div class="pmodal" id="platemodal" hidden>
     <div class="pmodal-bg" id="plateclose"></div>
     <div class="pmodal-card" role="dialog" aria-modal="true"
-         aria-label="Search plates">
+         aria-label="Search vehicles">
       <form class="plateform" id="plateform" autocomplete="off">
         <!-- 🚨 PLATES ONLY, AND THE LABEL NOW SAYS SO. HIS CALL.
              This read "search a plate, town or road" and the place lookup
@@ -118,9 +118,9 @@
              vehicles", which reads as a refusal. A box that asks for three
              things, accepts one, and scolds you for the other two is worse
              than a box that asks for one. -->
-        <input id="plateq" type="search" placeholder="search a plate"
+        <input id="plateq" type="search" placeholder="plate or unit number"
                maxlength="12" autocapitalize="characters" spellcheck="false"
-               aria-label="Search a plate">
+               aria-label="Search a plate or unit number">
         <button type="submit" aria-label="Search">Search</button>
       </form>
       <p class="pmodal-hint">Government plates only.</p>
@@ -290,7 +290,7 @@
 </div>
 
     <div class="trafficbar">
-      <button type="button" class="platebtn" id="plateopen">🔍 Search plates</button>
+      <button type="button" class="platebtn" id="plateopen">🔍 Search vehicles</button>
       <span id="traffic">road quiet</span>
     </div>
 
@@ -334,7 +334,7 @@
 <script>window.SPARROW_NAV_PANES = true;</script>
 <script src="/static/sitenav.js?v=39"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/app.js?v=148"></script>
+<script src="/static/app.js?v=149"></script>
 <!-- What changed, once, only to the people it applies to. Most entries are
      audience:'owner', so a visitor reading the map is never interrupted. -->
 <script src="/static/updates.js?v=2"></script>

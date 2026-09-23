@@ -2924,10 +2924,11 @@ setInterval(ageTraffic, 1000);    // the live traffic view
    */
   function render(q, rows) {
     if (!rows.length) {
-      box.innerHTML = `<h4>No plate matches ${esc(q)}</h4>
-        <div class="none"><b>Only government plates are searchable.</b><br>
-        A plate appears here only when a camera published the vehicle as
-        a government vehicle <i>and</i> an operator confirmed it.
+      box.innerHTML = `<h4>Nothing matches ${esc(q)}</h4>
+        <div class="none"><b>Only government vehicles are searchable.</b><br>
+        A vehicle appears here only when a camera published it as a government
+        vehicle <i>and</i> an operator confirmed it &mdash; by its plate, or by
+        the unit number and agency read off the photograph.
         Private vehicles are never searched &mdash; their plates are destroyed
         in the image at the camera and never reach this server, so there is
         nothing here to find.</div>`;
@@ -2939,7 +2940,7 @@ setInterval(ageTraffic, 1000);    // the live traffic view
         <div class="hit" data-id="${r.id}" data-lat="${r.lat}" data-lon="${r.lon}">
           ${r.snap ? `<img src="/snap/${encodeURIComponent(r.snap)}" alt="" loading="lazy">` : ''}
           <div>
-            <b>${esc(r.plate_text || '')}</b>
+            <b>${esc(r.plate_text || r.markings || '')}</b>
             <div class="sub">${esc(r.vclass || '')} &middot; ${ago(r.ts)}</div>
             <div class="sub">${esc(r.node_id || '')}</div>
           </div>
@@ -2955,12 +2956,27 @@ setInterval(ageTraffic, 1000);    // the live traffic view
       box.style.display = '';
       return;
     }
-    /* One box, ONE question - see the note on render(). The place lookup that
-     * used to run alongside this was removed at his request; the box asks for
-     * a plate and answers about plates. */
+    /* One box, ONE question: WHICH GOVERNMENT VEHICLE IS THIS. The place
+     * lookup that used to run alongside this was removed at his request
+     * because a town is a different question. A unit number is not - it is
+     * the same question, asked of the identifier these photographs actually
+     * carry. Measured 2026-09-23: 0 of 3,992 published police rows have a
+     * plate, 539 have markings, so plates alone made this box unanswerable.
+     *
+     * Both lookups run together and the hits merge into one list, newest
+     * first. Neither failing takes the other down - a dead plate search must
+     * not hide a unit-number hit, which is the "an error is not an empty
+     * result set" rule below, applied across two endpoints. */
     try {
-      const plates = await fetch('/api/plate?q=' + encodeURIComponent(q))
-        .then((x) => x.json()).catch(() => ({ results: [] }));
+      const [plates, marks] = await Promise.all([
+        fetch('/api/plate?q=' + encodeURIComponent(q))
+          .then((x) => x.json()).catch(() => ({ results: [] })),
+        fetch('/api/markings?q=' + encodeURIComponent(q))
+          .then((x) => x.json()).catch(() => ({ results: [] })),
+      ]);
+      const hits = [...(plates.results || []), ...(marks.results || [])]
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      if (hits.length) { render(q, hits); return; }
       // 🚨 AN ERROR IS NOT AN EMPTY RESULT SET.
       // The server answers a failed lookup with {"error": ...} and no
       // `results`, and this rendered that as "no matches" - so a rate-limit or
@@ -2968,13 +2984,19 @@ setInterval(ageTraffic, 1000);    // the live traffic view
       // searching a plate would conclude it had never been seen, and nothing
       // anywhere would record a failure. The class of bug this codebase keeps
       // finding: something broke, and the UI reported a confident wrong answer.
-      if (plates.error && !(plates.results || []).length) {
+      // Nothing found - so if EITHER lookup actually failed, say that instead
+      // of "no matches". Reported per endpoint, because "plates are down" and
+      // "unit numbers are down" are different facts and a reader who is told
+      // the wrong one draws the wrong conclusion about their own vehicle.
+      const err = (plates.error && `plate search &mdash; ${plates.error}`)
+        || (marks.error && `unit-number search &mdash; ${marks.error}`);
+      if (err) {
         box.innerHTML = `<div class="none">Search is temporarily unavailable`
-          + ` &mdash; ${esc(String(plates.error).slice(0, 80))}</div>`;
+          + ` &mdash; ${esc(String(err).slice(0, 90))}</div>`;
         box.style.display = '';
         return;
       }
-      render(q, plates.results || []);
+      render(q, hits);
     } catch (err) {
       box.innerHTML = `<div class="none">Search unavailable.</div>`;
       box.style.display = '';

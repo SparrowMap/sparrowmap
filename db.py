@@ -874,6 +874,48 @@ def search_plate(text: str, limit: int = 200) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def search_markings(text: str, limit: int = 200) -> list[dict]:
+    """Every CONFIRMED public sighting whose PHOTO carried this unit number or
+    agency ("POLICE - unit 3843" is searchable the way a plate is).
+
+    🚨 THE SAME FILTER, IN THE QUERY, FOR THE SAME REASON as search_plate.
+    set_markings already refuses to write markings to anything but a published
+    police or government row, so a private vehicle cannot be in this table at
+    all - and the tier/reviewed test is written into the query anyway, because
+    a search that scans everything and hides what it found still answers the
+    question. Belt and braces, on the one route where being wrong means
+    answering a stranger's question about somebody's car.
+
+    🚨 A BARE NUMBER MATCHES THE UNIT NUMBER EXACTLY, NEVER AS A PREFIX.
+    Plates are matched prefix-or-exact because a plate fragment is still that
+    plate. A unit number is not: searching "33" as a prefix returns units 33,
+    335, 3043 and 3843, which is four different patrol cars presented as one
+    answer. Same principle as search_plate's "deliberately not fuzzy" - a
+    near-miss that hands back somebody else's vehicle is worse than no result.
+    Words (SHERIFF, LINDEN) match anywhere, since that is an agency, not a
+    vehicle, and the panel says so.
+
+    And no photo, no result: the markings are a claim about what is written on
+    a car, and the photograph is the whole of the evidence for it.
+    """
+    q = " ".join((text or "").upper().split())
+    if len(q) < 2:
+        return []
+    conn = connect()
+    base = ("SELECT * FROM sightings WHERE tier='public' AND reviewed='confirmed' "
+            "AND markings IS NOT NULL AND markings != '' "
+            f"AND {_HAS_PHOTO} AND ")
+    if q.isdigit():
+        # LIKE with no trailing wildcard is anchored at the end, so this is
+        # "...unit 3843" and not "...unit 38430".
+        where, arg = "UPPER(markings) LIKE '%UNIT ' || ?", q
+    else:
+        where, arg = "UPPER(markings) LIKE '%' || ? || '%'", q
+    rows = conn.execute(base + where + " ORDER BY ts DESC LIMIT ?",
+                        (arg, int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
 #: A public sighting with no photograph is withheld from the public feed.
 #:
 #: 🚨 NO PICTURE, NO PUBLICATION. A public row is an ASSERTION that a specific
