@@ -46,7 +46,12 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent.parent
 DATA = REPO / "data" / "reid"
-REV = "r2-markings"
+# r3: a number read off a car is kept without the agency word (and written
+# "number N" rather than "unit N"), POLIISI/POLIS are agency words. A new rev
+# because the rules changed, so `apply.py --clear-rev r2-markings` retires
+# everything the old rules believed instead of leaving two vocabularies mixed
+# in one column.
+REV = "r3-numbers"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -58,6 +63,11 @@ AGENCY = {
     "STATE TROOPER": "trooper", "HIGHWAY PATROL": "highway patrol",
     "STATE POLICE": "state police", "CONSTABLE": "constable",
     "MARSHAL": "marshal", "PUBLIC SAFETY": "public safety",
+    # 🚨 SparrowMap HAS CAMERAS IN FINLAND and the word on those cars is
+    # POLIISI. Measured 2026-09-23: 4 of the 25 numbers this file discarded for
+    # "no agency word" had POLIISI or POLIS read in the very same crop. An
+    # English-only vocabulary is not a precision rule, it is a blind spot.
+    "POLIISI": "poliisi", "POLIS": "poliisi",
 }
 NOT_UNITS = {"911", "011", "11", "311", "411", "2024", "2025", "2026"}
 # Text burned into the FRAME by the camera, or a road sign behind the car, reads
@@ -165,12 +175,24 @@ def main() -> None:
         parts = []
         if agency: parts.append(agency.upper())
         if city: parts.append(city)
-        # A number is only called a unit number when the same crop also says
-        # what it is a unit OF. Without the agency word, "4228" is as likely a
-        # road sign behind the car (it was: EXIT 422B) - precision over recall,
-        # because the row exists to be checked against the photo.
-        if unit and agency: parts.append(f"unit {unit[0]}")
-        elif unit: unit = None
+        # 🚨 A NUMBER READ OFF A CAR IS KEPT WHETHER OR NOT THE AGENCY WORD WAS
+        # READ TOO (his call, 2026-09-23: "numbers on cars even not plates
+        # should be searchable").
+        #
+        # This used to throw the number away unless the same crop also read
+        # POLICE or SHERIFF, on the reasoning that "4228" alone might be the
+        # road sign behind the car. But the sign case is already handled where
+        # it belongs - by WHERE the text sits in the frame (CAPTION, the
+        # top/bottom edge test in units_of), which is the actual discriminator.
+        # Requiring the agency word on top of that was a second, blunter filter
+        # that mostly deleted true readings: 25 numbers discarded against 13
+        # kept, and four of the discards had POLIISI in the crop all along.
+        #
+        # What changes is the WORDING, not the confidence. With an agency word
+        # it is a "unit"; without one it is a "number", because that is exactly
+        # what is known - a number painted on a published government vehicle.
+        # The photograph is on the row either way, so a reader can check it.
+        if unit: parts.append(f"unit {unit[0]}" if agency else f"number {unit[0]}")
         # Colours only ride along with something READ. On their own they are a
         # k-means guess on a night crop ("black/brown" for a white Explorer) and
         # a markings row that says only that would teach readers to ignore it.

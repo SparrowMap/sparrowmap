@@ -2974,8 +2974,22 @@ setInterval(ageTraffic, 1000);    // the live traffic view
         fetch('/api/markings?q=' + encodeURIComponent(q))
           .then((x) => x.json()).catch(() => ({ results: [] })),
       ]);
+      /* 🚨 CLOSEST FIRST, NOT NEWEST FIRST (his call, 2026-09-23).
+       * Somebody searching a unit number is standing somewhere and asking
+       * "has this car been near ME"; a hit four states away at the top of the
+       * list answers a question nobody asked. Distance is measured from the
+       * map's current centre, which is where the reader is looking - no
+       * geolocation prompt, nothing sent to the server, and the server keeps
+       * returning newest-first so ties fall back to recency. */
+      const c = map.getCenter();
+      const near = (r) => {
+        if (typeof r.lat !== 'number' || typeof r.lon !== 'number') return Infinity;
+        const dy = r.lat - c.lat;
+        const dx = (r.lon - c.lng) * Math.cos(c.lat * Math.PI / 180);
+        return dy * dy + dx * dx;      // squared degrees: ordering only, no km needed
+      };
       const hits = [...(plates.results || []), ...(marks.results || [])]
-        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        .sort((a, b) => near(a) - near(b) || (b.ts || 0) - (a.ts || 0));
       if (hits.length) { render(q, hits); return; }
       // 🚨 AN ERROR IS NOT AN EMPTY RESULT SET.
       // The server answers a failed lookup with {"error": ...} and no

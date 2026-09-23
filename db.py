@@ -907,12 +907,17 @@ def search_markings(text: str, limit: int = 200) -> list[dict]:
             f"AND {_HAS_PHOTO} AND ")
     if q.isdigit():
         # LIKE with no trailing wildcard is anchored at the end, so this is
-        # "...unit 3843" and not "...unit 38430".
-        where, arg = "UPPER(markings) LIKE '%UNIT ' || ?", q
+        # "...unit 3843" and not "...unit 38430". Both wordings are searched:
+        # a number read WITH an agency word is written "unit 3843", one read
+        # without is "number 4228", and a reader typing the digits off a roof
+        # has no idea which of the two the recogniser managed.
+        where = ("(UPPER(markings) LIKE '%UNIT ' || ? "
+                 "OR UPPER(markings) LIKE '%NUMBER ' || ?)")
+        args = (q, q)
     else:
-        where, arg = "UPPER(markings) LIKE '%' || ? || '%'", q
+        where, args = "UPPER(markings) LIKE '%' || ? || '%'", (q,)
     rows = conn.execute(base + where + " ORDER BY ts DESC LIMIT ?",
-                        (arg, int(limit))).fetchall()
+                        args + (int(limit),)).fetchall()
     return [dict(r) for r in rows]
 
 
