@@ -2,12 +2,25 @@
 
     D:\\LLM\\reid_venv\\Scripts\\python.exe tools/reid/ocr.py            # all
     ... --limit 50                                                    # a look
-    ... --mobile                                                      # faster models
+    ... --mobile                                                      # faster, MUCH worse
 
 Its OWN venv (D:\\LLM\\reid_venv) because paddle wants a different opencv than
 the shared D:\\LLM\\.venv, whose cv2.pyd is held open by the running camera
 detector. analyze.py (CLIP + colours) stays in the shared venv; link.py joins
 the two outputs by sighting id.
+
+🚨 SERVER MODELS, NOT MOBILE, MEASURED 2026-09-23. He could read 4715 off a
+patrol car by eye and it was not searchable. On that crop (200x156, daylight,
+the number painted on the roof AND the tailgate AND the fender) the shipped
+mobile models read "25" (0.27) and "aonod" (0.54); the server models read
+"4715" at 1.00 and "POLICE" at 1.00 - same file, same 2x upscale. Sweeping the
+upscale 2/3/4/6 did NOT rescue mobile: it is the recogniser, not the pixels.
+Across the eight newest crops server read POLICE at 1.00 where mobile read
+"FOLIEEG" and "331i0d", and where server found nothing mobile found nothing
+too, so it is not trading noise for recall. Cost is ~1.5 s vs ~0.5 s a crop,
+which is ~100 min for a full re-read and ~12 crops on a 4-hourly incremental.
+Use --mobile only to sanity-check the pipeline in a hurry. Tool that measured
+it: tools/reid/ocr_sweep.py.
 
 WHY PADDLE, MEASURED 2026-09-12: EasyOCR read NOTHING on a 512 px crop with
 "POLICE" in 40 px white letters across the door and "SHERIFF" in gold on a
@@ -51,6 +64,17 @@ def main() -> None:
 
     rows = json.load(open(DATA / "reid_rows.json"))
     done = json.load(open(OUT)) if OUT.exists() else {}
+    # 🚨 A CACHED READ IS ONLY VALID FOR THE MODEL THAT MADE IT.
+    # ocr.json is resumable by skipping ids it already holds, which silently
+    # keeps a weaker model's reads for ever once the model changes - exactly
+    # the "two vocabularies in one column" trap that tag_rev exists to stop.
+    # So the file records which model wrote it, and a different model
+    # invalidates the lot rather than mixing. Measured 2026-09-23: mobile read
+    # "25" and "aonod" off the crop where server reads "4715" at 1.00.
+    model = "mobile" if args.mobile else "server"
+    if done.pop("_model", model) != model:
+        print(f"model changed -> {model}: re-reading every crop", flush=True)
+        done = {}
     todo = [r for r in rows if str(r["id"]) not in done]
     if args.limit:
         todo = todo[:args.limit]
@@ -82,10 +106,10 @@ def main() -> None:
             print(f"  {r['id']}: {exc.__class__.__name__}: {exc}", flush=True)
         done[str(r["id"])] = items
         if (i + 1) % 25 == 0:
-            json.dump(done, open(OUT, "w"))
+            json.dump({**done, "_model": model}, open(OUT, "w"))
             print(f"  {i + 1}/{len(todo)}  {time.time() - t0:.0f}s  "
                   f"({(time.time() - t0) / (i + 1):.1f}s each)", flush=True)
-    json.dump(done, open(OUT, "w"))
+    json.dump({**done, "_model": model}, open(OUT, "w"))
     n = sum(1 for v in done.values() if v)
     print(f"\n{len(done)} read in {time.time() - t0:.0f}s; text found on {n} "
           f"({100 * n / max(1, len(done)):.0f}%)", flush=True)

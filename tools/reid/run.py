@@ -10,7 +10,7 @@ costs about as long as the new crops take to read (~1.3 s each on CPU).
 
 Stages, and which interpreter each wants:
   export   on the box, its venv          tools/reid/export.py
-  ocr      D:\\LLM\\reid_venv (paddle)      tools/reid/ocr.py --mobile
+  ocr      D:\\LLM\\reid_venv (paddle)      tools/reid/ocr.py
   analyze  D:\\LLM\\.venv (torch/open_clip) tools/reid/analyze.py --no-ocr --cpu
   link     either                          tools/reid/link.py
   apply    on the box, its venv          tools/reid/apply.py
@@ -74,7 +74,7 @@ def main() -> None:
     print(f"export: {len(new)} new rows, {len(merged)} total", flush=True)
 
     # 2. read the text, 3. embed, 4. decide.
-    sh([str(OCR_PY), str(REPO / "tools/reid/ocr.py"), "--mobile"])
+    sh([str(OCR_PY), str(REPO / "tools/reid/ocr.py")])   # server models: see ocr.py
     sh([str(MAIN_PY), str(REPO / "tools/reid/analyze.py"), "--no-ocr", "--cpu"])
     sh([str(MAIN_PY), str(REPO / "tools/reid/link.py"), "--show", "5"])
 

@@ -51,7 +51,7 @@ DATA = REPO / "data" / "reid"
 # because the rules changed, so `apply.py --clear-rev r2-markings` retires
 # everything the old rules believed instead of leaving two vocabularies mixed
 # in one column.
-REV = "r3-numbers"
+REV = "r4-serverocr"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
