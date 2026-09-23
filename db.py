@@ -911,9 +911,16 @@ def search_markings(text: str, limit: int = 200) -> list[dict]:
         # a number read WITH an agency word is written "unit 3843", one read
         # without is "number 4228", and a reader typing the digits off a roof
         # has no idea which of the two the recogniser managed.
+        # 911 is a marking but never a unit number, so a digits-only search has
+        # to look for a WHOLE TOKEN as well - otherwise typing 911 finds
+        # nothing while twelve rows carry it. A token match is still exact at
+        # both ends ("911" never matches "9115"), so it does not reintroduce
+        # the near-miss the prefix rule exists to prevent.
         where = ("(UPPER(markings) LIKE '%UNIT ' || ? "
-                 "OR UPPER(markings) LIKE '%NUMBER ' || ?)")
-        args = (q, q)
+                 "OR UPPER(markings) LIKE '%NUMBER ' || ? "
+                 "OR UPPER(markings) = ? "
+                 "OR UPPER(markings) LIKE ? || ' %')")
+        args = (q, q, q, q)
     else:
         where, args = "UPPER(markings) LIKE '%' || ? || '%'", (q,)
     rows = conn.execute(base + where + " ORDER BY ts DESC LIMIT ?",
