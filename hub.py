@@ -2626,6 +2626,13 @@ class Handler(BaseHTTPRequestHandler):
                 # map data and MAX_HEAVY is the thing to look at first.
                 health["heavy_cap"] = MAX_HEAVY
                 health["heavy_free"] = Handler._HEAVY._value
+                # 🚨 THE WAL, BECAUSE IT TOOK THE SITE DOWN WHILE INVISIBLE.
+                # On 2026-09-24 it reached 1,605 MB and readers blocked on its
+                # index: 47 threads stuck in one query that a lone connection
+                # answered in 0.043s. Nothing on this endpoint showed it, so
+                # the diagnosis needed a thread dump. A number that has caused
+                # an outage belongs where the outage is looked for.
+                health["wal_mb"] = db.wal_mb()
                 health["ingest_cap"] = MAX_INGEST
                 health["ingest_free"] = Handler._INGEST._value
                 # Longest-held first: the one at the top is the one to blame.
@@ -5565,6 +5572,10 @@ def _janitor() -> None:
             rep = privacy.purge_expired(db.connect())
             if rep["private_deleted"] or rep["public_deleted"]:
                 print(f"[janitor] purged {rep}")
+        except Exception:
+            traceback.print_exc()
+        try:
+            db.checkpoint_wal()
         except Exception:
             traceback.print_exc()
         time.sleep(600)

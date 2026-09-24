@@ -12,6 +12,7 @@ leaked.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from typing import Any, Optional
@@ -416,6 +417,11 @@ def connect() -> sqlite3.Connection:
     if conn is None:
         conn = sqlite3.connect(DB_PATH, timeout=15.0)
         conn.row_factory = sqlite3.Row
+        # Cap what a checkpoint leaves behind. journal_size_limit is a property
+        # of the CONNECTION, not of the database, so it has to be set on every
+        # one of them - a single setting applied once by hand looks like a fix
+        # and survives until the next restart.
+        conn.execute("PRAGMA journal_size_limit=134217728")   # 128 MB
         # 🚨 THE SCHEMA IS A PROPERTY OF THE DATABASE, NOT OF THE CONNECTION,
         # SO RUNNING IT PER THREAD IS BOTH POINTLESS AND EXPENSIVE.
         #
@@ -984,6 +990,46 @@ def recent_sightings(since: float = 0, limit: int = 500,
     # already supported above), not a bigger number.
     args.append(min(int(limit), 5000))
     return [dict(r) for r in connect().execute(sql, args).fetchall()]
+
+
+def wal_mb() -> float:
+    """Size of the write-ahead log, in MB. Published by /api/health."""
+    try:
+        return round(os.path.getsize(str(DB_PATH) + "-wal") / 1e6, 1)
+    except OSError:
+        return 0.0
+
+
+def checkpoint_wal() -> dict:
+    """Fold the write-ahead log back into the database, on a timer.
+
+    🚨 THIS IS NOT HOUSEKEEPING, IT IS THE 7th ROOT CAUSE (2026-09-24).
+    SQLite's automatic checkpoint is PASSIVE: it gives up the moment a reader
+    is active. The map polls every four seconds, so on a busy day a reader is
+    ALWAYS active, the automatic checkpoint never completes, and the log grows
+    without bound - it reached 1,605 MB. Past a certain size readers start
+    blocking on its index: 47 request threads sat stuck inside a single query
+    that a lone connection answered in 0.043 s, the 48-permit heavy gate
+    saturated, and the map said "reconnecting". Nothing in the health endpoint
+    showed it.
+
+    TRUNCATE is attempted first because it is the only mode that returns the
+    file to nothing; it needs a quiet moment and returns busy without one,
+    which is fine and expected - PASSIVE then copies what it can, so the log
+    still moves forward under load rather than only growing.
+
+    Returns the mode that ran and the size either side, so the log line says
+    what happened rather than that something was attempted.
+    """
+    before = wal_mb()
+    conn = connect()
+    for mode in ("TRUNCATE", "PASSIVE"):
+        busy, written, moved = conn.execute(
+            f"pragma wal_checkpoint({mode})").fetchone()
+        if not busy:
+            return {"mode": mode, "before_mb": before, "after_mb": wal_mb(),
+                    "pages_written": written, "pages_moved": moved}
+    return {"mode": "busy", "before_mb": before, "after_mb": wal_mb()}
 
 
 def track_for(plate_hash: str, limit: int = 500) -> list[dict]:
