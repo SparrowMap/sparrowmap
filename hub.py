@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import board
 import bugs
+import nav
 import classify
 import db
 import mirror
@@ -630,6 +631,14 @@ RATE = {"/api/enroll": (600, 3600), "/api/sightings": (900, 3600),
         # not one row at a time, so the per-node ceiling is lower than sightings.
         "/api/rf": (300, 3600),
         "/api/drive/report": (40, 3600), "/api/drive/vote": (120, 3600),
+        # A route is the most expensive thing this box computes for a stranger
+        # (a US-wide graph search), and a driver needs a handful per journey:
+        # one to set off, a few when they miss a turn. 90 an hour is generous
+        # for that and useless for scraping the road network.
+        "/api/route": (90, 3600),
+        # The speed limit is asked every few seconds while moving, so its
+        # bucket is sized for a long drive rather than for a page view.
+        "/api/speedlimit": (1200, 3600),
         # 🚨 TILES: 600/300s WAS 2 A SECOND FOR THE WHOLE WORLD.
         # One map load pulls roughly twenty tiles, so that bucket allowed about
         # six people to open the map per minute before the rest got 429s and a
@@ -2223,6 +2232,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"cells": cells,
                                    "total": sum(c["n"] for c in cells)})
 
+            if p == "/api/speedlimit":
+                # What the road under a point is POSTED at. Read from the same
+                # OpenStreetMap data the routing tiles are built from, on this
+                # machine, with no journey attached - a single coordinate, no
+                # destination, nothing stored.
+                #
+                # 🚨 "NOT KNOWN" IS THE USUAL ANSWER AND IT REACHES THE SCREEN.
+                # Most American roads carry no maxspeed tag, so this returns
+                # null far more often than a number, and the page shows a dash.
+                # Filling that gap with the road class's typical speed would be
+                # inventing a limit a driver could be fined for trusting.
+                try:
+                    lat = float((q.get("lat") or [""])[0])
+                    lon = float((q.get("lon") or [""])[0])
+                except (IndexError, TypeError, ValueError):
+                    return self._err(400, "need lat and lon")
+                return self._json(nav.speed_limit(lat, lon))
+
+            if p == "/api/nav/status":
+                # So the driving page can say "navigation is offline" instead
+                # of showing a Go button that does nothing. Cheap on purpose -
+                # the page asks once when it opens.
+                return self._json({"available": nav.available(),
+                                   "engine": "valhalla", "logged": False})
+
             if p == "/api/node/me":
                 # A camera's owner reading back their OWN placement, to change
                 # it. Gated by the node's own token - the same secret that lets
@@ -2656,6 +2690,16 @@ class Handler(BaseHTTPRequestHandler):
                     # live in the published source. It is deliberately
                     # town-level and says nothing a viewer cannot see anyway -
                     # the watched spans are far more precise than this.
+                    # 🚨 THE ROUTING PROMISE, PUBLISHED SO IT CAN BE CHECKED.
+                    # /drive computes turn-by-turn on this machine. The two
+                    # facts that matter to a driver are that the destination
+                    # reaches no third party and that nothing about the journey
+                    # is written down, so both are machine-readable here and an
+                    # auditor can diff them against deploy/valhalla.service and
+                    # the Caddyfile rather than trusting a sentence on a page.
+                    "routing_engine": "valhalla (self-hosted, loopback only)",
+                    "route_logging": False,
+                    "route_third_party": False,
                     "map_center": CONFIG["map_center"],
                     "map_zoom": CONFIG["map_zoom"],
                 })
@@ -4720,6 +4764,46 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(review_api.verdict(
                     r, sid, b.get("verdict"), privacy.audit_ip(self.client_ip),
                     crop_box=box if isinstance(box, dict) else None))
+
+            if p == "/api/route":
+                # TURN-BY-TURN, COMPUTED HERE. See nav.py for the whole design.
+                #
+                # 🚨 NOT LOGGED, AND THE CLAIM IS CHECKABLE RATHER THAN ASSERTED.
+                # A destination is the most revealing thing a person can hand a
+                # map: where they are going, before they have gone. So this
+                # handler writes nothing - no row, no counter, no access log
+                # line (the site's Caddy log is `output discard` and the
+                # routing daemon is started with its own logging off, see
+                # deploy/valhalla.service) - and /api/policy publishes
+                # route_logging:false so an auditor can diff the claim against
+                # the config instead of taking this comment's word for it.
+                #
+                # Rate limited like any other expensive route, which is a
+                # COUNT in a bucket keyed by an address the hub never receives
+                # (client_ip is 127.0.0.1 for everyone behind the mirror), so
+                # it cannot become a record of who asked for what.
+                if not rate_ok(p, self.client_ip):
+                    return self._err(429, "too many route requests - wait a moment")
+                b = self._body()
+                try:
+                    a = (float(b["from"][0]), float(b["from"][1]))
+                    z = (float(b["to"][0]), float(b["to"][1]))
+                except (KeyError, IndexError, TypeError, ValueError):
+                    return self._err(400, "need from:[lat,lon] and to:[lat,lon]")
+                av = b.get("avoid") or {}
+                cells = db.gov_heat() if av.get("hotspots") else None
+                try:
+                    out = nav.route(a, z,
+                                    avoid_highways=bool(av.get("highways")),
+                                    avoid_tolls=bool(av.get("tolls")),
+                                    hot_cells=cells)
+                except Exception as e:
+                    # An engine that is down must say so. A navigation page
+                    # that renders "no route found" when the router never
+                    # answered teaches a driver the road does not exist.
+                    return self._err(503, f"navigation is unavailable: "
+                                          f"{e.__class__.__name__}")
+                return self._json(out)
 
             if p == "/api/drive/report":
                 # 🚨 CLOSED 2026-08-15. His call, and the right one.

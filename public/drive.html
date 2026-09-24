@@ -116,6 +116,54 @@
      screenshot.
      The strip now stacks cleanly from the bottom: nav (~53px), this chip, then
      the dashcam tile at 152px. */
+  /* ---- navigation (drive-nav.js) ----------------------------------------
+     Sized for a phone in a windscreen mount at arm's length: the next turn is
+     the largest text on the screen, and the speed limit is a US-style white
+     plate because that is the shape a driver recognises without reading. */
+  #navbar{position:absolute;z-index:2050;left:8px;right:8px;top:8px;
+    background:rgba(13,18,25,.95);border:1px solid var(--line);border-radius:16px;
+    padding:12px 14px;display:none;box-shadow:0 8px 28px rgba(0,0,0,.5)}
+  #navbar.show{display:block}
+  #navbar .nb-turn{font-size:20px;font-weight:700;line-height:1.25}
+  #navbar .nb-sub{display:flex;justify-content:space-between;margin-top:6px;
+    font-family:var(--mono,monospace);font-size:15px;color:#9fb3c8}
+  /* The alert banner and the turn banner both want the top of the screen. The
+     alert wins - a patrol ahead outranks a turn in 400 m - so it sits above
+     and the turn banner drops clear of it rather than being covered. */
+  #alert.show ~ #navbar.show{top:72px}
+  #splimit{position:absolute;z-index:2040;right:10px;bottom:150px;display:none;
+    width:62px;background:#fff;color:#111;border:3px solid #111;border-radius:8px;
+    text-align:center;padding:4px 0 6px;box-shadow:0 4px 14px rgba(0,0,0,.45)}
+  #splimit.show{display:block}
+  #splimit .sl-cap{font-size:9px;font-weight:800;line-height:1.05;letter-spacing:.4px}
+  #splimit .sl-num{font-size:26px;font-weight:800;line-height:1}
+  /* Not known is shown as a dash in grey, never as a number. Most American
+     roads carry no maxspeed in OpenStreetMap and inventing one is how a
+     driver gets a ticket trusting this. */
+  #splimit.unknown{opacity:.55}
+  #navsheet{position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);
+    display:none;align-items:flex-start;justify-content:center;padding:14px}
+  #navsheet.show{display:flex}
+  #navsheet .ns-card{width:100%;max-width:520px;background:#0d1219;
+    border:1px solid var(--line);border-radius:18px;padding:14px;
+    max-height:88vh;overflow:auto}
+  #nsform{display:flex;gap:8px}
+  #nsq{flex:1;padding:12px 14px;border-radius:12px;border:1px solid var(--line);
+    background:#111a24;color:#e6eef7;font-size:16px}
+  #nsform button{padding:12px 18px;border-radius:12px;border:0;
+    background:#2563eb;color:#fff;font-weight:700;font-size:15px}
+  .ns-hit{display:block;width:100%;text-align:left;margin-top:8px;padding:11px 12px;
+    border-radius:12px;border:1px solid var(--line);background:#111a24;
+    color:#e6eef7;font-size:15px;line-height:1.35}
+  .ns-empty{padding:12px 2px;color:#9fb3c8;font-size:14px}
+  .ns-opts{margin-top:12px;display:flex;flex-direction:column;gap:10px}
+  .ns-opts label{display:flex;align-items:center;gap:10px;font-size:15px}
+  .ns-opts input{width:20px;height:20px;accent-color:#2563eb}
+  .ns-note{margin-top:12px;color:#9fb3c8;font-size:12.5px;line-height:1.45}
+  .ns-row{display:flex;gap:8px;margin-top:14px}
+  .ns-row button{flex:1;padding:12px;border-radius:12px;border:1px solid var(--line);
+    background:#111a24;color:#e6eef7;font-size:15px}
+  .ns-row .ns-stop{background:#3a1420;border-color:#5b2233;color:#ffd9e0}
   #priv{position:absolute;z-index:1000;left:50%;transform:translateX(-50%);
     bottom:calc(env(safe-area-inset-bottom) + 62px);font-size:.68rem;color:var(--dim);
     background:rgba(13,18,25,.82);border:1px solid var(--line);border-radius:14px;
@@ -269,6 +317,7 @@
   <button class="rbtn" id="soundBtn" title="Alert sound">🔊</button>
   <button class="rbtn" id="heatBtn" title="Everywhere patrols have been (hotspots)">🔥</button>
   <button class="rbtn" id="calBtn" title="Calibrate the phone's angle in its mount">🧭</button>
+  <button class="rbtn" id="navBtn" title="Navigate somewhere">➤</button>
   <!-- 🚨 A WAY OUT. Driving mode is a standalone PWA - no address bar, no
        browser back button - and it had no link off it at all, so leaving meant
        force-quitting the app. Worse here than anywhere else in the project,
@@ -290,7 +339,15 @@
      the route, and this page was its only caller - so /api/drive/report refuses
      now too. The vote and read paths stay, so anything already reported ages
      out the way it always did. -->
-<div id="priv">Your route stays on your phone · the dashcam sends only vehicle crops, never video</div>
+<!-- 🚨 THE PROMISE FOLLOWS THE FEATURE. This said "your route stays on your
+     phone", which was true when the page could not route you anywhere. It now
+     can, and a destination has to reach the box to be routed - so the claim
+     changes rather than quietly becoming false, which is the same rule that
+     killed "plates are destroyed at the camera" on 2026-08-14. What replaces
+     it is the narrower thing that IS true and is checkable: /api/policy
+     publishes route_logging:false, the routing engine is on this machine's
+     loopback, and nothing about a journey is written down. -->
+<div id="priv">Routed on our own machine · never logged, never shared · the dashcam sends only vehicle crops</div>
 <!-- The bottom bar (sitenav.js) is the menu on BOTH states of this page: the
      start cover and the live driving screen. Everything here is positioned
      against the viewport, so the fixed bar simply sits over the bottom of the
@@ -308,7 +365,7 @@
   <p>Get a heads-up when you're near a known patrol. Turn on the dashcam and it
      watches the road for you — you confirm what it catches.</p>
   <button class="go" id="startBtn">Start driving mode</button>
-  <div class="lock">🔒 Your route is never uploaded — only the crops you confirm</div>
+  <div class="lock">🔒 Your destination is routed here and never logged — only the crops you confirm are kept</div>
   <p class="fine" id="coverFine">Keeps the screen on. Works best mounted. Turn on the
     📷 dashcam to let it watch the road and flag patrols for you.</p>
   <div id="coverwrap"></div>
@@ -328,6 +385,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
+<script src="/static/drive-nav.js?v=1"></script>
 <script>
 (function(){
   "use strict";
@@ -735,6 +793,27 @@
   var CAM_NEAR_M=250;               // warn this far out from a fixed camera
   var RADAR_NEAR_M=500;             // active radar reaches further; warn earlier
   var warn=null;                    // {type:'radar'|'patrol'|'camera', dist} or null
+  /* 🚨 HOW LONG AGO STILL COUNTS AS "THERE".
+   *
+   * Every confirmed patrol inside the seven-day window used to raise the same
+   * alarm at the same volume, so a car photographed last Tuesday sounded
+   * exactly like one photographed while you were getting in your own. That
+   * teaches a driver to ignore the alert, which is the only real failure mode
+   * a warning system has.
+   *
+   * So a sighting is FRESH for FRESH_MIN minutes - long enough that a patrol
+   * parked on a road is still plausibly parked on it - and after that it is
+   * history: still worth knowing, still drawn on the map, but it is a place
+   * patrols are rather than a car that is there, and it says so.
+   *
+   * The number is not a measurement and is not presented as one. It is a
+   * judgement about how long a stationary patrol tends to stay put, and the
+   * banner always prints the actual age beside it so the driver can apply
+   * their own. */
+  var FRESH_MIN=45;
+  function ageMin(t){ var ts=t&&(t.ts||t.time); if(!ts) return null;
+    if(ts>1e11) ts=ts/1000;                       // ms or seconds, both appear
+    return (Date.now()/1000-ts)/60; }
   function nearestAhead(list, maxM){
     var bd=maxM, best=null;
     for(var i=0;i<list.length;i++){ var t=list[i];
@@ -743,7 +822,7 @@
       if(d>bd) continue;
       if(heading!=null){ var br=bearing(me[0],me[1],t.lat,t.lon);
         if(Math.abs(((br-heading+540)%360)-180)>100) continue; }  // behind you
-      bd=d; best=d;
+      bd=d; best={d:d, age:ageMin(t)};
     }
     return best;
   }
@@ -759,9 +838,9 @@
     var nc=nearestAhead(cameras, CAM_NEAR_M);
     // Priority: an ACTIVE radar source ahead is the most actionable, then a live
     // patrol, then a fixed plate reader. Nearest of the winning kind sets the beep.
-    if(nr!=null)      warn={type:'radar',  dist:Math.round(nr)};
-    else if(np!=null) warn={type:'patrol', dist:Math.round(np)};
-    else if(nc!=null) warn={type:'camera', dist:Math.round(nc)};
+    if(nr!=null)      warn={type:'radar',  dist:Math.round(nr.d), age:nr.age};
+    else if(np!=null) warn={type:'patrol', dist:Math.round(np.d), age:np.age};
+    else if(nc!=null) warn={type:'camera', dist:Math.round(nc.d), age:nc.age};
     else              warn=null;
     updateWarn();
   }
@@ -773,8 +852,13 @@
       $('#alertTxt').textContent='📡 Radar ahead — '+warn.dist+' m';
       a.className='show radar';
     } else if(warn.type==='patrol'){
-      $('#alertTxt').textContent='🚨 Patrol ahead — '+warn.dist+' m';
-      a.className='show';
+      // Say WHEN. A driver can judge "seen 4 minutes ago" for themselves;
+      // "patrol ahead" with no age behind it is the same alarm for a car that
+      // has long gone, and it is what makes people stop listening.
+      var fresh=(warn.age==null)||(warn.age<=FRESH_MIN);
+      $('#alertTxt').textContent=(fresh?'🚨 Patrol ahead — ':'🚨 Patrol seen here — ')
+        + warn.dist+' m'+(warn.age==null?'':' · '+agoTxt(warn.age));
+      a.className=fresh?'show':'show hot';
     } else {
       $('#alertTxt').textContent='📷 Plate reader — '+warn.dist+' m';
       a.className='show cam';
@@ -789,9 +873,18 @@
     // then camera.
     var floor=warn.type==='radar'?300:warn.type==='patrol'?340:700;
     var ms=Math.max(floor, Math.min(2600, warn.dist*8));
+    // A sighting older than FRESH_MIN is history, so it repeats at a walking
+    // pace instead of hammering: the urgency of the sound has to match the
+    // confidence of the claim, or the sound stops meaning anything.
+    if(warn.type==='patrol' && warn.age!=null && warn.age>FRESH_MIN) ms=Math.max(ms*3, 2200);
     warnTimer=setTimeout(warnBeepLoop, ms);
   }
   function stopWarnBeep(){ if(warnTimer){ clearTimeout(warnTimer); warnTimer=null; } }
+  function agoTxt(min){ if(min==null) return '';
+    if(min<1) return 'just now';
+    if(min<60) return Math.round(min)+' min ago';
+    if(min<48*60) return Math.round(min/60)+' h ago';
+    return Math.round(min/1440)+' d ago'; }
   // Patrol = urgent 880Hz sine (same as the old beep). Camera = a higher, curter
   // 1320Hz blip, so you can tell by ear which one is ahead without looking.
   function warnTone(type){ if(!soundOn) return; try{
@@ -986,6 +1079,21 @@
     // The camera-permission prompt rides on this same start gesture. A driver
     // who wants radar-only taps the 📷 button off.
     camStart();
+    // Navigation lives in its own file (drive-nav.js) and is handed exactly
+    // what it needs through this hook rather than reaching into the page:
+    // where the car is, which way it is pointing, how fast, and the shared
+    // toast/beep so a route alert sounds like every other alert here. Keeping
+    // it out of this closure is what stops a 1,700-line driving page becoming
+    // a 3,000-line one, and it means navigation can fail to load without
+    // taking the patrol warnings down with it.
+    if(window.DriveNav) window.DriveNav.start({
+      map:map,
+      pos:function(){return me;},
+      heading:function(){return heading;},
+      speed:function(){return speedMph;},
+      toast:toast, beep:beep, haversine:haversine, bearing:bearing,
+      soundOn:function(){return soundOn;}
+    });
   }
   $('#startBtn').onclick=start;
 

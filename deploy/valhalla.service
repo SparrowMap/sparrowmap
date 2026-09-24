@@ -1,0 +1,42 @@
+[Unit]
+# The routing engine behind /drive's turn-by-turn. See nav.py.
+#
+# 🚨 BOUND TO LOOPBACK AND LOGGING OFF, AND BOTH ARE THE POINT.
+#
+#   -p 127.0.0.1:8002:8002   nothing outside this machine can reach it, so the
+#                            only caller is the hub, and the hub is the only
+#                            thing that decides what a stranger may ask for.
+#
+#   valhalla.json logging    set to type "" by deploy/valhalla-quiet.py before
+#                            this starts. A destination is the most revealing
+#                            thing a person hands a map, and an engine logging
+#                            "route from A to B" at INFO would quietly build
+#                            the record the site promises not to keep - in a
+#                            file nobody thought of as a database.
+#
+# /api/policy publishes route_logging:false. This unit is what makes that
+# sentence true rather than a claim, so an auditor can read both and diff them.
+Description=Valhalla routing engine (SparrowMap self-hosted navigation)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+# Silence the engine's own request logging BEFORE it starts, every start, so a
+# rebuilt tile set (which rewrites valhalla.json from the image's defaults)
+# cannot quietly turn logging back on.
+ExecStartPre=/usr/bin/python3 /opt/sparrowmap/deploy/valhalla-quiet.py /opt/valhalla/custom_files/valhalla.json
+ExecStartPre=-/usr/bin/docker rm -f valhalla
+ExecStart=/usr/bin/docker run --rm --name valhalla \
+  -p 127.0.0.1:8002:8002 \
+  -v /opt/valhalla/custom_files:/custom_files \
+  -e serve_tiles=True -e build_tar=False -e force_rebuild=False \
+  -e build_elevation=False -e build_admins=True -e build_time_zones=True \
+  -e server_threads=6 \
+  ghcr.io/valhalla/valhalla-scripted:latest
+ExecStop=/usr/bin/docker stop -t 20 valhalla
+
+[Install]
+WantedBy=multi-user.target

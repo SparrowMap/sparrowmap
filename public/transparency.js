@@ -38,6 +38,18 @@ window.sparrowTransparency = async function () {
     private_plate_lookup:    ['Can anyone look up a private plate?', (v) => v ? 'YES' : 'no'],
     stores_video:            ['Does any video reach this server?', (v) => v ? 'YES' : 'no'],
     stores_full_frames:      ['Are full camera frames stored?', (v) => v ? 'YES' : 'no (vehicle crops only)'],
+    /* 🚨 THE ROUTING PROMISE, ON THE PAGE WHOSE JOB IS THAT CLAIMS CAN BE
+     * CHECKED. Driving mode computes turn-by-turn directions, which means a
+     * destination reaches this server - the most revealing thing a person can
+     * hand a map, because it is where they are going before they have gone.
+     * Two facts decide whether that is acceptable, so both are published as
+     * values rather than described in prose: nothing about the journey is
+     * written down, and no third party is involved. They can be diffed against
+     * deploy/valhalla.service (which starts the engine with its own logging
+     * off, on loopback) and the Caddyfile (access log `output discard`). */
+    route_logging:           ['Is your destination logged when you navigate?', (v) => v ? 'YES' : 'no'],
+    route_third_party:       ['Does your destination reach anyone else?', (v) => v ? 'YES' : 'no'],
+    routing_engine:          ['Directions are computed by', (v) => v],
   };
 
   // body
@@ -125,7 +137,8 @@ window.sparrowTransparency = async function () {
       Object.entries(LABELS).map(([k, [lab, fmt]]) => {
         if (p[k] === undefined) return '';
         const val = fmt(p[k]);
-        const cls = (k === 'private_plate_lookup' || k === 'stores_video' || k === 'stores_full_frames')
+        const cls = (k === 'private_plate_lookup' || k === 'stores_video' || k === 'stores_full_frames'
+                     || k === 'route_logging' || k === 'route_third_party')
           ? (String(val).startsWith('no') ? 'yes' : 'no') : '';
         return `<tr><td class="n">${esc(lab)}</td><td class="v ${cls}">${esc(val)}</td></tr>`;
       }).join('');
