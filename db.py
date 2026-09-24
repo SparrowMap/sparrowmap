@@ -83,6 +83,15 @@ CREATE INDEX IF NOT EXISTS ix_sight_hash   ON sightings(plate_hash, ts DESC);
 CREATE INDEX IF NOT EXISTS ix_sight_class  ON sightings(vclass, ts DESC);
 CREATE INDEX IF NOT EXISTS ix_sight_plate  ON sightings(plate_text, ts DESC);
 CREATE INDEX IF NOT EXISTS ix_sight_node   ON sightings(node_id, ts DESC);
+-- 🚨 THE MAP'S OWN QUERY, AND IT HAD NO INDEX UNTIL 2026-09-24.
+-- /api/sightings?vclass=public asks for "the newest public rows", which without
+-- this walks ix_sight_ts across every row in the table discarding private ones.
+-- At 4,390,894 rows that was 2.878s per call; 47 of them ran at once, saturated
+-- the 48-permit heavy gate, and the map went 503 - "not connecting". With this
+-- index the same query is 0.033s. It is the composite that matters: an index on
+-- ts alone cannot answer a question whose first filter is tier.
+-- Read the 6th root cause in the outage playbook before removing it.
+CREATE INDEX IF NOT EXISTS ix_sight_tier_ts ON sightings(tier, ts DESC);
 
 -- Every read of the public tier. We are building a surveillance network; the
 -- least we can do is be the first thing it watches.
