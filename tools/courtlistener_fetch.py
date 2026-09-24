@@ -983,8 +983,11 @@ def main() -> None:
     ap.add_argument("--enrich", metavar="SCOPE", nargs="?", const="police",
                     help="fetch party names BY DOCKET ID for cases we have "
                          "never asked about. SCOPE is a police class "
-                         "(police, corrections, other, unknown) or 'all'; "
-                         "defaults to police, which is 43k cases instead of "
+                         "(police, federal, corrections, other, unknown) or "
+                         "'all'. COMMA-SEPARATED runs them in order in ONE "
+                         "process, which is how two scopes share one rate "
+                         "budget instead of racing for it. "
+                         "Defaults to police, which is 43k cases instead of "
                          "1.8M and is the only slice the review surface "
                          "needs. No cursor, so no tied-score data loss. "
                          "Resumable: just re-run it.")
@@ -1034,26 +1037,48 @@ def main() -> None:
               f"~{-(-pr['todo'] // ID_CHUNK):,} requests")
         return
     if a.enrich:
-        todo = oversight.cases_needing_parties(
-            a.enrich, limit=a.limit,
-            courts=(STATE_COURTS.get(a.state.strip().upper())
-                    if a.state else None))
-        if not todo:
-            print(f"nothing to enrich in scope '{a.enrich}'"
-                  + (f" for {a.state}" if a.state else ""))
+        # 🚨 SCOPES RUN ONE AFTER ANOTHER IN ONE PROCESS, NEVER SIDE BY SIDE.
+        #
+        # The CourtListener anonymous ceiling is a ROLLING BUDGET of a few
+        # hundred requests, not a per-minute rate - measured 2026-09-11, when
+        # 10 requests a minute worked perfectly right up to a lockout that
+        # outlasted fourteen hours. Two enrichers each pacing themselves
+        # politely at --delay 240 therefore spend the budget twice as fast as
+        # either one believes it is, and buy that lockout for both.
+        #
+        # So `--enrich police,federal` is ONE requester working a queue of
+        # queues, in the order given. Police first because it is the slice the
+        # review surface needs to open.
+        scopes = [x.strip() for x in str(a.enrich).split(",") if x.strip()]
+        courts = (STATE_COURTS.get(a.state.strip().upper())
+                  if a.state else None)
+        plan = []
+        for sc in scopes:
+            todo = oversight.cases_needing_parties(sc, limit=a.limit,
+                                                   courts=courts)
+            plan.append((sc, todo))
+            reqs = -(-len(todo) // ID_CHUNK)
+            print(f"  {sc:12s} {len(todo):>7,} cases -> {reqs:>5,} requests "
+                  f"@ {a.delay}s = ~{reqs * a.delay / 3600:.1f}h")
+        total = sum(-(-len(t) // ID_CHUNK) for _, t in plan)
+        print(f"  {'TOTAL':12s} {sum(len(t) for _, t in plan):>7,} cases -> "
+              f"{total:>5,} requests = ~{total * a.delay / 3600:.1f}h")
+        if not total:
+            print("nothing to enrich" + (f" for {a.state}" if a.state else ""))
             return
-        reqs = -(-len(todo) // ID_CHUNK)
-        print(f"{len(todo):,} cases to enrich -> {reqs:,} requests "
-              f"@ {a.delay}s = ~{reqs * a.delay / 3600:.1f}h")
         if a.dry_run:
             return
-        st = enrich_ids(todo, delay=a.delay, token=a.token)
-        print()
-        print(f"{st['asked']:,} asked, {st['answered']:,} answered, "
-              f"{st['silent']:,} silent, {st['parties']:,} party rows added")
-        if st["silent"]:
-            print("  'silent' = the search index does not hold that docket. "
-                  "Marked asked, not retried.")
+        for sc, todo in plan:
+            if not todo:
+                continue
+            print(f"\n=== enriching scope '{sc}' ({len(todo):,} cases) ===",
+                  flush=True)
+            st = enrich_ids(todo, delay=a.delay, token=a.token)
+            print(f"{sc}: {st['asked']:,} asked, {st['answered']:,} answered, "
+                  f"{st['silent']:,} silent, {st['parties']:,} party rows added")
+            if st["silent"]:
+                print("  'silent' = the search index does not hold that "
+                      "docket. Marked asked, not retried.")
         print()
         print("now re-run with --police: cases move out of unknown as "
               "names arrive.")
