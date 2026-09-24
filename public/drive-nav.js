@@ -181,7 +181,7 @@ window.DriveNav = (function () {
     var leg = trip && trip.legs && trip.legs[0];
     if (!leg) { H.toast('No route found'); return; }
     shape = decode(leg.shape, 6);
-    manIdx = 0; offSince = 0;
+    manIdx = 0; offSince = 0; lastIdx = -1;
     if (line) H.map.removeLayer(line);
     line = L.polyline(shape, { color: '#3b82f6', weight: 7, opacity: 0.85 }).addTo(H.map);
     if (destMarker) H.map.removeLayer(destMarker);
@@ -192,7 +192,7 @@ window.DriveNav = (function () {
   }
 
   function stop() {
-    dest = null; trip = null; shape = []; manIdx = 0;
+    dest = null; trip = null; shape = []; manIdx = 0; lastIdx = -1;
     if (line) { H.map.removeLayer(line); line = null; }
     if (destMarker) { H.map.removeLayer(destMarker); destMarker = null; }
     var b = $('#navbar'); if (b) b.className = '';
@@ -202,14 +202,40 @@ window.DriveNav = (function () {
   /* Which maneuver are we on? Valhalla numbers each maneuver's begin and end
    * shape index, so the answer is "the one whose stretch of road contains the
    * point on the line nearest the car" - not the nearest maneuver by straight
-   * line, which on a cloverleaf picks the exit you already took. */
-  function nearestIdx(at) {
-    var bi = 0, bd = Infinity;
-    for (var i = 0; i < shape.length; i++) {
+   * line, which on a cloverleaf picks the exit you already took.
+   *
+   * 🚨 SEARCHED IN A WINDOW, NOT OVER THE WHOLE ROUTE. The routing graph is
+   * the entire United States, so a long trip's shape is tens of thousands of
+   * points, and scanning all of them once a second is tens of thousands of
+   * haversines a second on a phone that is also decoding camera frames. A car
+   * moves a few points along the line per second, so only the stretch around
+   * where it was last needs looking at.
+   *
+   * The full scan stays as the fallback for the two cases the window cannot
+   * answer: the first fix after a route is drawn, and a driver who has left
+   * the corridor entirely - which is exactly when being off-route has to be
+   * detected rather than missed. */
+  var lastIdx = -1;
+  function scan(at, from, to) {
+    var bi = from, bd = Infinity;
+    for (var i = from; i < to; i++) {
       var d = H.haversine(at[0], at[1], shape[i][0], shape[i][1]);
       if (d < bd) { bd = d; bi = i; }
     }
     return { i: bi, d: bd };
+  }
+  function nearestIdx(at) {
+    var W = 250;                       // points either side; ~1-2 km of road
+    if (lastIdx >= 0) {
+      var r = scan(at, Math.max(0, lastIdx - W), Math.min(shape.length, lastIdx + W));
+      // Trust the window only while the car is plausibly ON the line. Once it
+      // is not, the answer may simply be the nearest point of the wrong
+      // stretch, so fall through and look at everything.
+      if (r.d < 200) { lastIdx = r.i; return r; }
+    }
+    var full = scan(at, 0, shape.length);
+    lastIdx = full.i;
+    return full;
   }
 
   function banner() {
