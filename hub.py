@@ -880,6 +880,27 @@ def _cam_display_name(nd: dict) -> str:
     return " ".join(name.split()) or str(nd.get("id") or "")
 
 
+def _slim_node(rec: dict) -> dict:
+    """One camera, without the keys that say nothing and the digits that lie.
+
+    Null keys are dropped (JS reads a missing key and a null key identically
+    for every check the clients make), coordinates are rounded to five decimals
+    - about a metre, against a position that was jittered by far more than that
+    before it got here - and timestamps to whole seconds.
+    """
+    out = {}
+    for k, v in rec.items():
+        if v is None:
+            continue
+        if k in ("lat", "lon"):
+            out[k] = round(v, 5)
+        elif k in ("last_seen", "last_beat"):
+            out[k] = int(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _public_rows(rows: list[dict]) -> list[dict]:
     # 🚨 DROP THE NULLS. A sighting row has 31 columns and only ~12 are ever set,
     # so 19 of them ship as `"plate_text":null` on every row of every response.
@@ -1155,12 +1176,14 @@ class Handler(BaseHTTPRequestHandler):
         if key and code == 200:
             with Handler._MICRO_LOCK:
                 Handler._MICRO[key] = (time.time(), body)
+                Handler._MICRO_STALE[key] = body
                 # Bounded: the key includes the query string, and `since=` moves
                 # every few seconds, so an unbounded dict is a slow leak.
                 if len(Handler._MICRO) > 200:
                     for k in sorted(Handler._MICRO,
                                     key=lambda k: Handler._MICRO[k][0])[:80]:
                         Handler._MICRO.pop(k, None)
+                        Handler._MICRO_STALE.pop(k, None)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1618,6 +1641,11 @@ class Handler(BaseHTTPRequestHandler):
     # entered here: caching a plate search would build the record of who looked
     # up what that no-store exists to prevent.
     _MICRO: dict = {}
+    #: Last good body per cache key, kept with NO expiry. _MICRO answers "is
+    #: this fresh"; this answers "was there ever an answer" - which is the only
+    #: question a follower whose leader is late can usefully ask. Bounded the
+    #: same way _MICRO is, and holding bytes that were already public.
+    _MICRO_STALE: dict = {}
     _MICRO_LOCK = threading.Lock()
     # key -> Event, held by whichever thread is currently computing it.
     _MICRO_FLIGHT: dict = {}
@@ -1762,13 +1790,36 @@ class Handler(BaseHTTPRequestHandler):
 
         if not mine:
             # ⚠️ BOUNDED WAIT. If the leader dies or is unusually slow, a
-            # follower must fall through and do the work itself rather than hang
-            # - a cache that can wedge a request is worse than no cache.
+            # follower must not hang for ever - a cache that can wedge a
+            # request is worse than no cache.
             leader.wait(timeout=min(ttl + 5.0, 20.0))
             hit = Handler._MICRO.get(key)
             if hit and time.time() - hit[0] < ttl + 5.0:
                 return self._send(200, hit[1], "application/json")
-            return self._gated(self._do_GET_inner, self._route_label(p))
+            # 🚨 A FOLLOWER THAT GIVES UP MUST NOT JOIN A STAMPEDE. THIS LINE
+            # USED TO READ `return self._gated(...)`, AND THAT IS WHAT TOOK THE
+            # MAP DOWN TWICE ON 2026-09-24.
+            #
+            # The reasoning was "do the work yourself rather than hang", which
+            # is right for ONE straggler and catastrophic for fifty. Measured
+            # on this box, against the live database: the map's full sweep
+            # takes 0.092 s alone, 2.98 s with eight running, and 57.6 s with
+            # forty-seven - building 126,000 dicts per answer, all contending
+            # on one interpreter lock. So every follower that timed out made
+            # the next leader slower, which timed out more followers. The
+            # thread dump showed exactly that: 47 threads inside one query with
+            # identical arguments, 231 queued behind them.
+            #
+            # Stale data beats a stampede, and beats an error. The last good
+            # answer for this key is kept for exactly this moment: a map
+            # showing sightings from a minute ago is doing its job, while a map
+            # showing "reconnecting" is not.
+            stale = Handler._MICRO_STALE.get(key)
+            if stale is not None:
+                return self._send(200, stale, "application/json")
+            # Nothing to serve at all - refuse rather than pile on. 503 is
+            # honest and the client already retries.
+            return self._too_busy()
 
         try:
             # Captured in _send rather than by threading a key through
@@ -3122,7 +3173,23 @@ class Handler(BaseHTTPRequestHandler):
                                        > now() - db.beat_window(n["kind"])),
                     }
                     out.append(rec)
-                return self._json(out)
+                # 🚨 THE SAME NULL-DROP THE SIGHTINGS FEED ALREADY LEARNED.
+                #
+                # _public_rows cut that feed by 56% simply by not shipping keys
+                # whose value is null, and this route - the other big one, and
+                # the one with a 427-second worst case on record - never got
+                # the same treatment. Measured 2026-09-24 on the live fleet of
+                # 14,416 cameras: span_source is null on 14,352 of them,
+                # road_name on 14,332, span on 14,352, and lat/lon on 1,439.
+                # Every one of those was being spelled out in full.
+                #
+                # Coordinates are rounded to five decimals (about a metre) and
+                # timestamps to whole seconds. A volunteer's position is
+                # deliberately JITTERED before it reaches this line, so the
+                # eleven decimal places a float prints were describing an
+                # accuracy the number does not have - and claiming precision
+                # that is not there is worse than costing the bytes.
+                return self._json([_slim_node(r) for r in out])
 
             if p == "/api/sightings":
                 since = float(q.get("since", [now() - 3600])[0])
