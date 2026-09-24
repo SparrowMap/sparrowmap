@@ -924,7 +924,69 @@ _POLICE_RE = re.compile(
 # Prison and jail staff. Law enforcement, different institution.
 _CORRECTIONS_RE = re.compile(
     r"\bcorrection|\bwarden\b|\bprison\b|\bjail\b|\bpenitentiary\b|\bmdoc\b"
-    r"|\bdepartment\s+of\s+corrections\b|\bparole\b|\bprobation\b", re.I)
+    r"|\bdepartment\s+of\s+corrections\b|\bparole\b|\bprobation\b"
+    # 🚨 FEDERAL PRISONS TOO. `\bprison\b` does NOT match "Prisons", so
+    # "Bureau of Prisons" fell straight through to the federal category and
+    # took a third of it along. The INSTITUTION decides this, not which
+    # government runs it.
+    r"|\bprisons\b|\bbureau\s+of\s+prisons\b|\bb\.?o\.?p\.?\b"
+    r"|\bfederal\s+correctional\b|\bf\.?c\.?i\.?\b", re.I)
+
+# 🇺🇸 FEDERAL law enforcement. His instruction 2026-09-24: "add them all."
+#
+# 🚨 THIS IS A DIFFERENT STATUTE, NOT A LONGER LIST OF RANKS. Section 1983
+# reaches only people acting under colour of STATE law, so a federal agent
+# cannot be sued under it at all - they are sued under BIVENS (Bivens v. Six
+# Unknown Named Agents, 1971) and under the Federal Tort Claims Act. That is
+# why the national load, whose cause filter is 1983, held 1.79M cases and only
+# 72 of them named a federal agency. The federal cases were never missing;
+# they arrived through the nature-of-suit filter and sat unclassified because
+# this file only knew words like "Deputy Sheriff".
+# Measured 2026-09-24, already loaded and waiting: 8,020 Bivens, 1,430 FTCA.
+#
+# ⚠️ Bivens has been narrowed hard by the Supreme Court (Egbert v. Boule,
+# 2022), so there are FEWER federal cases than the same conduct by a local
+# officer would produce. That is a finding about accountability, not a gap in
+# this data, and the counts should never be presented as if it were.
+_FEDERAL_RE = re.compile(
+    # agencies, written the way PACER writes them and the way people abbreviate
+    r"\bfederal\s+bureau\s+of\s+investigation\b|\bf\.?b\.?i\.?\b"
+    r"|\bhomeland\s+security\b|\bd\.?h\.?s\.?\b"
+    r"|\bimmigration\s+and\s+customs\s+enforcement\b|\bi\.?c\.?e\.?\b"
+    r"|\bhomeland\s+security\s+investigations\b|\bh\.?s\.?i\.?\b"
+    r"|\bcustoms\s+and\s+border\s+protection\b|\bc\.?b\.?p\.?\b"
+    r"|\bborder\s+patrol\b"
+    r"|\bdrug\s+enforcement\s+administration\b|\bd\.?e\.?a\.?\b"
+    r"|\bbureau\s+of\s+alcohol,?\s+tobacco\b|\ba\.?t\.?f\.?\b"
+    r"|\bunited\s+states\s+marshals?\b|\bu\.?s\.?\s+marshals?\s+service\b"
+    r"|\bsecret\s+service\b"
+    # 🚨 NO BUREAU OF PRISONS HERE, AND NO BARE IRS. Both were in the first
+    # draft and both were wrong on this project's OWN rules.
+    # BOP is the federal mirror of MDOC: law enforcement, DIFFERENT
+    # institution, and `corrections` exists precisely to keep prison staff
+    # out of the street-policing queue. Measured: it was 3,652 of the first
+    # 9,863 federal cases - more than a third of the category, misfiled.
+    # A bare "Internal Revenue Service" defendant is a tax dispute, not a
+    # use of force; only the criminal-investigation arm belongs here. Noise
+    # costs VOLUNTEER ATTENTION, the most expensive thing this project
+    # spends - the same reasoning that cut 45% of the nature-of-suit tier.
+    r"|\birs\s+criminal\s+investigation\b"
+    r"|\btransportation\s+security\s+administration\b|\bt\.?s\.?a\.?\b"
+    r"|\bpostal\s+inspec|\bpark\s+police\b|\bcapitol\s+police\b"
+    r"|\bfish\s+and\s+wildlife\s+service\b"
+    r"|\bnaval\s+criminal\s+investigative\b|\bn\.?c\.?i\.?s\.?\b"
+    r"|\bdiplomatic\s+security\b|\bair\s+marshal"
+    # federal ranks and roles
+    r"|\bspecial\s+agent\b|\bdeputy\s+u\.?s\.?\s+marshal\b"
+    r"|\bdeputy\s+united\s+states\s+marshal\b|\bborder\s+patrol\s+agent\b"
+    r"|\bimmigration\s+officer\b|\bdeportation\s+officer\b"
+    r"|\bfederal\s+agent\b|\btask\s+force\s+officer\b",
+    re.I)
+
+#: The statutes a federal officer is actually sued under. Used to RECOGNISE a
+#: federal case, never to filter one out: a joint task-force case is routinely
+#: pleaded under 1983 and Bivens together.
+_FEDERAL_CAUSE_RE = re.compile(r"bivens|\b2671\b|\b1346\b|tort\s+claim", re.I)
 
 # State actors that are emphatically NOT police, used only to say 'other' when
 # nothing police-shaped is present.
@@ -937,7 +999,9 @@ _NONPOLICE_RE = re.compile(
 def classify_case_police(case_name: str, cause: str, nos: str,
                          party_names=(), agency_kinds=(),
                          has_rank: bool = False) -> tuple:
-    """(verdict, why) for one case. verdict: police | corrections | other | None.
+    """(verdict, why) for one case.
+
+    verdict: police | federal | corrections | other | None.
 
     🚨 None MEANS "NO EVIDENCE YET", NOT "NO".
     The commonest caption in this database is two surnames, which says nothing
@@ -947,6 +1011,31 @@ def classify_case_police(case_name: str, cause: str, nos: str,
     """
     hay = " | ".join([case_name or ""] + [p or "" for p in party_names])
     kinds = set(agency_kinds or ())
+
+    # 🚨 FEDERAL IS TESTED FIRST, AND ONLY WHEN NOTHING STATE-SHAPED IS PRESENT
+    # DOES IT STAND ALONE. A joint task force - an FBI agent and three city
+    # detectives on one raid - is the commonest way a federal name appears
+    # here, and calling that case 'federal' would quietly remove a local police
+    # department from the police queue. So a case carrying BOTH signals stays
+    # 'police', which is the queue a reviewer actually works, and the federal
+    # signal is recorded beside it rather than instead of it.
+    fed = _FEDERAL_RE.search(hay)
+    # 🚨 A STATE SIGNAL ONLY COUNTS IF IT SURVIVES WITH THE FEDERAL PHRASES
+    # REMOVED. "Deputy U.S. Marshal Boyd" contains the word "deputy", and
+    # "marshal", both of which _POLICE_RE reads as local law enforcement - so
+    # tested naively, every federal marshal is filed as a county deputy.
+    #
+    # This is the same defect that filed a SEATTLE POLICE car as STATE POLICE
+    # on 2026-09-23: a short generic token beating a longer specific phrase
+    # that contains it. The general fix is to blank what the specific phrase
+    # already explained and ask the remainder, rather than to special-case
+    # the words that collided this week.
+    masked = _FEDERAL_RE.sub(" ", hay)
+    state_shaped = (bool(kinds & {"police", "sheriff"})
+                    or bool(_POLICE_RE.search(masked))
+                    or (has_rank and bool(_POLICE_RE.search(masked))))
+    if fed and not state_shaped:
+        return "federal", f"names {fed.group(0).strip().lower()!r}"
 
     if has_rank:
         return "police", "a party carries a police rank"
@@ -993,8 +1082,16 @@ def classify_police(dry_run: bool = False, state_courts=None) -> dict:
                        "JOIN agencies a ON a.id = ca.agency_id"):
         akinds.setdefault(r["docket_id"], set()).add(r["kind"])
 
-    stat = {"examined": len(rows), "police": 0, "corrections": 0,
-            "other": 0, "unknown": 0, "changed": 0}
+    # 🚨 COUNT WHATEVER THE CLASSIFIER RETURNS, DO NOT LIST THE VERDICTS TWICE.
+    # This was a fixed dict of the four verdicts that existed when it was
+    # written, so adding 'federal' made it raise KeyError on the first federal
+    # case - a second copy of a list that has to agree with another one, which
+    # is the same drift --purge and --reclassify already avoid by re-using the
+    # loader's own predicates.
+    from collections import defaultdict
+    stat = defaultdict(int)
+    stat["examined"] = len(rows)
+    stat["changed"] = 0
     batch = []
     for r in rows:
         did = r["docket_id"]

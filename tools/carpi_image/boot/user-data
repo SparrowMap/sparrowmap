@@ -1,0 +1,23 @@
+#cloud-config
+# SparrowMap car kit. You do not need to edit this file: the settings are in
+# sparrowmap.txt next to it.
+#
+# 🚨 IF YOU FLASHED THIS WITH RASPBERRY PI IMAGER, SKIP ITS "CUSTOMISATION"
+# STEP. Imager writes its own user-data over this one, and then nothing below
+# runs and the Pi boots as a plain Raspberry Pi.
+
+hostname: sparrow-dashcam
+
+# The only account. Password locked unless login_password is set in
+# sparrowmap.txt. No default user.
+users:
+  - name: sparrow
+    gecos: SparrowMap dashcam
+    groups: [video, dialout, plugdev]
+    shell: /bin/bash
+    lock_passwd: true
+
+ssh_pwauth: true
+
+runcmd:
+  - [bash, /boot/firmware/sparrowmap/install.sh]

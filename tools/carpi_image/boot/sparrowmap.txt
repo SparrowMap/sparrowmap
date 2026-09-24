@@ -1,0 +1,39 @@
+# SparrowMap dashcam settings
+#
+# Fill in your phone's hotspot below, save this file, put the card in the Pi,
+# turn your hotspot on, and power the Pi. The first start downloads about
+# 100 MB and takes 10-20 minutes. After that it starts with the truck.
+#
+# Lines that start with # are notes. Only change what is after the = sign.
+
+# ---- Your phone's hotspot (required) ----
+hotspot_name=
+hotspot_password=
+
+# ---- Your country, two letters: US, CA, GB, DE, AU ... ----
+# Wi-Fi stays switched off until this matches where you are.
+country=US
+
+# ---- A name for this camera ----
+camera_name=Dashcam
+
+# ================= You can leave everything below alone =================
+
+# Which camera. "auto" uses the first USB webcam it finds. For a Reolink
+# on Ethernet use its rtsp:// address instead (see map.sparrowmap.com/carpi).
+camera=auto
+
+# yes = read plates on the Pi. Read "Reading plates" on map.sparrowmap.com/carpi
+# first. A webcam cannot read plates on moving cars, so leave this at no.
+plates=no
+
+# yes = once the camera is registered, the card is made read-only, so cutting
+# the power (turning the truck off) can never corrupt it. It restarts once
+# when it does this.
+protect_card=yes
+
+# Empty = nobody can log in to the Pi. Set a password to allow SSH as the
+# user "sparrow". Anyone holding this card can read this file.
+login_password=
+
+hub=https://map.sparrowmap.com
