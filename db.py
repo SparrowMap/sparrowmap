@@ -422,6 +422,21 @@ def connect() -> sqlite3.Connection:
         # one of them - a single setting applied once by hand looks like a fix
         # and survives until the next restart.
         conn.execute("PRAGMA journal_size_limit=134217728")   # 128 MB
+        # 🚨 NO REQUEST THREAD EVER PAYS FOR A CHECKPOINT.
+        #
+        # By default SQLite checkpoints INLINE, inside whichever commit happens
+        # to cross the threshold - so a camera posting a sighting can find
+        # itself folding the whole log back while holding locks, and every
+        # reader waits behind it. Measured 2026-09-24: with the log at 186 MB a
+        # single checkpoint took 15.02 SECONDS, which is longer than the gate
+        # that readers queue on, so the request that triggers one takes the map
+        # down with it.
+        #
+        # So writers never checkpoint, and the janitor thread owns it on a
+        # timer (hub.py _checkpointer). The risk this trades into is a log that
+        # grows for ever if that thread ever stops - which is exactly why
+        # wal_mb is published in /api/health.
+        conn.execute("PRAGMA wal_autocheckpoint=0")
         # 🚨 THE SCHEMA IS A PROPERTY OF THE DATABASE, NOT OF THE CONNECTION,
         # SO RUNNING IT PER THREAD IS BOTH POINTLESS AND EXPENSIVE.
         #

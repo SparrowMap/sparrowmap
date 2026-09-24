@@ -5574,11 +5574,34 @@ def _janitor() -> None:
                 print(f"[janitor] purged {rep}")
         except Exception:
             traceback.print_exc()
+        time.sleep(600)
+
+
+def _checkpointer() -> None:
+    """Fold the write-ahead log back, often, on a thread of its own.
+
+    🚨 OFTEN IS THE WHOLE POINT, AND IT IS WHY THIS IS NOT IN _janitor.
+    The janitor runs every ten minutes; measured 2026-09-24, this box writes
+    ~185 MB of log in that time, and a checkpoint of a log that big takes 15
+    SECONDS - longer than the gate readers queue on, so the checkpoint itself
+    becomes the outage. Run every 30 seconds the log stays small, each
+    checkpoint is milliseconds, and no request ever waits behind one.
+
+    Writers no longer checkpoint inline at all (PRAGMA wal_autocheckpoint=0 in
+    db.connect), so this thread is the ONLY thing folding the log back. If it
+    stops, the log grows without bound - which is why a failure here is printed
+    loudly and wal_mb is on /api/health rather than this being silent.
+    """
+    while True:
         try:
-            db.checkpoint_wal()
+            rep = db.checkpoint_wal()
+            # Only worth a line when it did something notable or could not run:
+            # a healthy checkpoint every 30s would otherwise be pure log noise.
+            if rep.get("mode") == "busy" or rep.get("before_mb", 0) > 64:
+                print(f"[wal] {rep}", flush=True)
         except Exception:
             traceback.print_exc()
-        time.sleep(600)
+        time.sleep(30)
 
 
 def _simulator() -> None:
@@ -5668,6 +5691,7 @@ def main() -> None:
 
     db.init()
     threading.Thread(target=_janitor, daemon=True).start()
+    threading.Thread(target=_checkpointer, daemon=True).start()
     if args.sim:
         print("!! SIMULATOR ON - this map will contain FAKE sightings (source=synthetic)")
         threading.Thread(target=_simulator, daemon=True).start()
