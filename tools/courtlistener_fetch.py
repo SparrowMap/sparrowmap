@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import os
 import sys
@@ -273,10 +274,28 @@ def _get(url: str, token: str = "", timeout: int = 60) -> dict:
                 raise
             last, why = e, ("429 throttled" if e.code == 429
                             else f"HTTP {e.code} upstream")
-        except (urllib.error.URLError, TimeoutError) as e:
+        except (urllib.error.URLError, TimeoutError,
+                http.client.HTTPException, OSError) as e:
             # A blip must not end a multi-hour sweep. The cursor is
             # checkpointed either way, but retrying is cheaper than resuming.
-            last, why = e, f"network: {e}"
+            #
+            # 🚨 THE LIST USED TO BE (URLError, TimeoutError) AND THAT KILLED A
+            # TWELVE-DAY JOB. On 2026-09-13 the police enrichment died on
+            # `http.client.RemoteDisconnected: Remote end closed connection
+            # without response` - which derives from HTTPException, NOT from
+            # URLError, so it went straight past this handler and out of the
+            # process. The scheduled task is logon-triggered, so nothing
+            # restarted it and the run sat at 46.9% for eight days looking
+            # finished.
+            #
+            # The lesson is the shape, not the exception: this code went to
+            # great lengths to survive the ANTICIPATED failure (a 429, held
+            # patiently for ever) and fell over on the most mundane one there
+            # is - a dropped connection. For an unattended multi-day job that
+            # checkpoints after every page, ANY transient network error is a
+            # wait, never an exit. OSError covers connection resets and socket
+            # errors; HTTPException covers malformed and truncated responses.
+            last, why = e, f"network: {e.__class__.__name__}: {e}"
         if attempt < len(_BACKOFF):
             wait = _BACKOFF[attempt]
             attempt += 1
