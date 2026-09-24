@@ -1054,7 +1054,18 @@ class Handler(BaseHTTPRequestHandler):
                                 # when a camera is added, so it is the cheapest
                                 # thing on the map to cache.
                                 "/api/places",
-                                "/api/heat"})
+                                "/api/heat",
+                                # 🚨 ADDED 2026-09-24, THE SAME CLASS OF BUG AS
+                                # THE SIGHTINGS STAMPEDE AND FOUND THE SAME WAY.
+                                # /api/drive/reports is read by every phone in
+                                # driving mode on a timer, its answer is public
+                                # and byte-identical for all of them, and it was
+                                # the only uncached route in the top six holders
+                                # of a permit - measured at 15.2 s. A route
+                                # being small is not a reason to leave it out of
+                                # the collapse: what costs is how many callers
+                                # arrive at once, not how big the answer is.
+                                "/api/drive/reports"})
 
     def _cache_control(self) -> str:
         """Per-path caching policy.
@@ -1104,7 +1115,10 @@ class Handler(BaseHTTPRequestHandler):
             # collapsing a crowd into one origin hit every few seconds (stats and
             # the node list are small, cheap queries). The heavier per-row
             # sighting feed keeps a longer window; it is the expensive one.
-            if p in ("/api/stats", "/api/health"):
+            if p in ("/api/stats", "/api/health", "/api/drive/reports"):
+                # Live-ish and cheap to re-ask for: three seconds still
+                # collapses a crowd arriving together, which is the whole
+                # point, while keeping a driving radar current.
                 return "public, max-age=3"
             # 🚨 /api/nodes IS NOT A LIVE COUNTER AND MUST NOT BE PRICED LIKE
             # ONE. It sat on max-age=3 because it was grouped with the counters
