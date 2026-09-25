@@ -49,9 +49,12 @@ US_LANE_PERIOD_M = 12.192
 
 #: Refuse below this many detected dash edges. Three points exactly determine
 #: the three unknowns, which means a perfect fit and NO residual - the fit
-#: cannot be checked at all. Four is the first number that can disagree with
-#: itself, and disagreement is the only evidence of accuracy there is.
-MIN_EDGES = 4
+#: cannot be checked at all. Raised 4 -> 6 on 2026-09-24 after a road with no
+#: painted line produced two chance marks that lay on a line and were enough
+#: to build a ruler out of noise. Six edges (three dashes) is the first point
+#: with real redundancy, and disagreement is the only evidence of accuracy
+#: there is.
+MIN_EDGES = 6
 
 #: Largest tolerable disagreement between the fitted map and the dash spacings
 #: it was built from, as a fraction. 4% of a 40 ft period is about 0.5 m.
