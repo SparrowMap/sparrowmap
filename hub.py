@@ -3829,7 +3829,27 @@ class Handler(BaseHTTPRequestHandler):
                     out.append({"id": sid,
                                 "vclass": meta.get("vclass") or row.get("vclass"),
                                 "score": meta.get("score")})
-                return self._json({"parked": out})
+                # 🚨 ASK FOR THE GOOD PICTURE HERE TOO, NOT ONLY ON A BEAT.
+                #
+                # The /app camera answers `want_full` on its heartbeat and so
+                # gets its published patrol cars re-uploaded un-degraded.
+                # DRIVING MODE NEVER BEATS - it polls this route instead - so
+                # the only way a dashcam photo was ever improved was the driver
+                # tapping "yes" in the popup while driving. Measured 2026-09-25
+                # on the live box: of 26 published police sightings from drive
+                # mode, 13 were still the 200 px preview with the plate band
+                # painted out, permanently.
+                #
+                # A published government vehicle is meant to carry a LEGIBLE
+                # plate - that photograph is the public record - so asking only
+                # when a human happens to answer a popup at 40 mph is asking
+                # for half of them to be lost.
+                want = []
+                try:
+                    want = db.wants_fullres(nd["id"])
+                except Exception as exc:
+                    print(f"[parked] wants_fullres failed for {nd['id']}: {exc}")
+                return self._json({"parked": out, "want_full": want})
 
             if p == "/api/node/key":
                 # 🚨 A CAMERA REGISTERS ITS OWN SIGNING KEY, WITHOUT RE-ENROLLING.

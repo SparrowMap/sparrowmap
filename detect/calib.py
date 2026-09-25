@@ -51,10 +51,12 @@ US_LANE_PERIOD_M = 12.192
 #: the three unknowns, which means a perfect fit and NO residual - the fit
 #: cannot be checked at all. Raised 4 -> 6 on 2026-09-24 after a road with no
 #: painted line produced two chance marks that lay on a line and were enough
-#: to build a ruler out of noise. Six edges (three dashes) is the first point
-#: with real redundancy, and disagreement is the only evidence of accuracy
-#: there is.
-MIN_EDGES = 6
+#: to build a ruler out of noise. Raised again 6 -> 10 when eight real Iowa
+#: cameras at night produced one FALSE POSITIVE - streetlights collinear by
+#: chance, fitted to 3.8% and declared usable. Ten edges (five dashes) makes
+#: the pattern heavily over-determined; disagreement is the only evidence of
+#: accuracy there is.
+MIN_EDGES = 10
 
 #: Largest tolerable disagreement between the fitted map and the dash spacings
 #: it was built from, as a fraction. 4% of a 40 ft period is about 0.5 m.

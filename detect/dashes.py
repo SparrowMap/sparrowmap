@@ -81,7 +81,17 @@ MAX_DASH_FRAC = 0.22
 #: line's own length. A kerb running parallel is the thing this rejects.
 MAX_OFFLINE = 0.06
 
-#: 🚨 THREE DASHES, NOT TWO, AND THE REASON IS REDUNDANCY RATHER THAN TASTE.
+#: 🚨 FIVE DASHES, AND THE NUMBER WAS SET BY A FALSE POSITIVE ON REAL FOOTAGE.
+#: Pointed at eight real Iowa I-80 cameras at night (2026-09-24), seven
+#: correctly refused and the one that passed was WRONG: streetlights and
+#: reflections across a parking area, collinear by chance, fitted to 3.8% and
+#: declared usable. Three dashes is six edges against three unknowns, and a
+#: flexible projective fit can absorb that much with points that mean nothing.
+#: Five dashes is ten edges - the pattern assumption becomes heavily
+#: over-determined, and a run of five evenly-spaced collinear accidents is far
+#: rarer than a run of three.
+#:
+#: The earlier reasoning, still true as far as it went:
 #: Two dashes give four edges against three unknowns - one degree of freedom,
 #: so almost anything fits and the residual barely moves. Measured: a road
 #: with NO painted line at all produced two chance marks that lay on a line,
@@ -89,7 +99,7 @@ MAX_OFFLINE = 0.06
 #: edges and three degrees of freedom, which is the first point at which the
 #: fit can meaningfully disagree with itself - and disagreement is the only
 #: evidence of accuracy this file has.
-MIN_DASHES = 3
+MIN_DASHES = 5
 
 
 def median_road(frames: list):
@@ -188,6 +198,30 @@ def _axis(comps, frame_diag: float):
     return ux, uy, mx, my, best
 
 
+#: Paint does not glow. Below this mean brightness the bright things in a
+#: frame are LIGHTS - headlamps, streetlamps, reflective studs, glare on wet
+#: tarmac - and the detector is no longer looking at markings at all. This is
+#: the guard that the Iowa night run showed was missing.
+MIN_SCENE_MEAN = 45.0
+
+#: A night scene is mostly dark with a few very bright points; a daylit road is
+#: broadly lit. If almost nothing is mid-toned, this is not a lit surface.
+MIN_MIDTONE_FRAC = 0.15
+
+
+def _is_lit(road) -> tuple:
+    """Is this a lit surface, or a dark field with lamps in it?"""
+    import numpy as np
+    mean = float(road.mean())
+    mid = float(((road > 60) & (road < 200)).mean())
+    if mean < MIN_SCENE_MEAN:
+        return False, f"scene too dark (mean {mean:.0f}) - paint does not glow"
+    if mid < MIN_MIDTONE_FRAC:
+        return False, (f"only {mid:.0%} of the frame is mid-toned - lights on "
+                       f"a dark field, not a lit road")
+    return True, ""
+
+
 def find(frames: list, debug: bool = False):
     """Dash edges in pixels, ready for calib.fit.
 
@@ -197,8 +231,12 @@ def find(frames: list, debug: bool = False):
     road = median_road(frames)
     if road is None:
         return ([], {"why": "no frames"}) if debug else []
+    lit, why = _is_lit(road)
+    if not lit:
+        info = {"why": why, "lit": False}
+        return ([], info) if debug else []
     comps = _components(road)
-    info = {"components": len(comps)}
+    info = {"components": len(comps), "lit": True}
     if len(comps) < MIN_DASHES:
         info["why"] = f"only {len(comps)} bright elongated marks"
         return ([], info) if debug else []

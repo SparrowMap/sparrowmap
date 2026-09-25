@@ -676,6 +676,34 @@
    * newest FULL_KEEP keep theirs; the older ones stay answerable and simply
    * publish the small crop, which is what every one of them did before. */
   var pending=[], PEND_MAX=24, PEND_TTL_MS=12*60*1000, FULL_KEEP=8;
+  /* 🚨 THE HOLD FOR THE HUB IS A DIFFERENT CLOCK FROM THE HOLD FOR THE DRIVER,
+   * AND CONFLATING THEM LOSES THE PICTURE.
+   *
+   * `pending` exists to ask the DRIVER "was that a cop?", so it is short on
+   * purpose - 12 minutes, because a popup about a car from an hour ago is
+   * useless at 40 mph. But the HUB may ask for the un-degraded copy for a full
+   * hour (db.FULLRES_WINDOW_S), because a sighting waits on the head or on a
+   * reviewer. Holding both on the driver's clock means the crop is evicted
+   * long before the hub gets round to asking.
+   *
+   * sparrow-app.js hit exactly this and fixed it there - "At 15 min the crop
+   * was evicted before the hub ever asked, so every phone-camera police
+   * sighting published at 200px (measured: 0 of 12 had a full crop)" - and the
+   * fix was never ported to this page, which is why half of drive mode's
+   * published patrol cars still carry a painted-out plate.
+   *
+   * So the good crop lives in its own map on the SERVER's clock. ~48 entries
+   * of a 900px JPEG is a few megabytes, which sparrow-app.js already spends. */
+  var heldFull=new Map(), FULL_TTL_MS=60*60*1000, FULL_HOLD=48;
+  function holdFull(id, data){
+    if(!id||!data) return;
+    heldFull.set(id,{data:data, at:Date.now()});
+    while(heldFull.size>FULL_HOLD) heldFull.delete(heldFull.keys().next().value);
+  }
+  function reapFull(){
+    var cut=Date.now()-FULL_TTL_MS;
+    heldFull.forEach(function(v,k){ if(v.at<cut) heldFull.delete(k); });
+  }
   function pollParked(){
     if(!(driveNode&&driveNode.token)) return;
     var now=Date.now();
@@ -689,6 +717,15 @@
       body:JSON.stringify({node_id:driveNode.id,
                            ids:pending.map(function(p){return p.id;})})})
       .then(function(r){return r.json();}).then(function(r){
+        // 🚨 HAND OVER THE GOOD PICTURE WITHOUT WAITING FOR A HUMAN.
+        // Until now the only way a dashcam patrol-car photo got its plate back
+        // was the driver tapping "yes" in the popup - so a sighting published
+        // any other way (the head, a reviewer on /rv) kept the 200px preview
+        // with the plate band painted out, for ever. Measured on the live box:
+        // 13 of 26 published police sightings from drive mode were still that
+        // preview. A published government vehicle is supposed to carry a
+        // legible plate; that photograph IS the public record.
+        sendFullFor(r&&r.want_full);
         var hit=(r&&r.parked||[])[0];
         if(!hit) return;
         // Newest wins, and the answered one leaves the list either way.
@@ -700,6 +737,35 @@
   }
 
   var askSid=null, askFull=null;
+  /* Answer the hub's want_full list from the crops this page already holds.
+     One at a time, and an id we have forgotten is simply skipped - a phone
+     that no longer has the picture says nothing rather than apologising. */
+  var sendingFull=false;
+  function sendFullFor(ids){
+    if(sendingFull || !ids || !ids.length || !(driveNode&&driveNode.token)) return;
+    reapFull();
+    var pid=null, data=null;
+    for(var i=0;i<ids.length;i++){
+      var h=heldFull.get(ids[i]);
+      if(h){ pid=ids[i]; data=h.data; break; }
+    }
+    if(!pid) return;
+    sendingFull=true;
+    var body={node_id:driveNode.id,id:pid,snap_b64:data};
+    fetch('/api/sighting/fullres',{method:'POST',
+      headers:{'Content-Type':'application/json',
+               'Authorization':'Bearer '+driveNode.token},
+      body:JSON.stringify(body)})
+      .then(function(r){return r.json();})
+      .then(function(){
+        // Dropped whether accepted or refused: a refusal will not become an
+        // acceptance next time, and retrying for ever is how a phone spends a
+        // drive uploading one rejected picture.
+        heldFull.delete(pid); sendingFull=false;
+      })
+      .catch(function(){ sendingFull=false; });
+  }
+
   function askCop(sid, imgDataUrl, fullDataUrl){
     askSid=sid;
     // Held for the answer, not for the display: the popup deliberately shows
@@ -1544,7 +1610,7 @@ function redactPlateBand(cv, geom) {
           // the popup above could never once have fired on this client.
           // Remember what we sent, keep OUR copy of the crop (no image ever
           // comes back down), and ask.
-          else if(r.id) pending.push({id:r.id, crop:b.crop, full:b.full,
+          else if(r.id) holdFull(r.id, b.full), pending.push({id:r.id, crop:b.crop, full:b.full,
                                       at:Date.now()});
         }
       }).catch(function(){});
