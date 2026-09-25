@@ -71,7 +71,9 @@ DATA = REPO / "data" / "reid"
 #   r8-place     the livery town is corroborated against the SIGHTING'S OWN
 #                coordinates, so a dashcam (whose node has no town) can have
 #                one. State-level agencies name their state.
-REV = "r8-place"
+#   r9-digits    five-digit fleet numbers are kept; the guard and the
+#                extractor now share MAX_UNIT_DIGITS.
+REV = "r9-digits"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -252,11 +254,30 @@ def city_of(items: list, place: str | None = None,
     return None
 
 
+#: How many digits a fleet number may have. 🚨 ONE CONSTANT, USED BY BOTH THE
+#: GUARD AND THE EXTRACTOR, because they disagreed and it cost a perfect read.
+#:
+#: His catch, 2026-09-25: a patrol car with 12020 plainly painted on the roof
+#: published no markings at all. PaddleOCR had read "12020" at confidence 1.00 -
+#: the single cleanest read in the whole store - it sat mid-crop so the caption
+#: and edge tests both passed it, and then the extractor threw it away, because
+#: `\d{2,4}` with a no-digit-either-side lookaround cannot match a FIVE digit
+#: number. The guard on the line above allowed up to five. The two bounds were
+#: written separately, they drifted by one, and the failure was silent: every
+#: five-digit fleet number this network has ever seen was deleted after being
+#: read correctly.
+#:
+#: ⚠️ Roof numbers are the one marking that identifies an individual car rather
+#: than a department, so this is exactly the reading the markings row exists to
+#: carry - and 12020 is a real number on a real car, not a guess.
+MAX_UNIT_DIGITS = 5
+
+
 def units_of(items: list, size=None) -> list[tuple[str, float]]:
     out = []
     w, h = (size or (0, 0))
     for txt, sc, box in items:
-        if sc < MIN_TEXT or len(re.findall(r"\d", txt)) > 5:
+        if sc < MIN_TEXT or len(re.findall(r"\d", txt)) > MAX_UNIT_DIGITS:
             continue
         if CAPTION.search(txt) or len(txt.strip()) > 6:
             continue
@@ -264,7 +285,7 @@ def units_of(items: list, size=None) -> list[tuple[str, float]]:
         # sign sits above the car; a number painted ON the car is in the middle.
         if h and (box[1] < 0.12 * h or box[3] > 0.88 * h):
             continue
-        for m in re.finditer(r"(?<!\d)(\d{2,4})(?!\d)", txt):
+        for m in re.finditer(r"(?<!\d)(\d{2,%d})(?!\d)" % MAX_UNIT_DIGITS, txt):
             n = m.group(1)
             if n in NOT_UNITS:
                 continue

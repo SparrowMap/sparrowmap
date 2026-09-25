@@ -41,6 +41,11 @@ CASES = [
     ("real word beats 911", [mid("4715"), mid("911"), mid("SHERIFF")],  True),
     ("911 read too weakly", [mid("4715"), mid("911", 0.40)],            False),
     ("Finnish livery",     [mid("522"), mid("POLIISI")],                True),
+    # 🚨 FIVE DIGITS. His catch 2026-09-25: a roof number read at 1.00
+    # produced no markings at all, because the guard allowed five digits and
+    # the extractor matched at most four. Both are MAX_UNIT_DIGITS now.
+    ("five-digit roof no.", [mid("12020"), mid("POLICE")],              True),
+    ("five digits alone",  [mid("12020")],                              False),
 ]
 
 #: The agency a livery is published as, and the town beside it. His catch
@@ -92,6 +97,14 @@ def main() -> int:
     # 911 in the markings must never read as a unit number
     assert "911" not in [u[0] for u in link.units_of([mid("911")], (H, H))], \
         "911 must never be a unit number"
+    # A five-digit fleet number must SURVIVE the extractor and six must not:
+    # the guard and the regex have to agree, which is what MAX_UNIT_DIGITS is for.
+    assert [u[0] for u in link.units_of([mid("12020", 1.0)], (H, H))] == ["12020"], (
+        "a five-digit fleet number must be kept")
+    assert not link.units_of([mid("123456", 1.0)], (H, H)), (
+        "six digits is not a fleet number")
+    assert not link.units_of([edge("12020", 1.0)], (H, H)), (
+        "a five-digit read on the frame edge is a caption, not a car")
     total = len(CASES) + len(AGENCY_CASES)
     print(f"\n{total - bad}/{total} pass")
     return 1 if bad else 0
