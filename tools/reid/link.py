@@ -64,7 +64,9 @@ DATA = REPO / "data" / "reid"
 #                A multi-word agency now needs every one of its words. The town
 #                painted beside the agency word is published when the camera's
 #                own town corroborates it.
-REV = "r6-seattle"
+#   r7-livery    markings report the whole phrase that was read
+#                ("HICAGO POLICE"), not just the agency word.
+REV = "r7-livery"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -159,23 +161,41 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
     is the word actually READ ("POLICE", "POLIISI", "911"), so the markings row
     can say 911 rather than claim POLICE was on the car.
     """
-    best, score, seen, words = None, 0.0, None, 0
+    # 🚨 REPORT THE WHOLE PHRASE THAT WAS READ, NOT ONLY THE WORD MATCHED.
+    #
+    # His catch, 2026-09-25: a Chicago patrol car whose door plainly reads
+    # CHICAGO POLICE was published with markings of just "POLICE". The OCR had
+    # read "HICAGO POLICE" at 0.999 - the C clipped by the crop edge - and this
+    # function kept only the token it recognised. The department name is the
+    # single most identifying thing written on a patrol car, and this row
+    # exists to say what is READ off the photograph.
+    #
+    # The confidence floor is what keeps it honest. At 0.999 a reader can check
+    # the phrase against the picture; the 0.62 reads this file also sees
+    # ("POUICG", "Potiae", "331i0d") would turn the row into noise and teach
+    # people to ignore the one line that carries the evidence.
+    #
+    # ⚠️ AS READ, INCLUDING THE CLIPPED LETTER. "HICAGO POLICE" is what the
+    # photograph shows - the C really is outside the crop - and quietly
+    # correcting it to CHICAGO would be inventing a letter that was never seen.
+    FULL_PHRASE_MIN = 0.9
+    best, score, seen, words, phrase = None, 0.0, None, 0, None
     for txt, sc, _ in items:
         if sc < MIN_TEXT:
             continue
         c = clean(txt)
-        for phrase, kind in AGENCY.items():
-            n = _phrase_match(c, phrase)
+        for ph, kind in AGENCY.items():
+            n = _phrase_match(c, ph)
             if not n:
                 continue
-            # 🚨 THE MORE SPECIFIC PHRASE WINS, THEN THE BETTER READ - NOT
-            # WHICHEVER CAME FIRST. "STATE POLICE" only matches text that
-            # actually contains STATE, so preferring it over plain POLICE is
-            # safe, and it is what a reader of the photo would say.
             if (n, sc) > (words, score):
-                best, score, seen, words = kind, sc, phrase, n
+                best, score, seen, words = kind, sc, ph, n
+                tidy = " ".join(c.split())
+                phrase = (tidy if (sc >= FULL_PHRASE_MIN
+                                   and ph in tidy and len(tidy) > len(ph))
+                          else None)
     if best:
-        return best, score, seen
+        return best, score, (phrase or seen)
     for txt, sc, box in items:
         # Same placement test a unit number gets: a caption burned along the
         # frame edge saying 911 is the camera talking, not the car.
