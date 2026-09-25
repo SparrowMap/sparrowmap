@@ -265,7 +265,12 @@ def redact(row: dict, viewer: str = "anon") -> dict:
         # text. The belt is cheap and the failure mode is following somebody
         # home.
         for k in ("vehicle_tag", "tag_conf", "tag_why", "tag_rev",
-                  "markings", "markings_rev"):
+                  "markings", "markings_rev",
+                  # How the vehicle moved through the frame. On a
+                  # private car that is a trace of a specific person
+                  # passing a specific house at a specific speed, which
+                  # is precisely what this project refuses to keep.
+                  "pass_motion"):
             r.pop(k, None)
         # 🚨 AND THE PHOTOGRAPH. A private-tier row still carries `snap` (the
         # image filename, servable via /snap/<name>), and a photograph of a car

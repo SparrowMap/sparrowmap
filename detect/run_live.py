@@ -789,7 +789,31 @@ def evaluate(vp, vid) -> tuple[dict, dict, str, float]:
                 ev.update({k: v for k, v in vres.items() if not k.startswith("_")})
                 ev = visual.arbitrate(ev, vres.get("_visual"))
                 ev["_visual"] = vres.get("_visual")
+    # How it crossed the frame. Banked now, unused for now: see
+    # VehiclePass.motion - this is the TIME half of a speed, and the metres
+    # arrive when a camera is calibrated against its own road markings.
+    # Recording it from today means every pass in between can still have a
+    # speed computed afterwards.
     verdict = classify.classify({**ev, "plate_text": plate})
+    # How it crossed the frame. Banked now, unused until a camera is
+    # calibrated against its own road markings - see VehiclePass.motion.
+    #
+    # 🚨 THE FULL TRACK ONLY FOR WHAT GETS PUBLISHED. A government pass is a
+    # public record and its speed claim has to be checkable frame by frame;
+    # anonymous traffic fades in forty-five seconds and keeping a
+    # sample-by-sample path of a private car past somebody's house is the
+    # trace this project exists to refuse. Measured on the live fleet: ~79
+    # published rows a day against ~327,000 passes, so the expensive version
+    # is paid for 0.02% of them.
+    fh, fw = (vp.best_frame.shape[:2] if vp.best_frame is not None else (0, 0))
+    # ⚠️ THE VERDICT HAS NO "tier" KEY - it has `tierable` and `sightable`,
+    # and the poster derives the tier from them (see the tier line below).
+    # Asking for verdict["tier"] returns None, which is falsy, so the full
+    # track would simply never have been kept and nothing would have said so.
+    mo = vp.motion(fw, fh,
+                   full=bool(verdict.get("tierable") or verdict.get("sightable")))
+    if mo:
+        ev["pass_motion"] = json.dumps(mo, separators=(",", ":"))
     return ev, verdict, plate, agree
 
 

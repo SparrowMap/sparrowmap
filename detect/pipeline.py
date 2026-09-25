@@ -239,6 +239,77 @@ class VehiclePass:
         return (math.degrees(math.atan2(dx, -dy)) + 360.0) % 360.0
 
 
+    def motion(self, frame_w: int = 0, frame_h: int = 0,
+               full: bool = False) -> dict:
+        """How this vehicle crossed the frame: the TIME half of a speed.
+
+        🚨 THIS IS A MEASUREMENT, NOT A SPEED, AND THE DIFFERENCE IS THE WHOLE
+        POINT. Speed is distance over time. The seconds here are real - capture
+        timestamps - and so are the pixels. The METRES are missing until a
+        camera has been calibrated against the road markings in its own view
+        (US lane dashes are a federally standardised 10 ft painted / 30 ft gap,
+        which is a free ruler lying in almost every frame).
+
+        Nothing here is ever written to `speed_mph`. That column is carried all
+        the way out to the public export, so a number in it is PUBLISHED, and
+        an uncalibrated estimate published against a named officer is an
+        accusation this project cannot support. Banking the measurement now
+        means every pass recorded before calibration exists can still have a
+        speed computed afterwards; not banking it throws that away for ever.
+
+        🚨 `full` KEEPS EVERY SAMPLE, AND IT IS WHAT MAKES THE CLAIM CHECKABLE.
+        His call: a sighting should be able to SHOW the lines, the
+        measurements and the arithmetic, not just assert a number. Two points
+        can only ever produce an average; the whole track is what lets a reader
+        see the vehicle accelerate, see which samples the calculation used, and
+        disagree with it. That is the same standard as the rest of the map -
+        every published claim sits next to the photograph it came from.
+
+        It is only worth the bytes where something is published, so the caller
+        passes full=True for a government pass and leaves it off for the
+        anonymous traffic that fades in forty-five seconds. Measured on the
+        live fleet that is ~79 published rows a day against ~327,000 passes.
+
+        Centres are normalised 0-1 so a camera that changes resolution does not
+        invalidate what was already banked.
+        """
+        if self.first_ts is None or self.last_ts is None:
+            return {}
+        dt = float(self.last_ts) - float(self.first_ts)
+        if dt <= 0 or len(self.boxes) < 2:
+            return {}
+        w = float(frame_w or 0) or 1.0
+        h = float(frame_h or 0) or 1.0
+
+        def centre(b):
+            x0, y0, x1, y1 = (float(v) for v in b)
+            return (round((x0 + x1) / 2.0 / w, 4), round((y0 + y1) / 2.0 / h, 4))
+
+        x0, y0 = centre(self.boxes[0])
+        x1, y1 = centre(self.boxes[-1])
+        out = {"dt_s": round(dt, 3), "frames": int(self.frames_seen),
+               "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+               "w": int(frame_w or 0), "h": int(frame_h or 0)}
+        if full:
+            # One row per sample: [seconds since the first sighting, cx, cy,
+            # box width, box height] - all normalised except the time. The box
+            # SIZE is kept because it is the cheapest depth cue there is: a car
+            # twice as wide in pixels is roughly half as far away, which is
+            # what turns a flat pixel path into a distance along the road.
+            step = max(1, len(self.boxes) // 120)   # a long pass stays bounded
+            t0 = float(self.first_ts)
+            per = dt / max(1, len(self.boxes) - 1)
+            track = []
+            for i in range(0, len(self.boxes), step):
+                bx0, by0, bx1, by1 = (float(v) for v in self.boxes[i])
+                track.append([round(i * per, 3),
+                              round((bx0 + bx1) / 2.0 / w, 4),
+                              round((by0 + by1) / 2.0 / h, 4),
+                              round((bx1 - bx0) / w, 4),
+                              round((by1 - by0) / h, 4)])
+            out["track"] = track
+        return out
+
 # --------------------------------------------------------------------------
 # Plate detection + OCR
 # --------------------------------------------------------------------------

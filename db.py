@@ -385,6 +385,30 @@ MIGRATIONS = [
     # police/gov row): the writing on a private car is as identifying as a tag.
     ("sightings", "markings", "TEXT"),
     ("sightings", "markings_rev", "TEXT"),
+    # 🚨 HOW THE VEHICLE MOVED THROUGH THE FRAME - THE RAW MEASUREMENT,
+    # NEVER A SPEED. JSON: {"dt_s", "frames", "x0","y0","x1","y1", "w","h"}
+    # with the box centres NORMALISED 0-1, so a camera changing resolution
+    # does not invalidate what was banked.
+    #
+    # Speed is distance over time. This is the TIME half and the PIXEL
+    # half; the metres are missing until a camera is calibrated against the
+    # road markings, which is a later build. Recording it now means every
+    # pass banked between now and then can have a speed computed
+    # retroactively - and NOT recording it means throwing that away.
+    #
+    # ⚠️ IT IS DELIBERATELY NOT `speed_mph`. That column already exists and
+    # is already carried all the way out to tools/export_public.py, so a
+    # number written there is PUBLISHED. Today only sources/synthetic.py
+    # fills it - no real detection ever has. Writing an uncalibrated
+    # estimate into a published field would turn a guess into an
+    # accusation about a named officer, which is the one mistake this
+    # feature cannot make. speed_mph stays NULL until a calibrated camera
+    # earns it.
+    #
+    # Stripped for private rows with the tag and markings (see privacy.py):
+    # how a particular car moved past a particular house is exactly the
+    # kind of trace this project refuses to keep about private vehicles.
+    ("sightings", "pass_motion", "TEXT"),
 ]
 
 # The setup funnel, in order. Progress only ever moves FORWARD through this
@@ -516,7 +540,7 @@ FIELDS = ("node_id", "ts", "lat", "lon", "tier", "plate_hash", "plate_text",
           # to search every sidecar once per sighting, which was over 300,000
           # file reads on a single page load and got worse every hour the node
           # ran. A join key belongs in the table that needs to join.
-          "bank_ref",
+          "bank_ref", "pass_motion",
           # Who decided, at INSERT time. Only ever set by the operator-confirm
           # path, which is the one route where a person has already ruled before
           # the row exists. Everything else leaves these NULL and earns them
