@@ -1018,6 +1018,11 @@ def probe_filter(cams: list, src: str) -> list:
     return out
 
 
+#: How far a camera may have moved and still be recognised as the SAME camera
+#: when a source renumbers its catalogue. Measured, not guessed - see the note
+#: in _rejoin_by_position.
+REJOIN_M = 150.0
+
 PROBE_DIR = ROOT / "data" / "probe"
 INDEX_DIR = ROOT / "data" / "index_cache"
 
@@ -1629,6 +1634,80 @@ def dedupe_index(idx: list) -> list:
     return out
 
 
+def _rejoin_by_position(src: str, orphans: list, creds: dict,
+                        used: set) -> list:
+    """Re-pair cameras to the nodes they already have after a RENUMBERING.
+
+    🚨 A SOURCE THAT RENUMBERS ITS CATALOGUE ORPHANS EVERY CAMERA IT HAS.
+    node_name_for embeds the agency's own ref, so the join key changes for the
+    whole fleet at once and the name pass matches nothing. Measured on Utah,
+    2026-09-25: `ut: 0 of 1715 camera(s) matched to a node`, with 1,722 perfectly
+    good credentials in hand. UDOT had moved its ids from the 140xxx-142xxx
+    range to 112xxx. Not one camera had gone anywhere.
+
+    ⚠️ AND THE ADVICE THIS CODE USED TO PRINT MADE IT PERMANENT. "not
+    registered (run tools/bulk_enrol_cams.py)" is right when a source adds a
+    camera and wrong when it renames one: it enrols a SECOND node for a camera
+    that already has one, and the first is left behind holding the history, the
+    sightings and the dot on the map. That is what happened to Iowa on 09-16 -
+    1,263 nodes that will never beat again, sitting in the offline count.
+
+    So before declaring a camera unregistered, look for its node by WHERE IT IS.
+
+    🚨 THE CAP COMES FROM THE MEASUREMENT. Distance from each live Utah camera
+    to its nearest stored credential is sharply bimodal: p10 22 m, p50 46 m,
+    p75 57 m, then p90 3,220 m and p99 54,663 m. 1,723 of 2,081 fell under
+    100 m against exactly 1,722 credentials held - the same fleet, re-surveyed
+    to slightly different coordinates - and the rest are genuinely new cameras
+    with no node. 150 m sits inside that gap, so it adopts the fleet without
+    reaching for a camera at the next junction.
+
+    ⚠️ Pairs are assigned NEAREST FIRST ACROSS THE WHOLE SOURCE, not per
+    camera. Taking each camera's nearest in turn lets an early one steal a
+    credential that was a much better fit for a later one, which at a dense
+    interchange is how sightings end up on the wrong dot.
+
+    ⚠️ NEVER SILENT. A rescue means a source changed its ids under us, which is
+    worth knowing even though it is handled - so it prints, with the worst
+    distance it accepted.
+    """
+    tag = f"[{src}:"
+    spare = [cr for name, pool in creds.items() if tag in name
+             for cr in pool
+             if cr.get("node_id") not in used
+             and cr.get("lat") is not None and cr.get("lon") is not None]
+    if not spare or not orphans:
+        return []
+    import math
+    pairs = []
+    for i, c in enumerate(orphans):
+        clat, clon = c["lat"], c["lon"]
+        kx = 111320.0 * math.cos(math.radians(clat))
+        for j, cr in enumerate(spare):
+            dx = (clon - cr["lon"]) * kx
+            dy = (clat - cr["lat"]) * 111320.0
+            d = math.hypot(dx, dy)
+            if d <= REJOIN_M:
+                pairs.append((d, i, j))
+    pairs.sort()
+    tookc, tookr, out, worst = set(), set(), [], 0.0
+    for d, i, j in pairs:
+        if i in tookc or j in tookr:
+            continue
+        tookc.add(i)
+        tookr.add(j)
+        c, cr = orphans[i], spare[j]
+        out.append({**c, "node_id": cr["node_id"], "token": cr["token"],
+                    "lat": cr["lat"], "lon": cr["lon"]})
+        used.add(cr.get("node_id"))
+        worst = max(worst, d)
+    if out:
+        print(f"  ⚠ {src}: {len(out)} camera(s) re-joined to the node they "
+              f"already had, by position (worst {worst:.0f} m) - the source "
+              f"has renumbered its catalogue")
+    return out
+
+
 def cams_from_tokens(tokens_path: str, sources: list) -> list:
     """Join the live source indexes to exported credentials.
 
@@ -1666,16 +1745,20 @@ def cams_from_tokens(tokens_path: str, sources: list) -> list:
         for c in idx:
             groups.setdefault(node_name_for(c), []).append(c)
         hit = 0
+        orphans: list = []
+        used: set = set()
         for name, views in groups.items():
             pool = list(creds.get(name) or [])
             if not pool:
-                missing += len(views)
+                # NOT "unregistered" yet - the name may simply have changed.
+                # _rejoin_by_position gets a look before that is decided.
+                orphans.extend(views)
                 continue
             if len(views) > 1:
                 ambiguous += len(views) - 1
             for c in sorted(views, key=lambda v: v.get("url") or ""):
                 if not pool:
-                    missing += 1
+                    orphans.append(c)
                     continue
                 # Nearest first. Where a name covers cameras at genuinely
                 # different points this is exact; where they share a position
@@ -1684,6 +1767,7 @@ def cams_from_tokens(tokens_path: str, sources: list) -> list:
                 pool.sort(key=lambda cr: ((cr.get("lat") or 0) - c["lat"]) ** 2
                                          + ((cr.get("lon") or 0) - c["lon"]) ** 2)
                 cr = pool.pop(0)
+                used.add(cr.get("node_id"))
                 # Position comes from the DB, which is what the map draws. A
                 # source quietly moving a camera must not make the dots
                 # disagree with the node.
@@ -1691,6 +1775,11 @@ def cams_from_tokens(tokens_path: str, sources: list) -> list:
                              "lat": cr.get("lat", c["lat"]),
                              "lon": cr.get("lon", c["lon"])})
                 hit += 1
+        if orphans:
+            rescued = _rejoin_by_position(src, orphans, creds, used)
+            cams.extend(rescued)
+            hit += len(rescued)
+            missing += len(orphans) - len(rescued)
         print(f"  {src}: {hit} of {len(idx)} camera(s) matched to a node")
     if dead:
         print(f"  {dead} camera(s) skipped: measured and never return an image")
