@@ -46,6 +46,8 @@ from pathlib import Path
 
 import numpy as np
 
+import places
+
 REPO = Path(__file__).resolve().parent.parent.parent
 DATA = REPO / "data" / "reid"
 # A new rev whenever the rules or the recogniser change, so apply.py
@@ -66,7 +68,10 @@ DATA = REPO / "data" / "reid"
 #                own town corroborates it.
 #   r7-livery    markings report the whole phrase that was read
 #                ("HICAGO POLICE"), not just the agency word.
-REV = "r7-livery"
+#   r8-place     the livery town is corroborated against the SIGHTING'S OWN
+#                coordinates, so a dashcam (whose node has no town) can have
+#                one. State-level agencies name their state.
+REV = "r8-place"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -205,7 +210,8 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
     return ("police" if seen else None), score, seen
 
 
-def city_of(items: list, place: str | None = None) -> str | None:
+def city_of(items: list, place: str | None = None,
+            lat=None, lon=None) -> str | None:
     """Whose fleet it is: "City Of Linden", or the town painted beside the
     agency word when the camera's own town CONFIRMS it.
 
@@ -222,6 +228,14 @@ def city_of(items: list, place: str | None = None) -> str | None:
         if m and sc >= 0.5:
             return m.group(0).title()
     town = (place or "").split(",")[0].strip()
+    if len(town) < 4 and lat is not None:
+        # 🚨 A MOVING CAMERA HAS NO TOWN, BUT THE SIGHTING HAS COORDINATES.
+        # A dashcam node carries no place, so the livery town had nothing to
+        # be checked against and went out uncorroborated - measured, a Chicago
+        # patrol car published as "HICAGO POLICE". The
+        # position was there all along; places.near turns it into a town, from
+        # a cache so the pipeline is not paying a second per sighting.
+        town = (places.known(lat, lon)[0] or "").strip()
     if len(town) < 4:
         return None
     up = clean(town)
@@ -300,7 +314,7 @@ def main() -> None:
     for f in feats:
         items = ocr.get(str(f["id"]), [])
         agency, asc, agency_word = agency_of(items)
-        city = city_of(items, f.get("place"))
+        city = city_of(items, f.get("place"), f.get("lat"), f.get("lon"))
         units = units_of(items, f.get("size"))
         unit = max(units, key=lambda u: u[1]) if units else None
         parts = []
@@ -308,6 +322,15 @@ def main() -> None:
         # evidence is "911" must not print "POLICE" as though the word were on
         # the car. The markings row exists to be checked against the photo.
         if agency: parts.append((agency_word or agency).upper())
+        # 🚨 "STATE POLICE" WITHOUT THE STATE IS HALF AN ANSWER. Michigan State
+        # Police and Illinois State Police are different forces, and the row is
+        # supposed to identify a vehicle. The state comes from where the
+        # sighting HAPPENED, which is corroboration rather than a guess - and
+        # if that is unknown the row simply says STATE POLICE, as before.
+        if agency in ("state police", "trooper", "highway patrol") and not city:
+            st = (places.known(f.get("lat"), f.get("lon")) or (None, None))[1]
+            if st:
+                parts.append(st)
         if city: parts.append(city)
         # 🚨 A NUMBER READ OFF A CAR IS KEPT WHETHER OR NOT THE AGENCY WORD WAS
         # READ TOO (his call, 2026-09-23: "numbers on cars even not plates
