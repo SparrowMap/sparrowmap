@@ -2644,6 +2644,28 @@ class Handler(BaseHTTPRequestHandler):
                 # vehicle or visitor, so this stays unauthenticated like the
                 # rest of the operational surface.
                 health = {"ok": True, "version": VERSION, "ts": now()}
+                # 🚨 REFUSING EVERY SIGHTING IS NOT "HEALTHY", AND THIS ROUTE
+                # SAID IT WAS - AGAIN, THE SAME CLASS OF BUG AS THE DESCRIPTOR
+                # OUTAGE ABOVE.
+                #
+                # 2026-09-26: the `_all_sightings` ceiling filled and the hub
+                # answered 503 to every sighting from a 13,300-camera network.
+                # The process was fine, the database was fine, descriptors were
+                # fine, so `ok` stayed true and the watchdog was satisfied. The
+                # hourly counts show it had been shedding at peak for NINETEEN
+                # HOURS across two days; the only visible symptom anywhere was
+                # the map reading "road quiet", and a person found it.
+                #
+                # A hub that cannot accept the one thing it exists to accept is
+                # DEGRADED, so it says so and the watch can shout.
+                _shed_age = time.time() - _CAP_LOGGED[0] if _CAP_LOGGED[0] else None
+                health["shedding"] = bool(_shed_age is not None and _shed_age < 300)
+                if _shed_age is not None:
+                    health["shed_last_s"] = round(_shed_age, 1)
+                if health["shedding"]:
+                    health["ok"] = False
+                    health["why"] = ("refusing sightings network-wide: the "
+                                     "_all_sightings ceiling is full")
                 try:
                     db.connect().execute("SELECT 1").fetchone()
                     health["db"] = "ok"
