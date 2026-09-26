@@ -262,12 +262,46 @@ function ago(ts) {
    requests the IDENTICAL url, so the origin serves it once and the edge serves
    the crowd. The bucket matches the server's max-age (15s). */
 const CACHE_BUCKET_S = 4;   // live view: new passes appear within a few seconds
+/* 🚨 EVERY TIME IN THIS FILE IS THE SERVER'S, NOT THE VIEWER'S.
+ *
+ * His report, 2026-09-26, after a reboot: "traffic dots are massive now, kind
+ * of taking up the map... make sure they are disappearing". Measured: his PC
+ * clock was 508 s BEHIND the hub. Both symptoms fall straight out of that, and
+ * neither is a drawing bug:
+ *
+ *   - `a = (now - ts) / TRAFFIC_FADE_S` went NEGATIVE, so k = (1-a)^0.6 came
+ *     out around 4.4 instead of <=1. Radius 5*(0.45+0.55k) drew ~14 px instead
+ *     of 5, opacity pinned at full, and `a >= 1` could not fire until the clock
+ *     caught up - about NINE MINUTES instead of 45 seconds.
+ *   - the poll's `since` is computed the same way, so it asked for 9 minutes of
+ *     sightings rather than 45 seconds and got the 400-row cap back. That is
+ *     the flood underneath the fat dots.
+ *
+ * A visitor's clock is not ours to trust and never was - this would hit any
+ * viewer whose machine drifted, silently, and look like the map was broken.
+ * The HTTP `Date` header on every response we already make is an authoritative
+ * server clock, free, same-origin, and needs no API change. */
+let _skew = 0;                       // serverEpoch - clientEpoch, in seconds
+const serverNow = () => Date.now() / 1000 + _skew;
+
+function noteServerDate(r) {
+  const d = r.headers && r.headers.get('date');
+  if (!d) return;
+  const ms = Date.parse(d);
+  if (!ms) return;
+  const k = ms / 1000 - Date.now() / 1000;
+  // The header has one-second resolution and the response spent time in
+  // flight, so sub-2s wobble is measurement noise, not a clock disagreement.
+  // Re-latching on noise would make every dot jitter once per poll.
+  if (Math.abs(k - _skew) > 2) _skew = k;
+}
+
 const bucketed = (sec) => Math.floor(sec / CACHE_BUCKET_S) * CACHE_BUCKET_S;
 
 /* The oldest timestamp the window admits. 0 means no limit - decided here
    once, because the same rule is needed at four call sites and a constant
    re-derived in four places is a constant that will eventually disagree. */
-const windowCut = () => state.windowS ? bucketed(Date.now() / 1000 - state.windowS) : 0;
+const windowCut = () => state.windowS ? bucketed(serverNow() - state.windowS) : 0;
 
 /* How the window is NAMED wherever a count is printed beside it. Kept next to
    windowCut for the same reason windowCut exists: the header, the panel and the
@@ -404,7 +438,10 @@ function drawTraffic(s) {
     fillOpacity: 0.8, opacity: 0.95, weight: 1,
     interactive: false,        // unclickable, not just click-does-nothing
   }).addTo(state.trafficLayer);
-  state.traffic.set(s.id, { rec: s, marker: m });
+  // ⚠️ `born` is a CLIENT stamp used only as an elapsed time, which is
+  // immune to any clock offset - it is the backstop that guarantees a dot
+  // leaves the map even if the server clock is unreadable.
+  state.traffic.set(s.id, { rec: s, marker: m, born: Date.now() });
 }
 
 /* How many vehicles are crossing a camera right now.
@@ -447,10 +484,15 @@ function paintLive() {
 /* One timer fades and reaps every traffic dot. Per-dot timers would mean
    hundreds of them on a busy road, all firing independently. */
 function ageTraffic() {
-  const t = Date.now() / 1000;
+  const t = serverNow();
+  const now = Date.now();
   for (const [id, e] of state.traffic) {
     const a = (t - e.rec.ts) / TRAFFIC_FADE_S;
-    if (a >= 1) {
+    // ⚠️ TWO WAYS OUT, AND THE SECOND ONE CANNOT BE FOOLED. The first is
+    // the real fade. The second is elapsed time on this machine since the dot
+    // was drawn, which no clock offset can distort - so a dot always leaves,
+    // even if `ts` or the server clock is nonsense.
+    if (a >= 1 || (now - e.born) > TRAFFIC_FADE_S * 2000) {
       state.trafficLayer.removeLayer(e.marker);
       state.traffic.delete(id);
       continue;
@@ -458,7 +500,10 @@ function ageTraffic() {
     // Bright and full-size as it passes, then thinning away to nothing. The
     // curve is deliberately back-loaded so a fresh pass reads as an event
     // rather than as one more faint dot among the dying ones.
-    const k = Math.pow(1 - a, 0.6);
+    // ⚠️ CLAMPED: k drives the radius, so an out-of-range `a` must never
+    // make a dot BIGGER than a fresh one. That is what put 14 px blobs on the
+    // map when the viewer's clock was 8 minutes slow.
+    const k = Math.pow(Math.max(0, Math.min(1, 1 - a)), 0.6);
     e.marker.setStyle({ fillOpacity: 0.8 * k, opacity: 0.95 * k,
                         radius: 5 * (0.45 + 0.55 * k) });
   }
@@ -2362,6 +2407,8 @@ function fetchJSON(url, ms = FETCH_TIMEOUT_MS) {
   const t = setTimeout(() => ac.abort(), ms);
   return fetch(url, { signal: ac.signal })
     .then((r) => {
+      // Learn the server's clock from the response we were making anyway.
+      noteServerDate(r);
       if (!r.ok) throw new Error(url + ' -> ' + r.status);
       return r.json();
     })
@@ -2369,11 +2416,11 @@ function fetchJSON(url, ms = FETCH_TIMEOUT_MS) {
 }
 
 async function load() {
-  const trafficCut = bucketed(Date.now() / 1000 - TRAFFIC_FADE_S);
+  const trafficCut = bucketed(serverNow() - TRAFFIC_FADE_S);
   // Full sweep on the first load and every PUB_FULL_EVERY_MS; otherwise just
   // the recent tail, merged into what is already held.
   const full = !_pubFullAt || (Date.now() - _pubFullAt) >= PUB_FULL_EVERY_MS;
-  const pubSince = full ? windowCut() : bucketed(Date.now() / 1000 - PUB_INCR_WINDOW_S);
+  const pubSince = full ? windowCut() : bucketed(serverNow() - PUB_INCR_WINDOW_S);
   // ⚠️ The full sweep needs a LONGER timeout than the 4s poll it shares a
   // function with. It is ~760 KB of history and measured 16.5s on a weak link,
   // which the 12s default would abort - turning the one fetch that populates
