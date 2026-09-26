@@ -608,6 +608,28 @@ _HIT_LOCK = threading.Lock()
 # carried 1,267 sightings, so a global cap of 600 was already refusing real
 # work. 20,000/hour is roughly 5.5 a second, which is about what 2 vCPUs will
 # ingest before the tile path starts to suffer.
+#
+# 🚨 RAISED TO 80,000 ON 2026-09-26, AND THE OLD NUMBER HAD ALREADY SHUT THE
+# MAP DOWN. His report was two words: "road quiet". The hub had answered 503
+# "the map is at capacity" to EVERY sighting from both pollers since 19:45:10 -
+# fifteen minutes of a 13,300-camera network posting into a wall, while every
+# one of those cameras still beat and still showed as online.
+#
+# ⚠️ THE SENTENCE ABOVE IS WHY, AND IT WENT STALE WITHOUT ANYONE NOTICING.
+# "about what 2 vCPUs will ingest" was true of the box it was written for. THE
+# HUB IS AN 8-CORE CCX33 NOW, so the premise was wrong by 4x, and the fleet
+# grew into the gap: adding 4,657 cameras on 09-25 took the network from
+# ~18,700 to a measured peak of 12.7 sightings a second (45,700/hour) against a
+# cap of 5.5/s. 80,000/hour is 22/s - the same 5.5/s per core the original
+# reasoning chose, now counted against the cores the box actually has.
+#
+# ⚠️ IT IS STILL A GUARD. A runaway script has to sustain 22 a second to trip
+# it, and `/api/sightings` at 900/hour still stops any single camera long
+# before this is reached.
+#
+# 📌 IF THE FLEET GROWS AGAIN, THIS NUMBER MOVES WITH IT. Measure the peak
+# with `traffic_1h` from /api/stats and leave real headroom - the failure is
+# total and silent, not graceful.
 # 🚨 RAISED 2026-08-15 DURING A SECOND VIRAL WAVE, BEFORE THEY BIT.
 #
 # Both of these are GLOBAL buckets - client_ip is 127.0.0.1 for everyone, see
@@ -625,8 +647,11 @@ _HIT_LOCK = threading.Lock()
 #
 # 600/hour still stops a runaway script (a loop managing ten a minute sustained
 # is refused) and no longer refuses a crowd.
+#: Last time the global-ceiling refusal was logged (see /api/sightings).
+_CAP_LOGGED = [0.0]
+
 RATE = {"/api/enroll": (600, 3600), "/api/sightings": (900, 3600),
-        "_all_sightings": (20000, 3600),
+        "_all_sightings": (80000, 3600),
         # RF scans post a whole batch of nearby surveillance devices at once,
         # not one row at a time, so the per-node ceiling is lower than sightings.
         "/api/rf": (300, 3600),
@@ -3496,6 +3521,25 @@ class Handler(BaseHTTPRequestHandler):
                 # than any one camera. Without it a fleet of nodes each inside
                 # its own limit can still add up to more than 2 vCPUs can take.
                 if not rate_ok("_all_sightings", self.client_ip):
+                    # 🚨 SAY SO. This ceiling shed every sighting on the whole
+                    # network for fifteen minutes on 2026-09-26 and NOTHING
+                    # SAID A WORD: the cameras kept beating, the box stayed
+                    # healthy, /api/stats looked normal because it reports the
+                    # trailing hour, and the only symptom anywhere was the map
+                    # quietly reading "road quiet". He found it, not the
+                    # monitoring. A refusal this total has to be in the log.
+                    #
+                    # ⚠️ Throttled to one line a minute, because the whole point
+                    # is that it fires thousands of times a second when it fires
+                    # at all - unthrottled it would bury the log it is meant to
+                    # make readable.
+                    _t = time.time()
+                    if _t - _CAP_LOGGED[0] > 60:
+                        _CAP_LOGGED[0] = _t
+                        print("[capacity] REFUSING ALL SIGHTINGS - the "
+                              "_all_sightings ceiling is full. The whole "
+                              "network is being shed. Raise RATE['_all_sightings'] "
+                              "or find what is flooding.", flush=True)
                     return self._err(503, "the map is at capacity right now - "
                                           "your camera will retry")
                 return self._ingest(b)
