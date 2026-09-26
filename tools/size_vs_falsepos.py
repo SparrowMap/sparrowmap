@@ -101,12 +101,30 @@ def negatives(n_cams: int, per_cam: int, limit: int) -> list:
     from PIL import Image
     import public_cams as pc
     sess, size = pc.load_model()
+    # 🚨 THE NEGATIVES COME FROM THE CAMERAS THE DECISION IS ABOUT.
+    # Michigan publishes 804 cameras and exactly 18 clear the 1280px pre-filter,
+    # so it IS the population that a lower bar would admit. Measuring false
+    # positives on `atx`-grade HD cameras would flatter the answer and tell us
+    # nothing about the choice actually in front of us.
+    #
+    # ⚠️ measured_only=False on purpose: probe_filter would hand back only the
+    # 18 already-usable cameras, which is the opposite of what is needed here.
+    # Michigan is the population a lower bar would admit, but its 320px frames
+    # yield few confident detections, so ordinary traffic is drawn from cameras
+    # where the DETECTOR works and then downscaled - exactly as the positives
+    # are. Both sides meet at the same width, which is the only way the
+    # comparison is fair.
     cams = []
-    for src in ("ia", "oh", "ny", "atx"):
+    # Georgia publishes 7,083 cameras at ~480px - plenty for the DETECTOR to
+    # find ordinary traffic - and Michigan is the population a lower bar would
+    # actually admit. Crops from both are downscaled to the test width exactly
+    # as the positives are; meeting at the same width is the only fair test.
+    for src in ("ga", "mi"):
         try:
-            cams += pc.SOURCES[src]()[:200]
-        except Exception:
-            pass
+            cams += (pc.michigan_index(measured_only=False) if src == "mi"
+                     else pc.arcgis_index(src, measured_only=False))
+        except Exception as exc:
+            print(f"  {src} unavailable: {type(exc).__name__}: {exc}")
     random.seed(13)
     random.shuffle(cams)
     out = []
@@ -122,12 +140,13 @@ def negatives(n_cams: int, per_cam: int, limit: int) -> list:
         except Exception:
             continue
         for b in boxes[:per_cam]:
-            x, y, w, h = b["x"], b["y"], b["w"], b["h"]
-            if w < 40:            # too small to downscale meaningfully
+            # detect() returns {"cls","conf","box":(x0,y0,x1,y1),"w"}
+            x0, y0, x1, y1 = b["box"]
+            if b["w"] < 40:       # too small to downscale meaningfully
                 continue
-            crop = img.crop((max(0, int(x)), max(0, int(y)),
-                             min(img.width, int(x + w)),
-                             min(img.height, int(y + h))))
+            crop = img.crop((max(0, int(x0)), max(0, int(y0)),
+                             min(img.width, int(x1)),
+                             min(img.height, int(y1))))
             if crop.width >= 32 and crop.height >= 32:
                 out.append(crop)
         n_cams -= 1
@@ -164,11 +183,20 @@ def main() -> int:
     def called_police(img) -> bool:
         bgr = np.array(img)[:, :, ::-1].copy()      # PIL RGB -> cv2 BGR
         r = vid.classify(bgr)
-        return bool(vehicle_id.VehicleIdentifier.gov_call(r).get("is_gov"))
+        return bool(vehicle_id.VehicleIdentifier.gov_call(r).get("gov"))
 
     print()
     print(f"{'width':>6}  {'recall':>18}  {'false positives':>20}")
     rows = []
+    # 🚨 A NATIVE-SIZE BASELINE OR THE COLUMN MEANS NOTHING. These crops were
+    # called police by this very system at their own resolution, so whatever
+    # recall they score untouched is the ceiling every downscaled row is
+    # measured against - not 100%.
+    tp0 = sum(1 for im in pos if called_police(im))
+    fp0 = sum(1 for im in neg if called_police(im))
+    print(f"{'native':>6}  {tp0:>5}/{len(pos):<5} {100.0*tp0/len(pos):>5.1f}%  "
+          f"{fp0:>5}/{len(neg):<5} {100.0*fp0/len(neg):>6.2f}%   <- ceiling",
+          flush=True)
     for w in widths:
         tp = sum(1 for im in pos if (s := to_width(im, w)) and called_police(s))
         fp = sum(1 for im in neg if (s := to_width(im, w)) and called_police(s))
