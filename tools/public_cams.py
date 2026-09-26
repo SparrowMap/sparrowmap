@@ -462,16 +462,36 @@ def michigan_index(measured_only: bool = True) -> list:
     that path segment for the full-resolution frame. Left alone, Michigan
     measures as a 320px network and gets written off - the thumbnails ARE 320px.
 
-    ⚠️ AND IT TAKES TWO ENDPOINTS. `AllForMap` has clean latitude/longitude/id/
-    title and NO image at all; `list` has the image and buries its coordinates
-    in an HTML anchor. Neither alone is a camera. They are joined on the id,
-    which in `list` exists only inside the image blob as id="1129Img".
+    🚨 `AllForMap` IS GONE (404 SINCE ~2026-09) AND IT WAS NEVER NEEDED.
+    This used to REQUIRE two endpoints and drop any camera missing from either,
+    so when MDOT retired `AllForMap` every one of Michigan's 804 cameras lost
+    its coordinates and the state collapsed to the 18 already enrolled. From
+    Helsinki that looked identical to the 403 below, which is how it hid.
+
+    The coordinates were in `list` the whole time - the docstring even said so.
+    Each row's `county` carries MDOT's own map link:
+
+        Wayne County <a href="/MiDrive/map?cameras=true&lat=42.491304&
+                               lon=-83.04479&zoom=15&id=1129">Go to</a>
+
+    Measured 2026-09-26: 804 of 804 rows have both a lat/lon and an image src.
+    So `list` alone is a complete camera list, `AllForMap` is used only when it
+    answers, and losing it again costs nothing.
+
+    ⚠️ AND THE THUMBNAIL IS THE DEFAULT - see the note above; strip `/thumbs/`.
     """
     def _build():
-        coords = _get_json(
-            "https://mdotjboss.state.mi.us/MiDrive/camera/AllForMap/", timeout=60)
+        # The one endpoint that actually carries a camera. Required.
         rows = _get_json("https://mdotjboss.state.mi.us/MiDrive/camera/list",
                          timeout=60)
+        # Nice to have: cleaner titles and coordinates when it exists. It has
+        # been 404 since roughly 2026-09, and everything below works without it.
+        try:
+            coords = _get_json(
+                "https://mdotjboss.state.mi.us/MiDrive/camera/AllForMap/",
+                timeout=60)
+        except Exception:
+            coords = []
         return {"coords": coords, "rows": rows}
 
     both = cached_index("mi", _build)
@@ -487,15 +507,24 @@ def michigan_index(measured_only: bool = True) -> list:
         i = re.search(r'id="(\d+)Img"', blob)
         if not m or not i:
             continue
-        meta = by_id.get(int(i.group(1)))
-        if not meta:
-            continue
+        meta = by_id.get(int(i.group(1))) or {}
+        # Coordinates from AllForMap when it answers, otherwise from MDOT's own
+        # map link in `county`. A camera without a position is still skipped -
+        # a dot in the wrong place is worse than no dot - but that is now the
+        # rare exception rather than the whole state.
+        lat, lon = meta.get("latitude"), meta.get("longitude")
+        if lat is None or lon is None:
+            g = re.search(r'lat=(-?\d+(?:\.\d+)?)&(?:amp;)?lon=(-?\d+(?:\.\d+)?)',
+                          str(c.get("county") or ""))
+            if not g:
+                continue
+            lat, lon = g.group(1), g.group(2)
         url = m.group(1).replace("/thumbs/", "/")   # see the note above
         name = (meta.get("title")
                 or f"{c.get('route', '')} {c.get('location', '')}").strip()
         out.append({"src": "mi", "ref": i.group(1),
                     "name": (name or "Michigan camera")[:60],
-                    "lat": float(meta["latitude"]), "lon": float(meta["longitude"]),
+                    "lat": float(lat), "lon": float(lon),
                     "url": url})
     return probe_filter(out, "mi") if measured_only else out
 
