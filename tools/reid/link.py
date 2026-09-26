@@ -75,7 +75,9 @@ DATA = REPO / "data" / "reid"
 #                extractor now share MAX_UNIT_DIGITS.
 #   r10-roof     roof numbers survive the caption test; an exact agency
 #                word beats a fuzzy one.
-REV = "r10-roof"
+#   r11-flush    text flush against the frame edge is a caption again;
+#                a roof number inside the crop still counts.
+REV = "r11-flush"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -313,10 +315,25 @@ def units_of(items: list, size=None) -> list[tuple[str, float]]:
         # read as what it is. The caption REGEX and the 6-character length guard
         # are untouched and still carry the cases they were measured on
         # ("911 at SR-665", "EXIT 422B", "9:06").
+        # ⚠️ FLUSH AGAINST THE EDGE IS THE TELL, AND WIDTH ALONE MISSED IT.
+        # Relaxing this to "wide AND near an edge" (for the roof number above)
+        # let a NARROW caption back in: measured on the Ceresco sighting the
+        # same day, OCR read the camera's own banner "Ceresco NE" at y=0..10 in
+        # a 104px crop - only 20% of the width, so the banner test did not fire.
+        # That one carried no bare number and was caught by the length guard,
+        # but "77" or "4821" burned into the same corner would have published
+        # as a unit number.
+        #
+        # A burned-in caption is DRAWN FLUSH to the frame: its box starts at 0
+        # or ends at the height. A roof number sits inside the crop - the
+        # Finnish van's was at y=12 of 173. So touching the edge is refused on
+        # its own, and the banner test stays for wide strips that sit just
+        # inside it.
         if h and w:
+            touches = box[1] <= 2 or box[3] >= h - 2
             wide = (box[2] - box[0]) >= 0.45 * w
-            at_edge = box[1] < 0.05 * h or box[3] > 0.95 * h
-            if wide and at_edge:
+            near = box[1] < 0.05 * h or box[3] > 0.95 * h
+            if touches or (wide and near):
                 continue
         for m in re.finditer(r"(?<!\d)(\d{2,%d})(?!\d)" % MAX_UNIT_DIGITS, txt):
             n = m.group(1)

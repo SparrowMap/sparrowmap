@@ -133,6 +133,19 @@ def main() -> int:
         "an exact agency word must beat a fuzzy one")
     assert link.agency_of([mid("POLIISI", 1.0)])[2] == "POLIISI", (
         "POLIISI still reads as POLIISI")
+    # A BARE number burned into the frame corner is a caption, not a unit -
+    # narrow enough to miss the banner test, so "flush against the edge" is
+    # what catches it. Measured on the Ceresco banner, 2026-09-26.
+    assert not link.units_of([["77", 1.0, [123, 0, 140, 10]]], (200, 104)), (
+        "a bare number flush at the top edge is a caption")
+    assert not link.units_of([["4821", 1.0, [10, 0, 60, 11]]], (200, 104)), (
+        "a four-digit number flush at the top edge is a caption")
+    assert not link.units_of([["1432", 1.0, [10, 95, 60, 104]]], (200, 104)), (
+        "a bare number flush at the bottom edge is a caption")
+    # ...and the roof number, which sits INSIDE the crop, still survives.
+    assert [u[0] for u in link.units_of([["-207", 1.0, [83, 12, 141, 54]]],
+                                        (200, 173))] == ["207"], (
+        "a roof number inside the crop is not a caption")
     total = len(CASES) + len(AGENCY_CASES)
     print(f"\n{total - bad}/{total} pass")
     return 1 if bad else 0
