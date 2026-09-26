@@ -332,7 +332,16 @@ def alabama_index(measured_only: bool = True) -> list:
     more at 3072px are a "No camera preview available" card. Both are caught by
     SRC_MAX_WIDTH and the placeholder sweep rather than trusted.
     """
-    rows = _get_json("https://api.algotraffic.com/v4.0/Cameras", timeout=60)
+    # 🚨 ALGO TRAFFIC 403s A EUROPEAN ADDRESS AND SERVES A US ONE, so the
+    # catalogue goes through cached_index like Michigan's and Utah's: whichever
+    # box can read it writes data/index_cache/al.json, that file is copied to
+    # the hub, and enrolment reads it there. Measured 2026-09-25 - the hub gets
+    # 403 Forbidden, the Ashburn box gets the full 635 cameras, of which 584
+    # clear the 1280px bar. That is the best hit rate of any network surveyed,
+    # and it was sitting unused because the machine holding the database could
+    # not see the list.
+    rows = cached_index("al_api", lambda: _get_json(
+        "https://api.algotraffic.com/v4.0/Cameras", timeout=60))
     out = []
     for c in rows:
         loc = c.get("location") or {}
