@@ -61,7 +61,14 @@ def main() -> None:
     have = []
     if (DATA / "reid_rows.json").exists():
         have = json.load(open(DATA / "reid_rows.json"))
-    since = max((r["ts"] for r in have), default=0.0)
+    # 🚨 THE CURSOR IS ELIGIBILITY, NOT PASS TIME. A sighting becomes public
+    # when a human confirms it, which is routinely hours after the car drove
+    # past - so a cursor on `ts` steps straight over every row confirmed late
+    # and those rows never get markings at all. See the note in export.py.
+    # Rows exported before this change carry no reviewed_at; they fall back to
+    # ts, which is exactly what the old cursor was, so nothing is re-fetched.
+    since = max((max(r["ts"], r.get("reviewed_at") or 0) for r in have),
+                default=0.0)
     ssh(f"cd {REMOTE} && sudo -u sparrow mkdir -p {ROUT} && sudo -u sparrow .venv/bin/python3 tools/reid/export.py --since {since} --out {ROUT}")
     sh(["scp", "-q", "-i", KEY, f"{BOX}:{ROUT}/reid_rows.json", str(DATA / "reid_rows.new.json")])
     sh(["scp", "-q", "-i", KEY, f"{BOX}:{ROUT}/reid_snaps.tar", str(DATA / "reid_snaps.tar")])
