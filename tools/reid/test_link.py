@@ -23,8 +23,22 @@ def mid(t, s=0.95):
 
 
 def edge(t, s=0.95):
-    """Text burned along the frame edge: the camera talking, not the car."""
+    """Text burned along the frame edge: the camera talking, not the car.
+
+    A real caption is a BANNER - it spans the picture and hugs the edge. Both
+    of those are what gets it refused; being merely high up does not, or every
+    roof number would go with it.
+    """
     return [t, s, [0, 2, 199, 14]]
+
+
+def roof(t, s=1.0):
+    """A number painted on the ROOF: high in a tight crop, but narrow.
+
+    His catch 2026-09-26 - a Finnish van read "-207" at 1.00 at y=12 in a
+    200x173 crop and the old top-12% cut threw it away.
+    """
+    return [t, s, [83, 12, 141, 54]]
 
 
 CASES = [
@@ -46,6 +60,8 @@ CASES = [
     # the extractor matched at most four. Both are MAX_UNIT_DIGITS now.
     ("five-digit roof no.", [mid("12020"), mid("POLICE")],              True),
     ("five digits alone",  [mid("12020")],                              False),
+    # A roof number is at the top of the crop because that is where roofs are.
+    ("roof number + livery", [roof("-207"), mid("POLIS")],              True),
 ]
 
 #: The agency a livery is published as, and the town beside it. His catch
@@ -105,6 +121,18 @@ def main() -> int:
         "six digits is not a fleet number")
     assert not link.units_of([edge("12020", 1.0)], (H, H)), (
         "a five-digit read on the frame edge is a caption, not a car")
+    # A roof number must survive the caption test, and a real burned-in banner
+    # (wide AND hard against the edge) must still be refused.
+    assert [u[0] for u in link.units_of([roof("-207")], (200, 173))] == ["207"], (
+        "a roof number is not a caption")
+    assert not link.units_of([edge("1234")], (200, 173)), (
+        "a wide banner on the frame edge is still a caption")
+    # The word printed must be the word READ: POLIS is in the table and must not
+    # lose to a fuzzy match on POLIISI just for being later in the dict.
+    assert link.agency_of([mid("POLIS", 1.0)])[2] == "POLIS", (
+        "an exact agency word must beat a fuzzy one")
+    assert link.agency_of([mid("POLIISI", 1.0)])[2] == "POLIISI", (
+        "POLIISI still reads as POLIISI")
     total = len(CASES) + len(AGENCY_CASES)
     print(f"\n{total - bad}/{total} pass")
     return 1 if bad else 0

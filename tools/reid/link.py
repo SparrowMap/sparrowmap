@@ -73,7 +73,9 @@ DATA = REPO / "data" / "reid"
 #                one. State-level agencies name their state.
 #   r9-digits    five-digit fleet numbers are kept; the guard and the
 #                extractor now share MAX_UNIT_DIGITS.
-REV = "r9-digits"
+#   r10-roof     roof numbers survive the caption test; an exact agency
+#                word beats a fuzzy one.
+REV = "r10-roof"
 
 STAY_GAP_S = 20 * 60
 SIM_STAY = 0.92
@@ -185,8 +187,16 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
     # ⚠️ AS READ, INCLUDING THE CLIPPED LETTER. "HICAGO POLICE" is what the
     # photograph shows - the C really is outside the crop - and quietly
     # correcting it to CHICAGO would be inventing a letter that was never seen.
+    # 🚨 AN EXACT WORD BEATS A FUZZY ONE, WHATEVER ORDER THE TABLE IS IN.
+    # His van read POLIS at 1.00 and was published as POLIISI. Both are in the
+    # table (Finland is bilingual and its cars carry both), and difflib scores
+    # POLIS against POLIISI at 0.833 - over the 0.8 fuzz threshold - so the
+    # fuzzy entry matched too, tied on every other term, and won purely by
+    # sitting earlier in the dict. Printing a word the car does not carry is
+    # exactly what this row must never do, so exactness is now part of the
+    # ranking rather than an accident of iteration order.
     FULL_PHRASE_MIN = 0.9
-    best, score, seen, words, phrase = None, 0.0, None, 0, None
+    best, score, seen, words, phrase, exact = None, 0.0, None, 0, None, False
     for txt, sc, _ in items:
         if sc < MIN_TEXT:
             continue
@@ -195,8 +205,9 @@ def agency_of(items: list) -> tuple[str | None, float, str | None]:
             n = _phrase_match(c, ph)
             if not n:
                 continue
-            if (n, sc) > (words, score):
-                best, score, seen, words = kind, sc, ph, n
+            ex = all(part in c for part in ph.split())
+            if (n, ex, sc) > (words, exact, score):
+                best, score, seen, words, exact = kind, sc, ph, n, ex
                 tidy = " ".join(c.split())
                 phrase = (tidy if (sc >= FULL_PHRASE_MIN
                                    and ph in tidy and len(tidy) > len(ph))
@@ -281,10 +292,32 @@ def units_of(items: list, size=None) -> list[tuple[str, float]]:
             continue
         if CAPTION.search(txt) or len(txt.strip()) > 6:
             continue
-        # Captions are burned along the frame's top or bottom edge, and a road
-        # sign sits above the car; a number painted ON the car is in the middle.
-        if h and (box[1] < 0.12 * h or box[3] > 0.88 * h):
-            continue
+        # 🚨 A ROOF NUMBER IS AT THE TOP OF THE CROP. THAT IS WHERE ROOFS ARE.
+        #
+        # This used to refuse the top and bottom 12% outright, on the reasoning
+        # that "captions are burned along the FRAME's edge". True of a frame,
+        # false of a CROP: what this function reads is a tight box around one
+        # vehicle, so the top of it is the roof - and a roof number is the only
+        # marking that identifies an individual car rather than a department.
+        #
+        # His catch, 2026-09-26 (a Finnish patrol van, POLIS on the door, 207 on
+        # the roof, no markings row at all): OCR read "-207" at confidence 1.00
+        # at y=12 in a 200x173 crop. The cut was 20.8, so a perfect read of the
+        # most valuable marking on the car was discarded for being 9 pixels too
+        # high. Every overhead traffic camera - which is most of this network -
+        # puts roof numbers in exactly that band.
+        #
+        # ⚠️ WHAT A BURNED-IN CAPTION ACTUALLY LOOKS LIKE IS A BANNER: it spans
+        # the picture and hugs the very edge. So both have to be true before the
+        # text is refused for its position, and a narrow number near the top is
+        # read as what it is. The caption REGEX and the 6-character length guard
+        # are untouched and still carry the cases they were measured on
+        # ("911 at SR-665", "EXIT 422B", "9:06").
+        if h and w:
+            wide = (box[2] - box[0]) >= 0.45 * w
+            at_edge = box[1] < 0.05 * h or box[3] > 0.95 * h
+            if wide and at_edge:
+                continue
         for m in re.finditer(r"(?<!\d)(\d{2,%d})(?!\d)" % MAX_UNIT_DIGITS, txt):
             n = m.group(1)
             if n in NOT_UNITS:
