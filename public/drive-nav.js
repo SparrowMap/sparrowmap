@@ -228,12 +228,23 @@ window.DriveNav = (function () {
       } else if (res.j.avoided_hotspots) {
         H.toast('Routing around known hotspots');
       }
-      // ALPR cameras, reported the same way: never claim an avoidance
-      // the engine could not actually make.
-      if (res.j.alpr_fallback) {
-        H.toast('No route avoids every plate camera — this one passes some');
-      } else if (res.j.avoided_alpr) {
-        H.toast('Routing around license-plate cameras');
+      // ALPR cameras, reported honestly: the ones we could not dodge are
+      // almost always on the unavoidable first/last mile, so say that rather
+      // than reading as a failure.
+      var onr = res.j.alpr_on_route || [];
+      var endN = 0, midN = 0;
+      onr.forEach(function (c) { if (c[2] && c[2] !== 'mid') endN++; else midN++; });
+      if (res.j.avoided_alpr) {
+        if (!onr.length) H.toast('Routed around every plate camera');
+        else if (!midN) H.toast('Routed around the cameras — ' + endN +
+          ' left near your start/finish (unavoidable)');
+        else H.toast('Routed around most cameras — ' + onr.length +
+          ' could not be avoided');
+      } else if (res.j.alpr_fallback) {
+        if (onr.length && !midN) H.toast('The plate camera' +
+          (onr.length > 1 ? 's here are' : ' here is') +
+          ' near your start/finish — unavoidable');
+        else H.toast('No route avoids every plate camera — this one passes some');
       }
     }).catch(function () { H.toast('Navigation is unavailable'); });
   }
@@ -284,8 +295,15 @@ window.DriveNav = (function () {
         interactive: false, keyboard: false }).addTo(camLayer);
     });
     on.forEach(function (c) {
-      L.marker([c[0], c[1]], { icon: camIcon('#ef4444', true),
-        interactive: false, keyboard: false }).addTo(camLayer);
+      var tag = c[2] || 'mid';
+      var un = (tag !== 'mid');
+      var label = tag === 'start' ? 'Camera near your start — unavoidable'
+                : tag === 'end' ? 'Camera near your destination — unavoidable'
+                : 'Camera on your route — could not route around it';
+      L.marker([c[0], c[1]], {
+        icon: camIcon(un ? '#9aa7b4' : '#ef4444', !un),
+        interactive: true, keyboard: false
+      }).bindTooltip(label, { direction: 'top' }).addTo(camLayer);
     });
     camLayer.addTo(H.map);
   }

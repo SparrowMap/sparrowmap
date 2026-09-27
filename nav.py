@@ -434,16 +434,35 @@ def _hotcells_on_path(cells, path, radius_m: float = HOT_BOX_M) -> list:
     return [(lat, lon) for _, lat, lon in hits]
 
 
-def _cam_lists(on_route, avoided, cap: int = 300) -> dict:
+#: Within this far of the origin or destination, a camera the route still
+#: passes is UNAVOIDABLE - you have to start and finish on those roads, so no
+#: reroute can dodge it. Used only to label such cameras honestly, not to change
+#: routing.
+UNAVOIDABLE_NEAR_M = 2_000.0
+
+
+def _cam_lists(on_route, avoided, a=None, b=None, cap: int = 300) -> dict:
     """The cameras to DRAW, so a driver can zoom out and see them.
 
-    `alpr_on_route` are the ones the chosen route still passes; `alpr_avoided`
-    are the ones the plain route would have passed and this one does not. Only
-    fixed camera positions from the public snapshot - nothing about the driver.
-    Capped so a long city route cannot turn one response into megabytes.
+    `alpr_on_route` are the ones the chosen route still passes, each tagged
+    "start" / "end" when it sits on the unavoidable first or last mile, or "mid"
+    otherwise; `alpr_avoided` are the ones the plain route would have passed and
+    this one does not. Only fixed camera positions from the public snapshot -
+    nothing about the driver. Capped so a long route cannot bloat the response.
     """
-    fmt = lambda xs: [[round(la, 5), round(lo, 5)] for la, lo in xs[:cap]]
-    return {"alpr_on_route": fmt(on_route), "alpr_avoided": fmt(avoided)}
+    def _tag(lat, lon):
+        if not (a and b):
+            return "mid"
+        my, mx = _m_per_deg(lat)
+        da = math.hypot((lat - a[0]) * my, (lon - a[1]) * mx)
+        db = math.hypot((lat - b[0]) * my, (lon - b[1]) * mx)
+        if min(da, db) > UNAVOIDABLE_NEAR_M:
+            return "mid"
+        return "start" if da <= db else "end"
+
+    on = [[round(la, 5), round(lo, 5), _tag(la, lo)] for la, lo in on_route[:cap]]
+    av = [[round(la, 5), round(lo, 5)] for la, lo in avoided[:cap]]
+    return {"alpr_on_route": on, "alpr_avoided": av}
 
 
 def _route_avoiding(body, rings, a, b, max_relax: int = 6):
@@ -630,7 +649,7 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
         return dict({"trip": base,
                      "avoided_hotspots": False, "hotspot_fallback": want_hot,
                      "avoided_alpr": False, "alpr_fallback": avoid_alpr},
-                    **_cam_lists(base_cams, []))
+                    **_cam_lists(base_cams, [], a, b))
     on = set(best_cams)
     avoided = [c for c in base_cams if c not in on]
     return dict({"trip": best_trip,
@@ -638,7 +657,7 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
                  "hotspot_fallback": want_hot and not hot_better,
                  "avoided_alpr": cam_better,
                  "alpr_fallback": avoid_alpr and not cam_better},
-                **_cam_lists(best_cams, avoided))
+                **_cam_lists(best_cams, avoided, a, b))
 
 
 def speed_limit(lat: float, lon: float) -> dict:
