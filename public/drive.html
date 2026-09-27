@@ -457,6 +457,8 @@
   // centred on YOU (not the map view, which may be zoomed tight), refreshed when
   // you've moved out of it, so the alert always has the cameras up ahead.
   var cameras=[], stations=[], radars=[], _fetchAt=null;
+  var alprCams=[], _camAt=null, _camTimer=null;   // the FULL overlay, viewport-based
+  var MIN_CAM_ZOOM=11;
   function nearBox(m){ if(!me) return null;
     var dLat=m/111000, dLon=m/(111000*Math.cos(me[0]*Math.PI/180));
     return [(me[0]-dLat),(me[1]-dLon),(me[0]+dLat),(me[1]+dLon)]
@@ -464,8 +466,11 @@
   function loadNearby(){
     var box=nearBox(2500); if(!box) return;
     _fetchAt=me.slice();
-    fetch('/api/cameras?box='+box).then(function(r){return r.json();})
-      .then(function(d){ cameras=(d&&d.cameras)||[]; drawCameras(); }).catch(function(){});
+    // Cameras used for the "camera ahead" ALERT: a box around YOU, from the
+    // full Flock/ALPR snapshot. The visible overlay is fetched separately for
+    // the map viewport (loadCameras) so panning shows cameras anywhere.
+    fetch('/api/alpr?box='+box).then(function(r){return r.json();})
+      .then(function(d){ cameras=(d&&d.cameras)||[]; }).catch(function(){});
     fetch('/api/police?box='+box).then(function(r){return r.json();})
       .then(function(d){ stations=(d&&d.stations)||[]; drawStations(); }).catch(function(){});
     loadRadarOnly();
@@ -481,10 +486,44 @@
     if(!me) return;
     if(!_fetchAt || haversine(me[0],me[1],_fetchAt[0],_fetchAt[1])>1200) loadNearby();
   }
+  // 🚨 SHOW EVERY CAMERA IN VIEW, so a driver can see them and steer around
+  // them by eye - not only the ones on the route. His ask, 2026-09-27. The
+  // map viewport is the box, so panning or zooming to plan ahead shows the
+  // cameras there; too far out and it stops (the set would be a whole region).
+  function viewBox(){ var b=map.getBounds();
+    return [b.getSouth(),b.getWest(),b.getNorth(),b.getEast()]
+      .map(function(n){return n.toFixed(4);}).join(','); }
+  function loadCameras(){
+    if(map.getZoom()<MIN_CAM_ZOOM){ alprCams=[]; drawCameras(); return; }
+    var c=map.getCenter(); _camAt={lat:c.lat,lng:c.lng,z:map.getZoom()};
+    fetch('/api/alpr?box='+viewBox()).then(function(r){return r.json();})
+      .then(function(d){ alprCams=(d&&d.cameras)||[]; drawCameras(); }).catch(function(){});
+  }
+  function scheduleCameras(){
+    // Follow mode re-centres every GPS second; only refetch when the view has
+    // actually moved a few hundred metres or the zoom changed, so a slow pan
+    // does not hammer the endpoint.
+    var c=map.getCenter();
+    if(_camAt && _camAt.z===map.getZoom() &&
+       haversine(c.lat,c.lng,_camAt.lat,_camAt.lng)<400) return;
+    clearTimeout(_camTimer); _camTimer=setTimeout(loadCameras,350);
+  }
   function drawCameras(){ cameraLayer.clearLayers();
-    cameras.forEach(function(c){ L.circleMarker([c.lat,c.lon],{radius:4,weight:2,
-      color:'#ff4d5e',fillColor:'#7a1220',fillOpacity:.95,interactive:false})
-      .addTo(cameraLayer); }); }
+    var showDir=map.getZoom()>=14;   // direction ticks only when zoomed in
+    alprCams.forEach(function(c){
+      var plate=c.plate!==false;
+      var col=plate?'#ff4d5e':'#8aa0b6';
+      if(showDir && typeof c.bearing==='number'){
+        var R=35, th=c.bearing*Math.PI/180;
+        var dLat=(R*Math.cos(th))/111000,
+            dLon=(R*Math.sin(th))/(111000*Math.cos(c.lat*Math.PI/180));
+        L.polyline([[c.lat,c.lon],[c.lat+dLat,c.lon+dLon]],
+          {color:col,weight:2,opacity:.6,interactive:false}).addTo(cameraLayer);
+      }
+      L.circleMarker([c.lat,c.lon],{radius:4,weight:2,color:col,
+        fillColor:plate?'#7a1220':'#25323f',fillOpacity:.9,interactive:false})
+        .addTo(cameraLayer);
+    }); }
   function drawStations(){ stationLayer.clearLayers();
     stations.forEach(function(p){ L.circleMarker([p.lat,p.lon],{radius:4,weight:2,
       color:'#4f7fc7',fillColor:'#16305c',fillOpacity:.9,interactive:false})
@@ -906,7 +945,8 @@
      same as a drag: follow pauses and ◎ Recenter appears. `progZoom` marks the
      page's own setView calls so they are not mistaken for the driver's. */
   map.on('zoomstart',function(){ if(!progZoom){ follow=false; $('#recenter').style.display='flex'; } });
-  map.on('zoomend',function(){ progZoom=false; });
+  map.on('zoomend',function(){ progZoom=false; scheduleCameras(); });
+  map.on('moveend',scheduleCameras);
 
   // ---- proximity ----
   /* 🚨 ONE CONTINUOUS WARNING FOR THE NEAREST THREAT, NOT ONE PER SIGHTING.

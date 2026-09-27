@@ -48,7 +48,7 @@ def main() -> int:
         print(f"no such file: {src}")
         return 1
 
-    rows: dict[tuple[float, float], int] = {}
+    rows: dict[tuple[float, float], tuple] = {}
     with src.open(encoding="utf-8", errors="replace") as f:
         rd = csv.DictReader(f, delimiter="\t")
         if not rd.fieldnames or "lat" not in rd.fieldnames or "lon" not in rd.fieldnames:
@@ -66,8 +66,19 @@ def main() -> int:
                 bad += 1
                 continue
             rp = 1 if str(r.get("reads_plates", "")).strip() in ("1", "true", "True") else 0
+            # Which way the camera faces (compass degrees), when the dump gives
+            # it - so the map can show a driver where it is looking. Optional;
+            # ~a third of cameras have none.
+            try:
+                bearing = round(float(r.get("bearing", "")) % 360, 1)
+            except (TypeError, ValueError):
+                bearing = None
             key = (lat, lon)
-            rows[key] = rows.get(key, 0) or rp
+            prev = rows.get(key)
+            if prev:
+                rows[key] = (prev[0] or rp, prev[1] if prev[1] is not None else bearing)
+            else:
+                rows[key] = (rp, bearing)
 
     db = Path(a.db)
     db.parent.mkdir(parents=True, exist_ok=True)
@@ -76,10 +87,11 @@ def main() -> int:
         tmp.unlink()
     conn = sqlite3.connect(str(tmp))
     conn.execute("PRAGMA journal_mode=OFF")
-    conn.execute("CREATE TABLE cams (lat REAL, lon REAL, reads_plates INT, source TEXT)")
+    conn.execute("CREATE TABLE cams (lat REAL, lon REAL, reads_plates INT, "
+                 "bearing REAL, source TEXT)")
     conn.executemany(
-        "INSERT INTO cams (lat, lon, reads_plates, source) VALUES (?,?,?,?)",
-        [(la, lo, rp, a.source) for (la, lo), rp in rows.items()])
+        "INSERT INTO cams (lat, lon, reads_plates, bearing, source) VALUES (?,?,?,?,?)",
+        [(la, lo, rp, br, a.source) for (la, lo), (rp, br) in rows.items()])
     # 🚨 THE INDEX IS THE WHOLE POINT: a per-route bounding-box query against
     # 160k rows has to be a range scan, not a table scan on the box that is
     # also serving the map.

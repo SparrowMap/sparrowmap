@@ -154,6 +154,33 @@ def _alpr():
         return _alpr_conn
 
 
+def alpr_in_box(s, w, n, e, cap: int = 900) -> list:
+    """Every ALPR camera in a viewport, for the drive map to draw so a driver
+    can see them and steer around them by eye. Returns lat/lon, whether it reads
+    plates, and the compass bearing it faces when the snapshot has one. Sampled
+    evenly down to `cap` so a dense metro cannot bloat the response."""
+    conn = _alpr()
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT lat, lon, reads_plates, bearing FROM cams "
+            "WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+            (s, n, w, e)).fetchall()
+    except sqlite3.Error:
+        return []
+    if len(rows) > cap:
+        step = len(rows) / float(cap)
+        rows = [rows[int(i * step)] for i in range(cap)]
+    out = []
+    for lat, lon, rp, br in rows:
+        c = {"lat": round(lat, 5), "lon": round(lon, 5), "plate": bool(rp)}
+        if br is not None:
+            c["bearing"] = br
+        out.append(c)
+    return out
+
+
 def alpr_available() -> bool:
     """Is a camera snapshot loaded? So the page can offer the toggle only when
     there is data behind it, rather than a switch that silently does nothing."""

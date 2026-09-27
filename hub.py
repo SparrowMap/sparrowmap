@@ -732,7 +732,9 @@ RATE = {"/api/enroll": (600, 3600), "/api/sightings": (900, 3600),
         # spacing in geocode.py, which a pure hourly cap could never give. This
         # number is a loose abuse ceiling, not the throttle.
         "/api/geocode": (3000, 3600),
-        "/api/scanner": (3000, 3600)}
+        "/api/scanner": (3000, 3600),
+        # The all-cameras overlay a driver pans over; polled as they move.
+        "/api/alpr": (6000, 3600)}
 
 
 # How many tile MISSES may be fetching from the upstream CDN at once.
@@ -3008,6 +3010,26 @@ class Handler(BaseHTTPRequestHandler):
 
             if p.startswith("/api/tile/"):
                 return self._tile(p)
+
+            if p == "/api/alpr":
+                # The FULL Flock/ALPR snapshot in the current viewport, so the
+                # drive map can show every camera (not only the ones on the
+                # route) and a driver can steer around them. Bounded by the box
+                # the client sends and sampled to a cap; fixed public camera
+                # positions only, nothing about the driver.
+                if not rate_ok("/api/alpr", self.client_ip):
+                    return self._err(429, "too many camera lookups")
+                _qa = parse_qs(urlparse(self.path).query)
+                boxa = (_qa.get("box", [None])[0] or "")
+                try:
+                    s0, w0, n0, e0 = (float(x) for x in boxa.split(","))
+                except (ValueError, AttributeError):
+                    return self._err(400, "box wants s,w,n,e")
+                # A viewport too large would return a whole region; the client
+                # only asks when zoomed in, and this is a backstop.
+                if (n0 - s0) > 1.2 or (e0 - w0) > 1.2:
+                    return self._json({"cameras": [], "too_wide": True})
+                return self._json({"cameras": nav.alpr_in_box(s0, w0, n0, e0)})
 
             if p == "/api/cameras":
                 # Flock/ALPR surveillance-camera overlay (OpenStreetMap /
