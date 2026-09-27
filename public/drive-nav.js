@@ -162,10 +162,12 @@ window.DriveNav = (function () {
     if (q.length < 3) { H.toast('Type a place to search for'); return; }
     var box = $('#nsresults');
     box.innerHTML = '<div class="ns-empty">Searching…</div>';
-    // /api/geocode takes the term and nothing else - no bias toward where the
-    // car is, because that would mean sending the current position on every
-    // keystroke of a search that has not been submitted yet.
-    fetch('/api/geocode?q=' + encodeURIComponent(q))
+    // A SUBMITTED search sends a COARSE position so "closest walmart" works -
+    // the server rounds it to ~1 km and only a submitted query carries it,
+    // never a keystroke. Without a fix yet, it just searches by name.
+    var at = H.pos && H.pos();
+    var near = at ? '&near=' + at[0].toFixed(3) + ',' + at[1].toFixed(3) : '';
+    fetch('/api/geocode?q=' + encodeURIComponent(q) + near)
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var rows = (d && d.results) || [];

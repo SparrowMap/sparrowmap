@@ -30,6 +30,7 @@ import bugs
 import nav
 import classify
 import db
+import geocode
 import mirror
 import node_label
 import operator_auth
@@ -722,7 +723,16 @@ RATE = {"/api/enroll": (600, 3600), "/api/sightings": (900, 3600),
         "/api/node/me": (120, 3600),
         # Network-wide (see the note above RATE), and it protects a free
         # third-party service as much as this one.
-        "/api/geocode": (300, 3600)}
+        # 🚨 SEPARATE FROM THE REVERSE LOOKUP, AND SIZED FOR A SEARCH BOX.
+        # This was 300/hour AND shared with /api/scanner's reverse-geocode, so
+        # browsing the map (every sighting panel resolves its state through
+        # scanner) drained the same bucket the destination search draws from -
+        # and the search box 429'd for the whole site. The two are split now,
+        # and the real protection for the upstream geocoders is the per-second
+        # spacing in geocode.py, which a pure hourly cap could never give. This
+        # number is a loose abuse ceiling, not the throttle.
+        "/api/geocode": (3000, 3600),
+        "/api/scanner": (3000, 3600)}
 
 
 # How many tile MISSES may be fetching from the upstream CDN at once.
@@ -2148,52 +2158,40 @@ class Handler(BaseHTTPRequestHandler):
                 term = (q.get("q") or [""])[0].strip()[:120]
                 if len(term) < 3:
                     return self._json({"results": []})
-                # 🚨 CACHE FIRST, BUDGET SECOND. This spent the rate-limit
-                # token BEFORE looking in the cache, so repeated searches for
-                # the same place burned quota they never needed - and because
-                # Caddy strips XFF, client_ip is 127.0.0.1 for everyone and the
-                # 300/hour bucket is NETWORK-WIDE. A handful of people searching
-                # the same town could 429 the search box for the entire site
-                # while the answer sat in memory. The budget exists to protect
-                # NOMINATIM; a cache hit never touches Nominatim.
-                hit = _GEO_CACHE.get(term.lower())
+                # Optional proximity bias: "closest walmart" needs to know where
+                # the driver roughly is. Rounded to ~1 km in geocode.search
+                # before it ever leaves this machine, and only the SEARCH sees
+                # it - never a keystroke, only a submitted query.
+                near = None
+                nr = (q.get("near") or [""])[0]
+                if nr:
+                    try:
+                        a, b = nr.split(",", 1)
+                        near = (float(a), float(b))
+                    except (ValueError, TypeError):
+                        near = None
+                # 🚨 CACHE FIRST, BUDGET SECOND. Keyed on term + coarse
+                # proximity so "walmart near A" and "walmart near B" do not
+                # share an answer, while a repeat of the same search never
+                # touches an upstream at all.
+                ck = term.lower() + ("|%.1f,%.1f" % near if near else "")
+                hit = _GEO_CACHE.get(ck)
                 if hit and now() - hit[0] < 86400:
                     return self._json({"results": hit[1]})
                 if not rate_ok("/api/geocode", self.client_ip):
                     return self._err(429, "too many searches right now; "
                                           "try again in a moment")
-                # hub.py imports urllib.parse only, so urllib.request has to
-                # be imported here. The first version assumed it was module-
-                # level and raised NameError - which the broad `except` below
-                # then reported to the user as "search unavailable right now",
-                # blaming a third party for a typo. Catch only what a network
-                # call can actually do to us.
-                import urllib.error
-                import urllib.parse as _up
-                import urllib.request as _ur
                 try:
-                    req = _ur.Request(
-                        "https://nominatim.openstreetmap.org/search?"
-                        + _up.urlencode({"format": "json", "limit": "6",
-                                         "q": term}),
-                        # Nominatim's policy requires an identifying agent. A
-                        # generic one gets the whole project blocked, and the
-                        # block would look like "search is broken".
-                        headers={"User-Agent": "SparrowMap/1.0 "
-                                               "(https://sparrowmap.com)"})
-                    with _ur.urlopen(req, timeout=12) as r:
-                        raw = json.loads(r.read())
-                except (urllib.error.URLError, OSError, ValueError) as exc:
+                    out = geocode.search(term, near=near, limit=6)
+                except Exception as exc:
+                    # A genuine outage of BOTH providers - say so, rather than
+                    # letting the page tell a driver the place does not exist.
                     print(f"[geocode] upstream failed: {exc}")
                     return self._json({"results": [], "error": "search "
                                        "unavailable right now"})
-                out = [{"name": str(x.get("display_name") or "")[:140],
-                        "lat": float(x["lat"]), "lon": float(x["lon"]),
-                        "kind": str(x.get("type") or "")}
-                       for x in raw if x.get("lat") and x.get("lon")]
-                if len(_GEO_CACHE) > 500:
+                if len(_GEO_CACHE) > 800:
                     _GEO_CACHE.clear()
-                _GEO_CACHE[term.lower()] = (now(), out)
+                _GEO_CACHE[ck] = (now(), out)
                 return self._json({"results": out})
 
             if p in ("/planes", "/api/aircraft"):
@@ -2243,7 +2241,10 @@ class Handler(BaseHTTPRequestHandler):
                 hit = _GEO_CACHE.get("rev:" + key)
                 if hit and now() - hit[0] < 86400:
                     return self._json(hit[1])
-                if not rate_ok("/api/geocode", self.client_ip):
+                # Its OWN bucket - see the note on RATE. A map full of people
+                # opening sightings must not spend the destination search's
+                # budget.
+                if not rate_ok("/api/scanner", self.client_ip):
                     return self._err(429, "too many lookups right now")
                 import urllib.error
                 import urllib.parse as _up
