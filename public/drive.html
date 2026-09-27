@@ -145,7 +145,13 @@
      alert wins - a patrol ahead outranks a turn in 400 m - so it sits above
      and the turn banner drops clear of it rather than being covered. */
   #alert.show ~ #navbar.show{top:72px}
-  #splimit{position:absolute;z-index:2040;right:10px;bottom:150px;display:none;
+  /* 🚨 BELOW THE MPH CARD, NOT OVER THE BUTTONS. It sat bottom-right, on top
+     of the #side control column, when driving WITHOUT navigation (navigating
+     hides it - the turn card carries the limit then). His report, 2026-09-27.
+     #hud is top-left at 12px and one stat is ~56px tall, so this tucks under
+     it with a small gap. */
+  #splimit{position:absolute;z-index:2040;left:12px;
+    top:calc(env(safe-area-inset-top) + 80px);display:none;
     width:62px;background:#fff;color:#111;border:3px solid #111;border-radius:8px;
     text-align:center;padding:4px 0 6px;box-shadow:0 4px 14px rgba(0,0,0,.45)}
   #splimit.show{display:block}
@@ -164,8 +170,8 @@
   #nsform{display:flex;gap:8px}
   #nsq{flex:1;padding:12px 14px;border-radius:12px;border:1px solid var(--line);
     background:#111a24;color:#e6eef7;font-size:16px}
-  #nsform button{padding:12px 18px;border-radius:12px;border:0;
-    background:#2563eb;color:#fff;font-weight:700;font-size:15px}
+  #nsform button{padding:10px 16px;border-radius:12px;border:0;
+    background:#2563eb;color:#fff;font-weight:700;font-size:14px}
   .ns-hit{display:block;width:100%;text-align:left;margin-top:8px;padding:11px 12px;
     border-radius:12px;border:1px solid var(--line);background:#111a24;
     color:#e6eef7;font-size:15px;line-height:1.35}
@@ -195,9 +201,9 @@
   .ns-turn-t{flex:1;min-width:0}
   .ns-turn-d{flex:0 0 auto;font-family:var(--mono,monospace);color:#9fb3c8;font-size:13px}
   .ns-note{margin-top:12px;color:#9fb3c8;font-size:12.5px;line-height:1.45}
-  .ns-row{display:flex;gap:8px;margin-top:14px}
-  .ns-row button{flex:1;padding:12px;border-radius:12px;border:1px solid var(--line);
-    background:#111a24;color:#e6eef7;font-size:15px}
+  .ns-row{display:flex;gap:8px;margin-top:10px}
+  .ns-row button{flex:1;padding:8px 10px;border-radius:10px;border:1px solid var(--line);
+    background:#111a24;color:#e6eef7;font-size:13px}
   .ns-row .ns-stop{background:#3a1420;border-color:#5b2233;color:#ffd9e0}
   /* Leaflet's attribution ships light-on-white and lands as a bright bar across
      the bottom of a dark, night-driving screen. Attribution is required and
@@ -417,7 +423,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=5"></script>
+<script src="/static/drive-nav.js?v=6"></script>
 <script>
 (function(){
   "use strict";

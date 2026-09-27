@@ -87,8 +87,13 @@ window.DriveNav = (function () {
           '<input id="nsq" type="search" placeholder="Where to?" aria-label="Destination">' +
           '<button type="submit">Find</button>' +
         '</form>' +
-        '<div id="nsresults"></div>' +
-        '<div id="nsturns"></div>' +
+        // Close, Stop and Route options ride at the TOP now, right under the
+        // search bar, so the turn list below is the first thing you see when
+        // you open the sheet from the card. His call, 2026-09-27.
+        '<div class="ns-row">' +
+          '<button class="ns-cancel" id="nsCancel">Close</button>' +
+          '<button class="ns-stop" id="nsStop">Stop navigating</button>' +
+        '</div>' +
         '<details class="ns-opts" id="nsOpts">' +
           '<summary>Route options</summary>' +
           '<label><input type="checkbox" id="nsHot" checked> Avoid police hotspots</label>' +
@@ -96,12 +101,10 @@ window.DriveNav = (function () {
           '<label><input type="checkbox" id="nsToll"> Avoid tolls</label>' +
           '<label id="nsAlprRow" style="display:none"><input type="checkbox" id="nsAlpr"> Avoid license-plate cameras</label>' +
         '</details>' +
-        '<div class="ns-note">Your destination is routed on SparrowMap’s own ' +
-          'machine and is never logged, and never reaches anyone else.</div>' +
-        '<div class="ns-row">' +
-          '<button class="ns-cancel" id="nsCancel">Close</button>' +
-          '<button class="ns-stop" id="nsStop">Stop navigating</button>' +
-        '</div>' +
+        '<div id="nsresults"></div>' +
+        '<div id="nsturns"></div>' +
+        '<div class="ns-note">Routed on SparrowMap’s own machine, never logged, ' +
+          'never shared.</div>' +
       '</div>';
     document.body.appendChild(el);
     $('#nsCancel').onclick = function () { closeSheet(); };
@@ -179,7 +182,7 @@ window.DriveNav = (function () {
           var name = r.name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
           var b = document.createElement('button');
           b.className = 'ns-hit'; b.type = 'button'; b.textContent = name;
-          b.onclick = function () { closeSheet(); go({ lat: lat, lon: lon, label: name }); };
+          b.onclick = function () { $('#nsq').value = ''; $('#nsresults').innerHTML = ''; closeSheet(); go({ lat: lat, lon: lon, label: name }); };
           box.appendChild(b);
         });
       })
