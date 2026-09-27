@@ -458,5 +458,5 @@ window.DriveNav = (function () {
     paintLimit();
   }
 
-  return { start: start, stop: stop, go: go };
+  return { start: start, stop: stop, go: go, openSheet: openSheet };
 })();

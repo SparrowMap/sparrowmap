@@ -423,7 +423,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=6"></script>
+<script src="/static/drive-nav.js?v=7"></script>
 <script>
 (function(){
   "use strict";
@@ -1221,6 +1221,13 @@
       // sheet is open, so typing is not fighting them for the main thread.
       setUiPaused:function(v){uiPaused=!!v;}
     });
+    // Offer the destination search straight away, so "Start driving mode" lands
+    // on "Where to?" - a driver who just wants patrol warnings taps Close. His
+    // call, 2026-09-27. Guarded and deferred so it never blocks the start
+    // gesture (camera + geolocation prompts) that just fired.
+    if(window.DriveNav && window.DriveNav.openSheet){
+      setTimeout(function(){ try{ window.DriveNav.openSheet(true); }catch(e){} }, 400);
+    }
   }
   $('#startBtn').onclick=start;
 

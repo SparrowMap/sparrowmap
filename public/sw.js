@@ -22,7 +22,14 @@ const CACHE = 'sparrow-app-v11';
 // Deliberately the LAST app cache name rather than a fresh one: devices already
 // hold the model under it, and renaming would throw away the very download this
 // split exists to protect. Bump ONLY when the vendored model itself changes.
-const VENDOR_CACHE = 'sparrow-v6';
+// 🚨 v6 -> v7, 2026-09-27: a phone reported "detector failed to download",
+// persistently. The old vendor handler cached whatever came back and had no
+// catch, so a 206 partial (Cache.put THROWS on a 206, and a big file can be
+// range-requested) or a body cut short on mobile could be stored and then
+// served from cache on every load afterwards - a permanent failure. The
+// handler below is hardened AND the cache name is bumped so any broken copy a
+// device already holds is dropped and re-fetched once, cleanly.
+const VENDOR_CACHE = 'sparrow-v7';
 
 // 🗺️ Map tiles, in their own cache with a ceiling.
 // Without these an offline map is a grey rectangle with some dots on it, which
@@ -108,13 +115,36 @@ self.addEventListener('fetch', (e) => {
   if (url.pathname.startsWith('/vendor/')) {
     e.respondWith(
       caches.open(VENDOR_CACHE).then((c) =>
-        c.match(e.request).then((hit) =>
-          hit || fetch(e.request).then((res) => {
-            if (res.ok) c.put(e.request, res.clone());
+        c.match(e.request).then((hit) => {
+          if (hit) return hit;
+          return fetch(e.request).then((res) => {
+            // 🚨 CACHE ONLY A COMPLETE 200, AND NEVER LET CACHING BREAK THE
+            // RESPONSE. A 206 partial makes Cache.put throw (a big file can be
+            // range-requested on mobile), and with no catch that rejection was
+            // itself the "detector failed to download" - every load. A body cut
+            // short by a dropped connection must not be stored either, or
+            // cache-first would serve the broken copy for ever. So: full 200
+            // only, verify the length when the server gives one, and swallow any
+            // put error so it can never take down the download the page needs.
+            if (res.status === 200) {
+              const len = res.headers.get('content-length');
+              const copy = res.clone();
+              copy.blob().then((b) => {
+                if (!len || b.size === +len) {
+                  c.put(e.request, new Response(b, {
+                    status: 200, headers: res.headers
+                  })).catch(() => {});
+                }
+              }).catch(() => {});
+            }
             return res;
-          })
-        )
-      )
+          });
+        })
+      // A transient network failure must not become an unhandled rejection:
+      // fall back to whatever is cached, and if nothing is, let the real error
+      // reach the page so it can say the detector is offline rather than hang.
+      ).catch(() => caches.open(VENDOR_CACHE).then((c) => c.match(e.request))
+        .then((hit) => hit || fetch(e.request)))
     );
     return;
   }
