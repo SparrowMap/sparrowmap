@@ -106,6 +106,14 @@
   .rbtn.on{color:var(--accent2);border-color:var(--accent)}
   .rbtn.warn{color:var(--live2)}
   #recenter{display:none}
+  /* The controls menu: hidden until the ⋯ toggle opens it. A 2-column grid so
+     all of it fits without a tall column, and scrollable as a backstop, bounded
+     by the safe area so it never runs under the island or the home indicator. */
+  #sideToggle.on{color:var(--accent2);border-color:var(--accent)}
+  #sideMenu{display:none;grid-template-columns:repeat(2,48px);gap:10px;margin-top:10px;
+    max-height:calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 140px);
+    overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #side.open #sideMenu{display:grid}
   /* --- privacy chip --- */
   /* A promise that is cut off at both edges reads as a promise with something
      hidden in it, which is the opposite of the point. Wrap it instead of
@@ -364,22 +372,24 @@
   <button id="camClose" title="Shrink the camera view" aria-label="shrink the camera view">&#10005;</button>
 </div>
 
+<!-- 🚨 ONE MENU BUTTON, NOT A TALL STACK. His catch, 2026-09-27: in landscape
+     the column of controls did not fit and could not be scrolled to. They now
+     live behind a single ⋯ toggle; recenter stays out as a contextual button
+     (it only appears when you have panned away and need it back). The menu is a
+     compact grid and scrolls, so every control is reachable in any orientation. -->
 <div id="side">
-  <button class="rbtn" id="camBtn" title="Dashcam — watch the road for patrols">📷</button>
   <button class="rbtn" id="recenter" title="Recenter">◎</button>
-  <button class="rbtn" id="trailBtn" title="Show my trail (stays on this phone)">〜</button>
-  <button class="rbtn" id="soundBtn" title="Alert sound">🔊</button>
-  <button class="rbtn" id="heatBtn" title="Everywhere patrols have been (hotspots)">🔥</button>
-  <button class="rbtn" id="calBtn" title="Calibrate the phone's angle in its mount">🧭</button>
-  <button class="rbtn" id="navBtn" title="Navigate somewhere">➤</button>
-  <!-- 🚨 A WAY OUT. Driving mode is a standalone PWA - no address bar, no
-       browser back button - and it had no link off it at all, so leaving meant
-       force-quitting the app. Worse here than anywhere else in the project,
-       because the person is in a moving car when they discover it.
-       Last in the column and the same size as its neighbours: an exit that
-       sits under a thumb reaching for "recenter" is its own hazard. -->
-  <a class="rbtn" href="/" id="exitBtn" title="Leave driving mode (back to the map)"
-     style="display:flex;align-items:center;justify-content:center;text-decoration:none">←</a>
+  <button class="rbtn" id="sideToggle" title="Controls">⋯</button>
+  <div id="sideMenu">
+    <button class="rbtn" id="camBtn" title="Dashcam — watch the road for patrols">📷</button>
+    <button class="rbtn" id="trailBtn" title="Show my trail (stays on this phone)">〜</button>
+    <button class="rbtn" id="soundBtn" title="Alert sound">🔊</button>
+    <button class="rbtn" id="heatBtn" title="Everywhere patrols have been (hotspots)">🔥</button>
+    <button class="rbtn" id="calBtn" title="Calibrate the phone's angle in its mount">🧭</button>
+    <button class="rbtn" id="navBtn" title="Navigate somewhere">➤</button>
+    <a class="rbtn" href="/" id="exitBtn" title="Leave driving mode (back to the map)"
+       style="display:flex;align-items:center;justify-content:center;text-decoration:none">←</a>
+  </div>
 </div>
 
 <!-- 🚨 "PATROL HERE" WAS REMOVED 2026-08-15, AND THE ENDPOINT WITH IT.
@@ -948,7 +958,8 @@
     n.querySelectorAll('[data-still]').forEach(function(b){b.onclick=function(){vote(b.getAttribute('data-still'),true);map.closePopup();};});
     n.querySelectorAll('[data-gone]').forEach(function(b){b.onclick=function(){vote(b.getAttribute('data-gone'),false);map.closePopup();};});
   });
-  map.on('dragstart',function(){follow=false;$('#recenter').style.display='flex';});
+  map.on('dragstart',function(){follow=false;$('#recenter').style.display='flex';
+    $('#side').classList.remove('open');$('#sideToggle').className='rbtn';});
   /* 🚨 ZOOMING OUT HAS TO STICK. Follow mode re-centred on every fix with
      setView(me, max(zoom, 16)), so a driver who pinched out to see what was
      ahead was pulled back to street level a second later - only a DRAG broke
@@ -1206,6 +1217,14 @@
 
   // ---- controls ----
   $('#recenter').onclick=function(){follow=true;this.style.display='none';if(me){progZoom=true;map.setView(me,17);}};
+  // The single controls menu: ⋯ opens/closes the grid of buttons.
+  function closeSideMenu(){ $('#side').classList.remove('open'); $('#sideToggle').className='rbtn'; }
+  $('#sideToggle').onclick=function(){ var el=$('#side'); var open=!el.classList.contains('open');
+    el.classList.toggle('open',open); this.className='rbtn'+(open?' on':''); };
+  // Tapping a control that takes over the screen (navigate) or leaves the
+  // menu's job done closes it, so it is not left hanging open over the map.
+  $('#navBtn').addEventListener('click',closeSideMenu);
+  $('#calBtn').addEventListener('click',closeSideMenu);
   $('#copyes').onclick=function(){sendLabel('police');};
   $('#copno').onclick=function(){sendLabel('civilian');};
   // "Not sure" is a real answer and must cost nothing. It sends NOTHING: the
