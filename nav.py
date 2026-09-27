@@ -35,8 +35,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import sqlite3
+import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 #: The engine, on loopback. Never reachable from outside this machine.
 VALHALLA = os.environ.get("VALHALLA_URL", "http://127.0.0.1:8002")
@@ -80,6 +83,111 @@ HOT_MAX_POLYS = 60
 #: valhalla.json to match, and every extra polygon costs routing time on a box
 #: that is also running the map.
 EXCLUDE_BUDGET_M = 9_000.0
+
+#: Where the ALPR-camera snapshot lives. A separate sqlite file, not sparrow.db
+#: - see tools/load_alpr.py for why. Absent until a dump is loaded, and
+#: alpr_polygons treats "no file" the same as "no cameras near": nothing to
+#: route around.
+ALPR_DB = Path(__file__).resolve().parent / "data" / "alpr.db"
+
+#: Half-width of the box closed around an ALPR camera, in metres. Smaller than
+#: a hotspot's: a camera watches one spot on one road, so a tight box forces
+#: the router off that segment without detouring a whole block for it - and a
+#: small box spends less of the 10 km exclusion budget, so more cameras can be
+#: avoided on the same route.
+ALPR_BOX_M = 55.0
+
+#: How far from the straight line between origin and destination an ALPR camera
+#: can be and still plausibly sit on the route. Only the nearest ALPR_MAX of
+#: these are kept, and then only as many as the budget allows, so this is a
+#: pre-filter for the bounding-box query rather than a promise.
+ALPR_CORRIDOR_M = 4_000.0
+ALPR_MAX = 80
+
+_ALPR_LOCK = threading.Lock()
+_alpr_conn = None
+
+
+def _alpr():
+    """A cached read-only handle to the camera snapshot, or None if unloaded.
+
+    Opened read-only and shared across the hub's threads: this file is only
+    ever written by tools/load_alpr.py, which builds a new database and swaps
+    it into place, so a reader never sees a half-written one.
+    """
+    global _alpr_conn
+    with _ALPR_LOCK:
+        if _alpr_conn is None:
+            if not ALPR_DB.exists():
+                return None
+            _alpr_conn = sqlite3.connect(
+                f"file:{ALPR_DB}?mode=ro", uri=True, check_same_thread=False)
+        return _alpr_conn
+
+
+def alpr_available() -> bool:
+    """Is a camera snapshot loaded? So the page can offer the toggle only when
+    there is data behind it, rather than a switch that silently does nothing."""
+    return _alpr() is not None
+
+
+def alpr_cameras_near(a, b, corridor_m: float = ALPR_CORRIDOR_M) -> list:
+    """(distance_to_route, lat, lon) for ALPR cameras near the corridor a->b.
+
+    A bounding-box range scan on the indexed snapshot, then the same
+    point-to-segment test the hotspots use, nearest first. Empty when no
+    snapshot is loaded - avoiding a camera we do not know about is not
+    something to claim.
+    """
+    conn = _alpr()
+    if conn is None:
+        return []
+    la0, la1 = sorted((a[0], b[0]))
+    lo0, lo1 = sorted((a[1], b[1]))
+    pad = corridor_m / 111_320.0            # generous; the segment test trims it
+    try:
+        rows = conn.execute(
+            "SELECT lat, lon FROM cams WHERE lat BETWEEN ? AND ? "
+            "AND lon BETWEEN ? AND ?",
+            (la0 - pad, la1 + pad, lo0 - pad, lo1 + pad)).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for lat, lon in rows:
+        d = _point_to_segment_m((lat, lon), a, b)
+        if d <= corridor_m:
+            out.append((d, lat, lon))
+    out.sort()
+    return out
+
+
+def alpr_polygons(a, b) -> list:
+    """Small closed boxes around the ALPR cameras nearest the route.
+
+    Nearest first, because an ALPR sits on a specific road and the ones closest
+    to the straight line are the ones a route is most likely to pass. Budgeted
+    the same way hotspots are; route() enforces the combined ceiling.
+    """
+    out = []
+    for _, lat, lon in alpr_cameras_near(a, b)[:ALPR_MAX]:
+        my, mx = _m_per_deg(lat)
+        dlat, dlon = ALPR_BOX_M / my, ALPR_BOX_M / mx
+        out.append([[lon - dlon, lat - dlat], [lon + dlon, lat - dlat],
+                    [lon + dlon, lat + dlat], [lon - dlon, lat + dlat],
+                    [lon - dlon, lat - dlat]])
+    return out
+
+
+def _ring_perimeter_m(ring) -> float:
+    """Length of a [lon,lat] ring in metres, for budgeting against the engine's
+    exclude_polygons circumference cap."""
+    total = 0.0
+    for (lo1, la1), (lo2, la2) in zip(ring, ring[1:]):
+        my, mx = _m_per_deg((la1 + la2) / 2.0)
+        total += math.hypot((la2 - la1) * my, (lo2 - lo1) * mx)
+    return total
+
+
 
 
 def _post(path: str, body: dict) -> dict:
@@ -158,14 +266,24 @@ def hotspot_polygons(cells, a, b, corridor_m: float = 25_000.0) -> list:
 
 
 def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
-          hot_cells=None) -> dict:
+          hot_cells=None, avoid_alpr: bool = False) -> dict:
     """A driving route from a=(lat,lon) to b=(lat,lon).
 
-    Returns {"trip": <valhalla trip>, "avoided_hotspots": bool,
-             "hotspot_fallback": bool}. `hotspot_fallback` is true when the
-    hotspot-avoiding attempt had no route and this is the ordinary one -
-    the page must tell the driver that, because they asked for something
-    they are not getting.
+    Returns the trip plus, for each avoidance the driver asked for, whether it
+    was applied or fell back:
+        avoided_hotspots / hotspot_fallback
+        avoided_alpr     / alpr_fallback
+    A `*_fallback` is true when that avoidance was requested, boxes were built
+    for it, and the engine could not route with them closed - so this is the
+    ordinary route and the page must say the driver is not getting what they
+    asked for.
+
+    🚨 HOTSPOTS AND ALPR CAMERAS SHARE ONE BUDGET, because Valhalla caps the
+    TOTAL exclusion circumference (see EXCLUDE_BUDGET_M), not each polygon. With
+    both toggles on in a dense city the budget runs out, and then a ring that
+    did not fit is simply not sent - the toggle still did as much as the engine
+    allows, and whichever kind got no ring at all is reported as a fallback so
+    the claim on the page stays true.
     """
     auto = {
         # Valhalla reads these as PREFERENCES from 0 to 1, not switches. 0 is
@@ -183,18 +301,43 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
         # The driver is on a phone in a car: the narrative is what gets spoken.
         "directions_type": "instructions",
     }
-    polys = hotspot_polygons(hot_cells, a, b) if hot_cells else []
+    hp = hotspot_polygons(hot_cells, a, b) if hot_cells else []
+    ap = alpr_polygons(a, b) if avoid_alpr else []
+
+    # Fit both kinds under the one circumference cap. Hotspots first (a corridor
+    # rarely has many, and confirmed patrol history is the stronger signal),
+    # then ALPR cameras fill whatever budget is left. `continue`, not `break`,
+    # so a small camera box can still fit after a big hotspot box that did not.
+    polys, used, kept_hp, kept_ap = [], 0.0, 0, 0
+    for ring in hp:
+        per = _ring_perimeter_m(ring)
+        if used + per <= EXCLUDE_BUDGET_M:
+            used += per
+            polys.append(ring)
+            kept_hp += 1
+    for ring in ap:
+        per = _ring_perimeter_m(ring)
+        if used + per <= EXCLUDE_BUDGET_M:
+            used += per
+            polys.append(ring)
+            kept_ap += 1
+
     if polys:
         try:
-            body_x = dict(body, exclude_polygons=polys)
-            return {"trip": _post("/route", body_x)["trip"],
-                    "avoided_hotspots": True, "hotspot_fallback": False}
+            trip = _post("/route", dict(body, exclude_polygons=polys))["trip"]
+            return {"trip": trip,
+                    "avoided_hotspots": kept_hp > 0,
+                    "hotspot_fallback": bool(hp) and kept_hp == 0,
+                    "avoided_alpr": kept_ap > 0,
+                    "alpr_fallback": bool(ap) and kept_ap == 0}
         except Exception:
-            # No route with the hot areas closed. Fall through and say so.
+            # No route with those areas closed. Fall through and say so for
+            # everything that was actually attempted.
             pass
     out = _post("/route", body)
-    return {"trip": out["trip"], "avoided_hotspots": False,
-            "hotspot_fallback": bool(polys)}
+    return {"trip": out["trip"],
+            "avoided_hotspots": False, "hotspot_fallback": bool(hp),
+            "avoided_alpr": False, "alpr_fallback": bool(ap)}
 
 
 def speed_limit(lat: float, lon: float) -> dict:

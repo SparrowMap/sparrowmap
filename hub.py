@@ -2344,8 +2344,13 @@ class Handler(BaseHTTPRequestHandler):
                 # So the driving page can say "navigation is offline" instead
                 # of showing a Go button that does nothing. Cheap on purpose -
                 # the page asks once when it opens.
+                # `alpr` tells the page whether to offer the camera-avoidance
+                # toggle at all: a snapshot has to be loaded for it to do
+                # anything, and a switch that silently does nothing is worse
+                # than an absent one.
                 return self._json({"available": nav.available(),
-                                   "engine": "valhalla", "logged": False})
+                                   "engine": "valhalla", "logged": False,
+                                   "alpr": nav.alpr_available()})
 
             if p == "/api/node/me":
                 # A camera's owner reading back their OWN placement, to change
@@ -4970,7 +4975,8 @@ class Handler(BaseHTTPRequestHandler):
                     out = nav.route(a, z,
                                     avoid_highways=bool(av.get("highways")),
                                     avoid_tolls=bool(av.get("tolls")),
-                                    hot_cells=cells)
+                                    hot_cells=cells,
+                                    avoid_alpr=bool(av.get("alpr")))
                 except Exception as e:
                     # An engine that is down must say so. A navigation page
                     # that renders "no route found" when the router never

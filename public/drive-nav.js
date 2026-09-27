@@ -37,7 +37,7 @@ window.DriveNav = (function () {
   var offSince = 0;             // when we first looked off-route
   var limit = { mph: null, road: null };
   var limitAt = null;           // where the last speed-limit answer was for
-  var opts = { hotspots: true, highways: false, tolls: false };
+  var opts = { hotspots: true, highways: false, tolls: false, alpr: false };
 
   /* Valhalla returns the route as an encoded polyline at 1e6 precision, not
    * the 1e5 every other polyline library assumes. Decoding at the wrong
@@ -90,6 +90,7 @@ window.DriveNav = (function () {
           '<label><input type="checkbox" id="nsHot" checked> Avoid police hotspots</label>' +
           '<label><input type="checkbox" id="nsHwy"> Avoid highways</label>' +
           '<label><input type="checkbox" id="nsToll"> Avoid tolls</label>' +
+          '<label id="nsAlprRow" style="display:none"><input type="checkbox" id="nsAlpr"> Avoid license-plate cameras</label>' +
         '</div>' +
         '<div class="ns-note">Your destination is routed on SparrowMap’s own ' +
           'machine and is never logged, and never reaches anyone else.</div>' +
@@ -102,11 +103,14 @@ window.DriveNav = (function () {
     $('#nsCancel').onclick = function () { el.className = ''; };
     $('#nsStop').onclick = function () { stop(); el.className = ''; };
     $('#nsform').onsubmit = function (e) { e.preventDefault(); search($('#nsq').value); };
-    ['nsHot', 'nsHwy', 'nsToll'].forEach(function (id) {
-      $('#' + id).onchange = function () {
+    ['nsHot', 'nsHwy', 'nsToll', 'nsAlpr'].forEach(function (id) {
+      var box = $('#' + id);
+      if (!box) return;
+      box.onchange = function () {
         opts.hotspots = $('#nsHot').checked;
         opts.highways = $('#nsHwy').checked;
         opts.tolls = $('#nsToll').checked;
+        var al = $('#nsAlpr'); opts.alpr = !!(al && al.checked);
         if (dest) go(dest);        // re-route immediately: the toggle IS the ask
       };
     });
@@ -172,6 +176,13 @@ window.DriveNav = (function () {
         H.toast('No route avoids every hotspot — this one goes through some');
       } else if (res.j.avoided_hotspots) {
         H.toast('Routing around known hotspots');
+      }
+      // ALPR cameras, reported the same way: never claim an avoidance
+      // the engine could not actually make.
+      if (res.j.alpr_fallback) {
+        H.toast('No route avoids every plate camera — this one passes some');
+      } else if (res.j.avoided_alpr) {
+        H.toast('Routing around license-plate cameras');
       }
     }).catch(function () { H.toast('Navigation is unavailable'); });
   }
@@ -341,6 +352,9 @@ window.DriveNav = (function () {
         if (!d || !d.available) {
           if (btn) { btn.style.opacity = '.45'; btn.title = 'Navigation is offline'; btn.onclick = function () { H.toast('Navigation is offline right now'); }; }
         }
+        // Only offer plate-camera avoidance when there is a snapshot
+        // behind it; otherwise the toggle would do nothing.
+        if (d && d.alpr) { sheet(); var row = $('#nsAlprRow'); if (row) row.style.display = ''; }
       }).catch(function () {});
     setInterval(tick, 1000);
     paintLimit();
