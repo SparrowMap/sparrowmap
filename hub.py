@@ -4972,12 +4972,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(400, "need from:[lat,lon] and to:[lat,lon]")
                 av = b.get("avoid") or {}
                 cells = db.gov_heat() if av.get("hotspots") else None
+                # How far the driver will detour to avoid cameras, in miles;
+                # missing/"none" means no limit ("let them drive far"). Bounded
+                # so a bad value cannot become an unbounded search.
+                detour = av.get("alpr_detour")
+                try:
+                    detour = (None if detour in (None, "", "none")
+                              else max(0.0, min(400.0, float(detour))))
+                except (TypeError, ValueError):
+                    detour = None
                 try:
                     out = nav.route(a, z,
                                     avoid_highways=bool(av.get("highways")),
                                     avoid_tolls=bool(av.get("tolls")),
                                     hot_cells=cells,
-                                    avoid_alpr=bool(av.get("alpr")))
+                                    avoid_alpr=bool(av.get("alpr")),
+                                    alpr_detour_mi=detour)
                 except Exception as e:
                     # An engine that is down must say so. A navigation page
                     # that renders "no route found" when the router never

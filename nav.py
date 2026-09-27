@@ -82,7 +82,15 @@ HOT_MAX_POLYS = 60
 #: ⚠️ RAISING THIS MEANS RAISING service_limits.max_exclude_polygons_length in
 #: valhalla.json to match, and every extra polygon costs routing time on a box
 #: that is also running the map.
-EXCLUDE_BUDGET_M = 54_000.0
+#: How much exclusion the router may carry, in metres of ring circumference.
+#: MIN is the light default; MAX is what an unlimited-detour request may use,
+#: and it stays under the engine's max_exclude_polygons_length (200 km, set
+#: in deploy/valhalla-quiet.py). More budget = more cameras can be boxed = the
+#: route can be pushed further out. EXCLUDE_BUDGET_M is kept for the legacy
+#: hotspot_polygons helper.
+EXCLUDE_BUDGET_MIN = 30_000.0
+EXCLUDE_BUDGET_MAX = 180_000.0
+EXCLUDE_BUDGET_M = EXCLUDE_BUDGET_MAX
 
 #: Where the ALPR-camera snapshot lives. A separate sqlite file, not sparrow.db
 #: - see tools/load_alpr.py for why. Absent until a dump is loaded, and
@@ -110,7 +118,10 @@ ALPR_MAX = 80
 #: passes to walk a route out of a covered area. Bounded because each pass
 #: is an engine call, and because every camera is boxed at most once so it
 #: always terminates anyway.
-ALPR_MAX_ITERS = 4
+#: The MOST re-solves avoidance will do (for an unlimited-detour request).
+#: A short-detour request does fewer. Each is an engine call, so this caps
+#: how long 'drive as far as it takes' can spend.
+ALPR_ITERS_MAX = 10
 
 _ALPR_LOCK = threading.Lock()
 _alpr_conn = None
@@ -413,7 +424,8 @@ def _cam_lists(on_route, avoided, cap: int = 300) -> dict:
 
 
 def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
-          hot_cells=None, avoid_alpr: bool = False) -> dict:
+          hot_cells=None, avoid_alpr: bool = False,
+          alpr_detour_mi=None) -> dict:
     """A driving route from a=(lat,lon) to b=(lat,lon).
 
     Returns the trip plus, for each avoidance the driver asked for, whether it
@@ -448,9 +460,8 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
         # The driver is on a phone in a car: the narrative is what gets spoken.
         "directions_type": "instructions",
     }
-    # PASS ONE: an ordinary route. Needed anyway, and it is what tells us which
-    # hotspots and cameras are actually ON the way rather than merely near the
-    # straight line (see _cameras_on_path).
+    # PASS ONE: an ordinary route. Needed anyway, and it tells us which
+    # hotspots and cameras are actually ON the way (see _cameras_on_path).
     base = _post("/route", body)["trip"]
     plain = {"trip": base, "avoided_hotspots": False, "hotspot_fallback": False,
              "avoided_alpr": False, "alpr_fallback": False}
@@ -462,29 +473,43 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     except (KeyError, IndexError, TypeError):
         return plain
 
-    # Count exposure with a high cap: the boxing budget limits how many we act
-    # on, but the comparison "did the route get cleaner" must see them all.
+    def _len(trip):
+        try:
+            return float(trip["legs"][0]["summary"]["length"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return float("inf")
+
     def _cams(pth):
         return _cameras_on_path(pth, cap=10000) if avoid_alpr else []
 
     def _hots(pth):
         return _hotcells_on_path(hot_cells, pth) if want_hot else []
 
-    base_cams = _cams(base_path)
-    base_hot = _hots(base_path)
+    base_cams, base_hot = _cams(base_path), _hots(base_path)
     if not base_cams and not base_hot:
-        # The ordinary route already passes nothing to avoid.
         return dict(plain, **_cam_lists([], []))
 
-    # 🚨 ITERATIVE AVOIDANCE. His ask, 2026-09-27: "try harder ... go further
-    # out." A single reroute only pushes off the cameras on the FIRST path, and
-    # the road it lands on has its own - so exclusions ACCUMULATE and the route
-    # is re-solved until it runs clean, stops improving, or the (now 54 km)
-    # exclusion budget is spent. Each camera or cell is boxed at most once, so
-    # this always terminates.
-    boxed = set()
-    polys = []
-    used = [0.0]
+    # 🚨 HOW HARD TO LOOK, AND HOW FAR TO GO, IS THE DRIVER'S CHOICE.
+    # His call, 2026-09-27: "raise the cap further but make it editable. if
+    # someone wants to drive far let them." alpr_detour_mi is the most extra
+    # distance the driver will accept to avoid cameras; None means no limit,
+    # and no limit looks hardest. A bigger allowance also spends a bigger
+    # exclusion budget and more re-solves, because a route can only be pushed
+    # further out if more of the roads in the way are closed off.
+    if alpr_detour_mi is None:
+        iters, budget, limit_mi = ALPR_ITERS_MAX, EXCLUDE_BUDGET_MAX, float("inf")
+    else:
+        limit_mi = max(0.0, float(alpr_detour_mi))
+        frac = min(1.0, limit_mi / 40.0)
+        iters = int(3 + round(frac * (ALPR_ITERS_MAX - 3)))
+        budget = EXCLUDE_BUDGET_MIN + frac * (EXCLUDE_BUDGET_MAX - EXCLUDE_BUDGET_MIN)
+
+    base_len = _len(base)
+    # Every route we try is a candidate: (obstacles, length_mi, trip, cams, hots).
+    # The plain route is always one, so there is always something to return.
+    cands = [(len(base_cams) + len(base_hot), base_len, base, base_cams, base_hot)]
+
+    boxed, polys, used = set(), [], [0.0]
 
     def _add(points, half):
         added = 0
@@ -497,56 +522,54 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
             if _ring_contains(ring, a) or _ring_contains(ring, b):
                 continue
             per = _ring_perimeter_m(ring)
-            if used[0] + per > EXCLUDE_BUDGET_M:
+            if used[0] + per > budget:
                 continue
             used[0] += per
             polys.append(ring)
             added += 1
         return added
 
-    # Hotspots first (fewer, higher stakes), then the base path's cameras.
     _add(base_hot, HOT_BOX_M)
     _add(base_cams, ALPR_BOX_M)
-
-    best, best_cams, best_hot = base, base_cams, base_hot
-    for _ in range(ALPR_MAX_ITERS):
+    for _ in range(iters):
         if not polys:
             break
         try:
             cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
             cpath = _decode_shape(cand["legs"][0]["shape"])
         except Exception:
-            break                       # no route with these closed - keep best
+            break                       # no route with these closed - keep what we have
         cand_cams, cand_hot = _cams(cpath), _hots(cpath)
-        if len(cand_cams) + len(cand_hot) < len(best_cams) + len(best_hot):
-            best, best_cams, best_hot = cand, cand_cams, cand_hot
-        if not best_cams and not best_hot:
+        cands.append((len(cand_cams) + len(cand_hot), _len(cand), cand,
+                      cand_cams, cand_hot))
+        if not cand_cams and not cand_hot:
             break                       # clean - done
-        # 🚨 BOX THE ROUTE WE JUST TRIED, NOT THE BEST ONE. Each pass has to
-        # close off the roads the LAST attempt used, so the route is pushed
-        # progressively further out - even when that attempt was worse than the
-        # best so far. Re-boxing the best (usually still the base) adds only
-        # already-boxed cameras and the search stops dead after one detour that
-        # happened to hit more cameras, which is exactly what "it gives up too
-        # early" looked like. Nothing new to box, or no budget, means another
-        # pass cannot help.
+        # Box the road we JUST tried so the next pass is pushed further out.
         if _add(cand_cams, ALPR_BOX_M) + _add(cand_hot, HOT_BOX_M) == 0:
             break
+
+    # 🚨 CHOOSE WITHIN THE DRIVER'S DETOUR LIMIT. Among the routes that add no
+    # more than limit_mi to the plain drive, take the one passing the FEWEST
+    # cameras and hotspots, ties broken by the shorter drive. A cleaner route
+    # that costs more than the driver allowed is simply not offered - that is
+    # what the setting means - and the plain route is always eligible, so the
+    # floor is an honest fallback.
+    limit_len = base_len + limit_mi
+    eligible = [c for c in cands if c[1] <= limit_len + 1e-6] or [cands[0]]
+    best = min(eligible, key=lambda c: (c[0], c[1]))
+    _, _, best_trip, best_cams, best_hot = best
 
     cam_better = avoid_alpr and len(best_cams) < len(base_cams)
     hot_better = want_hot and len(best_hot) < len(base_hot)
     if not cam_better and not hot_better:
-        # 🚨 NOTHING COULD BE IMPROVED - and that must be said, not faked.
-        # In a blanketed metro no route avoids the cameras, so the honest answer
-        # is the ordinary route plus a fallback flag. This is what stops the
-        # feature ever pretending or making exposure worse.
+        # Nothing within the limit could improve on the plain route - say so.
         return dict({"trip": base,
                      "avoided_hotspots": False, "hotspot_fallback": want_hot,
                      "avoided_alpr": False, "alpr_fallback": avoid_alpr},
                     **_cam_lists(base_cams, []))
     on = set(best_cams)
     avoided = [c for c in base_cams if c not in on]
-    return dict({"trip": best,
+    return dict({"trip": best_trip,
                  "avoided_hotspots": hot_better,
                  "hotspot_fallback": want_hot and not hot_better,
                  "avoided_alpr": cam_better,

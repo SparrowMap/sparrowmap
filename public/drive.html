@@ -192,6 +192,11 @@
     padding:6px 0 6px 14px}
   .ns-opts label:last-child{padding-bottom:12px}
   .ns-opts input{width:20px;height:20px;accent-color:#2563eb}
+  /* The 'how far' picker under the camera-avoidance toggle. */
+  .ns-opts .ns-sub{display:flex;align-items:center;justify-content:space-between;
+    gap:10px;font-size:13.5px;color:#9fb3c8;padding:2px 0 8px 34px}
+  .ns-opts .ns-sub select{background:#0d1219;color:#e6eef7;border:1px solid var(--line);
+    border-radius:9px;padding:7px 9px;font-size:13.5px}
   /* The turn list, under the search bar while navigating. */
   #nsturns{margin-top:10px}
   #nsturns:empty{display:none}
@@ -426,7 +431,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=9"></script>
+<script src="/static/drive-nav.js?v=10"></script>
 <script>
 (function(){
   "use strict";

@@ -68,7 +68,7 @@ def quiet(cfg: dict) -> dict:
     # sets it here so a tile rebuild (which rewrites this file from defaults)
     # cannot quietly drop it back to 10 km. nav.EXCLUDE_BUDGET_M stays just
     # under this number.
-    cfg.setdefault("service_limits", {})["max_exclude_polygons_length"] = 60000
+    cfg.setdefault("service_limits", {})["max_exclude_polygons_length"] = 200000
     return cfg
 
 

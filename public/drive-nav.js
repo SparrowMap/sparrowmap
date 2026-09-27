@@ -37,7 +37,7 @@ window.DriveNav = (function () {
   var offSince = 0;             // when we first looked off-route
   var limit = { mph: null, road: null };
   var limitAt = null;           // where the last speed-limit answer was for
-  var opts = { hotspots: true, highways: false, tolls: false, alpr: false };
+  var opts = { hotspots: true, highways: false, tolls: false, alpr: false, alpr_detour: 8 };
   var camLayer = null;          // ALPR cameras on/around the route
   var overview = false;         // route-overview (zoomed out) or follow
 
@@ -100,6 +100,13 @@ window.DriveNav = (function () {
           '<label><input type="checkbox" id="nsHwy"> Avoid highways</label>' +
           '<label><input type="checkbox" id="nsToll"> Avoid tolls</label>' +
           '<label id="nsAlprRow" style="display:none"><input type="checkbox" id="nsAlpr"> Avoid license-plate cameras</label>' +
+          '<label id="nsAlprDetourRow" class="ns-sub" style="display:none">How far you’ll go to avoid them' +
+            '<select id="nsAlprDetour">' +
+              '<option value="3">A little (+3 mi)</option>' +
+              '<option value="8" selected>Balanced (+8 mi)</option>' +
+              '<option value="25">Far (+25 mi)</option>' +
+              '<option value="none">As far as it takes</option>' +
+            '</select></label>' +
         '</details>' +
         '<div id="nsresults"></div>' +
         '<div id="nsturns"></div>' +
@@ -110,7 +117,7 @@ window.DriveNav = (function () {
     $('#nsCancel').onclick = function () { closeSheet(); };
     $('#nsStop').onclick = function () { stop(); closeSheet(); };
     $('#nsform').onsubmit = function (e) { e.preventDefault(); search($('#nsq').value); };
-    ['nsHot', 'nsHwy', 'nsToll', 'nsAlpr'].forEach(function (id) {
+    ['nsHot', 'nsHwy', 'nsToll', 'nsAlpr', 'nsAlprDetour'].forEach(function (id) {
       var box = $('#' + id);
       if (!box) return;
       box.onchange = function () {
@@ -118,6 +125,9 @@ window.DriveNav = (function () {
         opts.highways = $('#nsHwy').checked;
         opts.tolls = $('#nsToll').checked;
         var al = $('#nsAlpr'); opts.alpr = !!(al && al.checked);
+        var ad = $('#nsAlprDetour'); if (ad) opts.alpr_detour = ad.value;
+        // The detour picker only matters, and only shows, when avoidance is on.
+        var dr = $('#nsAlprDetourRow'); if (dr) dr.style.display = opts.alpr ? '' : 'none';
         if (dest) go(dest);        // re-route immediately: the toggle IS the ask
       };
     });
