@@ -82,7 +82,7 @@ HOT_MAX_POLYS = 60
 #: ⚠️ RAISING THIS MEANS RAISING service_limits.max_exclude_polygons_length in
 #: valhalla.json to match, and every extra polygon costs routing time on a box
 #: that is also running the map.
-EXCLUDE_BUDGET_M = 9_000.0
+EXCLUDE_BUDGET_M = 54_000.0
 
 #: Where the ALPR-camera snapshot lives. A separate sqlite file, not sparrow.db
 #: - see tools/load_alpr.py for why. Absent until a dump is loaded, and
@@ -103,6 +103,14 @@ ALPR_BOX_M = 55.0
 #: pre-filter for the bounding-box query rather than a promise.
 ALPR_CORRIDOR_M = 4_000.0
 ALPR_MAX = 80
+
+#: How many times avoidance re-solves, each pass boxing the cameras the
+#: current best route still passes. One pass only pushes off the FIRST
+#: path's cameras; the road it lands on has its own, so it takes a few
+#: passes to walk a route out of a covered area. Bounded because each pass
+#: is an engine call, and because every camera is boxed at most once so it
+#: always terminates anyway.
+ALPR_MAX_ITERS = 4
 
 _ALPR_LOCK = threading.Lock()
 _alpr_conn = None
@@ -442,8 +450,7 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     }
     # PASS ONE: an ordinary route. Needed anyway, and it is what tells us which
     # hotspots and cameras are actually ON the way rather than merely near the
-    # straight line - the distinction that decides whether avoidance does
-    # anything (see _cameras_on_path).
+    # straight line (see _cameras_on_path).
     base = _post("/route", body)["trip"]
     plain = {"trip": base, "avoided_hotspots": False, "hotspot_fallback": False,
              "avoided_alpr": False, "alpr_fallback": False}
@@ -451,88 +458,95 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     if not (want_hot or avoid_alpr):
         return plain
     try:
-        path = _decode_shape(base["legs"][0]["shape"])
+        base_path = _decode_shape(base["legs"][0]["shape"])
     except (KeyError, IndexError, TypeError):
         return plain
 
-    hp = [_box(lat, lon, HOT_BOX_M)
-          for lat, lon in _hotcells_on_path(hot_cells, path)] if want_hot else []
-    base_cams = _cameras_on_path(path) if avoid_alpr else []
-    ap = [_box(lat, lon, ALPR_BOX_M) for lat, lon in base_cams]
+    # Count exposure with a high cap: the boxing budget limits how many we act
+    # on, but the comparison "did the route get cleaner" must see them all.
+    def _cams(pth):
+        return _cameras_on_path(pth, cap=10000) if avoid_alpr else []
 
-    # PASS TWO: reroute with the things on the path closed off. One box per
-    # obstacle, hotspots first, under the one circumference cap Valhalla
-    # enforces, and never a box that walls in the origin or destination.
-    polys, used, kept_hp, kept_ap = [], 0.0, 0, 0
-    for ring in hp:
-        if _ring_contains(ring, a) or _ring_contains(ring, b):
-            continue
-        per = _ring_perimeter_m(ring)
-        if used + per <= EXCLUDE_BUDGET_M:
-            used += per
+    def _hots(pth):
+        return _hotcells_on_path(hot_cells, pth) if want_hot else []
+
+    base_cams = _cams(base_path)
+    base_hot = _hots(base_path)
+    if not base_cams and not base_hot:
+        # The ordinary route already passes nothing to avoid.
+        return dict(plain, **_cam_lists([], []))
+
+    # 🚨 ITERATIVE AVOIDANCE. His ask, 2026-09-27: "try harder ... go further
+    # out." A single reroute only pushes off the cameras on the FIRST path, and
+    # the road it lands on has its own - so exclusions ACCUMULATE and the route
+    # is re-solved until it runs clean, stops improving, or the (now 54 km)
+    # exclusion budget is spent. Each camera or cell is boxed at most once, so
+    # this always terminates.
+    boxed = set()
+    polys = []
+    used = [0.0]
+
+    def _add(points, half):
+        added = 0
+        for lat, lon in points:
+            k = (round(lat, 5), round(lon, 5))
+            if k in boxed:
+                continue
+            boxed.add(k)
+            ring = _box(lat, lon, half)
+            if _ring_contains(ring, a) or _ring_contains(ring, b):
+                continue
+            per = _ring_perimeter_m(ring)
+            if used[0] + per > EXCLUDE_BUDGET_M:
+                continue
+            used[0] += per
             polys.append(ring)
-            kept_hp += 1
-    for ring in ap:
-        if _ring_contains(ring, a) or _ring_contains(ring, b):
-            continue
-        per = _ring_perimeter_m(ring)
-        if used + per <= EXCLUDE_BUDGET_M:
-            used += per
-            polys.append(ring)
-            kept_ap += 1
+            added += 1
+        return added
 
-    # Nothing on the path to avoid: the ordinary route is already clear, which
-    # is a success, not a fallback.
-    if not polys:
-        return dict(plain, **_cam_lists(base_cams, []))
+    # Hotspots first (fewer, higher stakes), then the base path's cameras.
+    _add(base_hot, HOT_BOX_M)
+    _add(base_cams, ALPR_BOX_M)
 
-    n_base_cam = len(ap)          # cameras / cells the plain route passed
-    n_base_hot = len(hp)
+    best, best_cams, best_hot = base, base_cams, base_hot
+    for _ in range(ALPR_MAX_ITERS):
+        if not polys:
+            break
+        try:
+            cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
+            cpath = _decode_shape(cand["legs"][0]["shape"])
+        except Exception:
+            break                       # no route with these closed - keep best
+        cand_cams, cand_hot = _cams(cpath), _hots(cpath)
+        if len(cand_cams) + len(cand_hot) < len(best_cams) + len(best_hot):
+            best, best_cams, best_hot = cand, cand_cams, cand_hot
+        if not best_cams and not best_hot:
+            break                       # clean - done
+        # Box whatever the current best route still passes and go again. If
+        # there is nothing new to box, or no budget left, another pass cannot
+        # change anything.
+        if _add(best_cams, ALPR_BOX_M) + _add(best_hot, HOT_BOX_M) == 0:
+            break
 
-    def _fell_back():
-        # The reroute was worse or impossible: keep the plain route and tell
-        # the driver plainly that what they asked for could not be done here.
+    cam_better = avoid_alpr and len(best_cams) < len(base_cams)
+    hot_better = want_hot and len(best_hot) < len(base_hot)
+    if not cam_better and not hot_better:
+        # 🚨 NOTHING COULD BE IMPROVED - and that must be said, not faked.
+        # In a blanketed metro no route avoids the cameras, so the honest answer
+        # is the ordinary route plus a fallback flag. This is what stops the
+        # feature ever pretending or making exposure worse.
         return dict({"trip": base,
                      "avoided_hotspots": False, "hotspot_fallback": want_hot,
                      "avoided_alpr": False, "alpr_fallback": avoid_alpr},
                     **_cam_lists(base_cams, []))
-
-    try:
-        cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
-    except Exception:
-        # No route at all with those areas closed.
-        return _fell_back()
-
-    # 🚨 A REROUTE THAT DID NOT REDUCE EXPOSURE IS NOT AN AVOIDANCE.
-    # In a saturated city, closing the cameras on one road just sends the route
-    # down another road that also has cameras - sometimes more. Measured in
-    # Atlanta: the plain route passed 11 and the naive reroute passed 12 while
-    # reporting success. So the candidate is measured the same way the original
-    # was, and it is only used when it is actually better; otherwise the plain
-    # route stands and the honest answer is "could not avoid them here". This is
-    # what stops the feature from ever making things worse or claiming a win it
-    # did not get.
-    try:
-        cpath = _decode_shape(cand["legs"][0]["shape"])
-    except (KeyError, IndexError, TypeError):
-        return _fell_back()
-    cand_cams = _cameras_on_path(cpath) if avoid_alpr else []
-    n_cand_cam = len(cand_cams)
-    n_cand_hot = len(_hotcells_on_path(hot_cells, cpath)) if want_hot else 0
-
-    if (n_cand_cam + n_cand_hot) >= (n_base_cam + n_base_hot):
-        return _fell_back()
-
-    cam_better = avoid_alpr and n_cand_cam < n_base_cam
-    hot_better = want_hot and n_cand_hot < n_base_hot
-    on = set(cand_cams)
+    on = set(best_cams)
     avoided = [c for c in base_cams if c not in on]
-    return dict({"trip": cand,
+    return dict({"trip": best,
                  "avoided_hotspots": hot_better,
                  "hotspot_fallback": want_hot and not hot_better,
                  "avoided_alpr": cam_better,
                  "alpr_fallback": avoid_alpr and not cam_better},
-                **_cam_lists(cand_cams, avoided))
+                **_cam_lists(best_cams, avoided))
 
 
 def speed_limit(lat: float, lon: float) -> dict:

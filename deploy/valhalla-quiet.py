@@ -58,6 +58,17 @@ def quiet(cfg: dict) -> dict:
     top = cfg.setdefault("logging", {})
     top["type"] = ""
     top["long_request"] = 1e9
+
+    # 🚨 ROOM TO ACTUALLY ROUTE AROUND CAMERAS. Valhalla defaults the TOTAL
+    # exclude-polygon circumference to 10 km and refuses the whole request past
+    # it (error 167), which caps avoidance at ~20 small boxes - not enough to
+    # push a route out of a camera-blanketed area. His ask, 2026-09-27: "try
+    # harder ... go further out." nav.py boxes each camera on the route and
+    # re-solves, accumulating exclusions, so it needs a far larger ceiling; this
+    # sets it here so a tile rebuild (which rewrites this file from defaults)
+    # cannot quietly drop it back to 10 km. nav.EXCLUDE_BUDGET_M stays just
+    # under this number.
+    cfg.setdefault("service_limits", {})["max_exclude_polygons_length"] = 60000
     return cfg
 
 
