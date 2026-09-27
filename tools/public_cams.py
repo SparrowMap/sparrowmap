@@ -1186,9 +1186,9 @@ def cmd_probe(args) -> int:
     # Every probe-gated index refuses to return unmeasured cameras by design,
     # so asking it what to measure would answer "nothing" for ever.
     if args.source == "on":
-        d = _get_json("https://511on.ca/api/v2/get/cameras")
-        urls = [v["Url"] for st in d for v in (st.get("Views") or [])
-                if v.get("Status") == "Enabled" and v.get("Url")]
+        # Ontario moved to Castle Rock (see ontario_index); measure the raw
+        # Castle Rock list, not the old key-gated API.
+        urls = [c["url"] for c in _castlerock_index("on", "511on.ca")]
     elif args.source in ARCGIS:
         urls = [c["url"] for c in arcgis_index(args.source, measured_only=False)]
     elif (args.source in ("oh", "nm", "mo", "ny", "mi", "in", "tx", "al",
