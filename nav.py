@@ -473,19 +473,49 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     # is a success, not a fallback.
     if not polys:
         return plain
-    try:
-        trip = _post("/route", dict(body, exclude_polygons=polys))["trip"]
-        return {"trip": trip,
-                "avoided_hotspots": kept_hp > 0,
-                "hotspot_fallback": want_hot and kept_hp == 0,
-                "avoided_alpr": kept_ap > 0,
-                "alpr_fallback": avoid_alpr and kept_ap == 0}
-    except Exception:
-        # No route with those areas closed. Give the ordinary one and say the
-        # driver is not getting what they asked for.
+
+    n_base_cam = len(ap)          # cameras / cells the plain route passed
+    n_base_hot = len(hp)
+
+    def _fell_back():
+        # The reroute was worse or impossible: keep the plain route and tell
+        # the driver plainly that what they asked for could not be done here.
         return {"trip": base,
-                "avoided_hotspots": False, "hotspot_fallback": bool(hp),
-                "avoided_alpr": False, "alpr_fallback": bool(ap)}
+                "avoided_hotspots": False, "hotspot_fallback": want_hot,
+                "avoided_alpr": False, "alpr_fallback": avoid_alpr}
+
+    try:
+        cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
+    except Exception:
+        # No route at all with those areas closed.
+        return _fell_back()
+
+    # 🚨 A REROUTE THAT DID NOT REDUCE EXPOSURE IS NOT AN AVOIDANCE.
+    # In a saturated city, closing the cameras on one road just sends the route
+    # down another road that also has cameras - sometimes more. Measured in
+    # Atlanta: the plain route passed 11 and the naive reroute passed 12 while
+    # reporting success. So the candidate is measured the same way the original
+    # was, and it is only used when it is actually better; otherwise the plain
+    # route stands and the honest answer is "could not avoid them here". This is
+    # what stops the feature from ever making things worse or claiming a win it
+    # did not get.
+    try:
+        cpath = _decode_shape(cand["legs"][0]["shape"])
+    except (KeyError, IndexError, TypeError):
+        return _fell_back()
+    n_cand_cam = len(_cameras_on_path(cpath)) if avoid_alpr else 0
+    n_cand_hot = len(_hotcells_on_path(hot_cells, cpath)) if want_hot else 0
+
+    if (n_cand_cam + n_cand_hot) >= (n_base_cam + n_base_hot):
+        return _fell_back()
+
+    cam_better = avoid_alpr and n_cand_cam < n_base_cam
+    hot_better = want_hot and n_cand_hot < n_base_hot
+    return {"trip": cand,
+            "avoided_hotspots": hot_better,
+            "hotspot_fallback": want_hot and not hot_better,
+            "avoided_alpr": cam_better,
+            "alpr_fallback": avoid_alpr and not cam_better}
 
 
 def speed_limit(lat: float, lon: float) -> dict:
