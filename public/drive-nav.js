@@ -244,6 +244,20 @@ window.DriveNav = (function () {
     banner();
   }
 
+  /* A little camera glyph for the map. Built once per marker; Leaflet caches
+   * nothing here, so it stays a plain inline SVG in a divIcon - no image
+   * request, works offline, and colours to match on-route vs avoided. */
+  function camIcon(color, filled) {
+    var svg = '<svg width="17" height="17" viewBox="0 0 24 24" fill="' +
+      (filled ? color : 'rgba(20,26,34,.55)') + '" stroke="' + color +
+      '" stroke-width="2" stroke-linejoin="round">' +
+      '<path d="M4 8.5h3L8.5 6h7L17 8.5h3V19H4z"/>' +
+      '<circle cx="12" cy="13" r="3" fill="' + (filled ? '#fff' : 'none') +
+      '" stroke="' + color + '"/></svg>';
+    return L.divIcon({ html: svg, className: 'camic', iconSize: [17, 17],
+      iconAnchor: [8, 9] });
+  }
+
   /* The license-plate cameras, so a driver can zoom out and SEE what is being
    * routed around. Red = still on this route (unavoidable here), amber ring =
    * one the plain route would have hit and this one skirts. These are fixed
@@ -253,13 +267,15 @@ window.DriveNav = (function () {
     var on = (out && out.alpr_on_route) || [], av = (out && out.alpr_avoided) || [];
     if (!on.length && !av.length) return;
     camLayer = L.layerGroup();
+    // Draw them AS CAMERAS, not dots (his call): amber outline = one this route
+    // avoids, solid red = one it still passes.
     av.forEach(function (c) {
-      L.circleMarker([c[0], c[1]], { radius: 5, color: '#f59e0b', weight: 2,
-        fillColor: '#f59e0b', fillOpacity: 0.25, interactive: false }).addTo(camLayer);
+      L.marker([c[0], c[1]], { icon: camIcon('#f59e0b', false),
+        interactive: false, keyboard: false }).addTo(camLayer);
     });
     on.forEach(function (c) {
-      L.circleMarker([c[0], c[1]], { radius: 4, color: '#ef4444', weight: 1.5,
-        fillColor: '#ef4444', fillOpacity: 0.85, interactive: false }).addTo(camLayer);
+      L.marker([c[0], c[1]], { icon: camIcon('#ef4444', true),
+        interactive: false, keyboard: false }).addTo(camLayer);
     });
     camLayer.addTo(H.map);
   }

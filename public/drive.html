@@ -161,6 +161,9 @@
      roads carry no maxspeed in OpenStreetMap and inventing one is how a
      driver gets a ticket trusting this. */
   #splimit.unknown{opacity:.55}
+  /* Camera glyphs for the route's ALPR markers (drive-nav.js). */
+  .camic{background:none;border:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
+  .camic svg{display:block}
   #navsheet{position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);
     display:none;align-items:flex-start;justify-content:center;padding:14px}
   #navsheet.show{display:flex}
@@ -423,7 +426,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=8"></script>
+<script src="/static/drive-nav.js?v=9"></script>
 <script>
 (function(){
   "use strict";
