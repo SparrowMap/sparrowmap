@@ -170,9 +170,30 @@
     border-radius:12px;border:1px solid var(--line);background:#111a24;
     color:#e6eef7;font-size:15px;line-height:1.35}
   .ns-empty{padding:12px 2px;color:#9fb3c8;font-size:14px}
-  .ns-opts{margin-top:12px;display:flex;flex-direction:column;gap:10px}
-  .ns-opts label{display:flex;align-items:center;gap:10px;font-size:15px}
+  /* Options collapsed into a dropdown so the sheet is a search box, not a wall
+     of checkboxes. His call, 2026-09-27. */
+  .ns-opts{margin-top:12px;border:1px solid var(--line);border-radius:12px;
+    background:#111a24;padding:0 12px}
+  .ns-opts summary{list-style:none;cursor:pointer;padding:11px 2px;font-size:15px;
+    color:#cfe0f5;display:flex;align-items:center;gap:8px}
+  .ns-opts summary::-webkit-details-marker{display:none}
+  .ns-opts summary::before{content:'▸';color:#6b8199;font-size:12px}
+  .ns-opts[open] summary::before{content:'▾'}
+  .ns-opts label{display:flex;align-items:center;gap:10px;font-size:15px;
+    padding:6px 0 6px 14px}
+  .ns-opts label:last-child{padding-bottom:12px}
   .ns-opts input{width:20px;height:20px;accent-color:#2563eb}
+  /* The turn list, under the search bar while navigating. */
+  #nsturns{margin-top:10px}
+  #nsturns:empty{display:none}
+  .ns-turns-h{font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;
+    color:#6b8199;margin:4px 2px 6px}
+  .ns-turn{display:flex;gap:10px;justify-content:space-between;align-items:baseline;
+    padding:9px 12px;border-radius:10px;border:1px solid var(--line);
+    background:#111a24;margin-bottom:6px;font-size:14.5px;line-height:1.3}
+  .ns-turn.now{border-color:#2563eb;background:#132132}
+  .ns-turn-t{flex:1;min-width:0}
+  .ns-turn-d{flex:0 0 auto;font-family:var(--mono,monospace);color:#9fb3c8;font-size:13px}
   .ns-note{margin-top:12px;color:#9fb3c8;font-size:12.5px;line-height:1.45}
   .ns-row{display:flex;gap:8px;margin-top:14px}
   .ns-row button{flex:1;padding:12px;border-radius:12px;border:1px solid var(--line);
@@ -396,7 +417,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=4"></script>
+<script src="/static/drive-nav.js?v=5"></script>
 <script>
 (function(){
   "use strict";
@@ -482,6 +503,14 @@
 
   // ---- state ----
   var me=null, meMarker=null, accCircle=null, follow=true, lastFix=null, progZoom=false;
+  // 🚨 THE DESTINATION SHEET IS A FULL-SCREEN MODAL, AND THE TWO HEAVY THINGS
+  // ON THIS PAGE KEPT RUNNING UNDER IT: the dashcam's ONNX detector (~3
+  // inferences a second on the main thread) and the map's animated
+  // follow-pan on every GPS fix. Typing a destination was super laggy
+  // because the keystrokes were competing with both, for work nobody can
+  // see behind the sheet. This pauses them while it is open. His report,
+  // 2026-09-27.
+  var uiPaused=false;
   var heading=null, speedMph=0;
 
   /* Which way the PHONE is pointing, from the magnetometer.
@@ -1088,7 +1117,7 @@
     $('#mph').textContent=Math.max(0,Math.round(speedMph));
     if(trailOn){ trail.push(now); if(trail.length>1200)trail.shift(); drawTrail(); }
     drawMe();
-    if(follow){ progZoom=(map.getZoom()<16); map.setView(me, Math.max(map.getZoom(),16),{animate:true}); }
+    if(follow && !uiPaused){ progZoom=(map.getZoom()<16); map.setView(me, Math.max(map.getZoom(),16),{animate:true}); }
     if(accCircle){accCircle.setLatLng(me).setRadius(c.accuracy||20);}
     else{accCircle=L.circle(me,{radius:c.accuracy||20,color:'#3b82f6',weight:1,
       opacity:.3,fillOpacity:.06,interactive:false}).addTo(map);}
@@ -1181,7 +1210,10 @@
       // The route overview pulls the map out to the whole trip; it has to stop
       // follow mode or the next fix would snap straight back to the car.
       setFollow:function(v){follow=!!v; $('#recenter').style.display=v?'none':'flex';},
-      markProgZoom:function(){progZoom=true;}
+      markProgZoom:function(){progZoom=true;},
+      // Pause the dashcam inference and the follow-pan while the destination
+      // sheet is open, so typing is not fighting them for the main thread.
+      setUiPaused:function(v){uiPaused=!!v;}
     });
   }
   $('#startBtn').onclick=start;
@@ -1640,6 +1672,7 @@ function redactPlateBand(cv, geom) {
   }
   function dloop(){
     if(!camOn)return;
+    if(uiPaused){ return setTimeout(function(){requestAnimationFrame(dloop);}, 150); }
     var v=$('#dashvid');
     if(v.readyState<2||!session){ return requestAnimationFrame(dloop); }
     letterbox(v,v.videoWidth,v.videoHeight);

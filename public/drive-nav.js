@@ -88,12 +88,14 @@ window.DriveNav = (function () {
           '<button type="submit">Find</button>' +
         '</form>' +
         '<div id="nsresults"></div>' +
-        '<div class="ns-opts">' +
+        '<div id="nsturns"></div>' +
+        '<details class="ns-opts" id="nsOpts">' +
+          '<summary>Route options</summary>' +
           '<label><input type="checkbox" id="nsHot" checked> Avoid police hotspots</label>' +
           '<label><input type="checkbox" id="nsHwy"> Avoid highways</label>' +
           '<label><input type="checkbox" id="nsToll"> Avoid tolls</label>' +
           '<label id="nsAlprRow" style="display:none"><input type="checkbox" id="nsAlpr"> Avoid license-plate cameras</label>' +
-        '</div>' +
+        '</details>' +
         '<div class="ns-note">Your destination is routed on SparrowMap’s own ' +
           'machine and is never logged, and never reaches anyone else.</div>' +
         '<div class="ns-row">' +
@@ -102,8 +104,8 @@ window.DriveNav = (function () {
         '</div>' +
       '</div>';
     document.body.appendChild(el);
-    $('#nsCancel').onclick = function () { el.className = ''; };
-    $('#nsStop').onclick = function () { stop(); el.className = ''; };
+    $('#nsCancel').onclick = function () { closeSheet(); };
+    $('#nsStop').onclick = function () { stop(); closeSheet(); };
     $('#nsform').onsubmit = function (e) { e.preventDefault(); search($('#nsq').value); };
     ['nsHot', 'nsHwy', 'nsToll', 'nsAlpr'].forEach(function (id) {
       var box = $('#' + id);
@@ -118,7 +120,39 @@ window.DriveNav = (function () {
     });
     return el;
   }
-  function openSheet() { sheet().className = 'show'; setTimeout(function () { $('#nsq').focus(); }, 30); }
+  /* The whole turn list, in order, under the search bar. His ask: tapping the
+   * turn card should show every turn, not just the next one. Built from the
+   * route we already have - no request - and only while navigating; with no
+   * route the slot is empty and the sheet is just the destination search. */
+  function fillTurns() {
+    var box = $('#nsturns');
+    if (!box) return;
+    var leg = trip && trip.legs && trip.legs[0];
+    var mans = leg && leg.maneuvers;
+    if (!mans || !mans.length) { box.innerHTML = ''; return; }
+    var html = '<div class="ns-turns-h">Turns</div>';
+    for (var i = 0; i < mans.length; i++) {
+      var m = mans[i];
+      var d = m.length ? fmtDist(m.length * 1609.34) : '';
+      html += '<div class="ns-turn' + (i === manIdx ? ' now' : '') + '">' +
+        '<span class="ns-turn-t">' + (m.instruction || '') + '</span>' +
+        '<span class="ns-turn-d">' + d + '</span></div>';
+    }
+    box.innerHTML = html;
+  }
+
+  function openSheet(withTurns) {
+    sheet().className = 'show';
+    fillTurns();
+    // Only steal focus to the search box when the driver opened it to search.
+    // Tapping the turn card to read the list should not pop the keyboard up.
+    if (H && H.setUiPaused) H.setUiPaused(true);   // stop the heavy loops while typing
+    if (!withTurns) setTimeout(function () { $('#nsq').focus(); }, 30);
+  }
+  function closeSheet() {
+    var el = $('#navsheet'); if (el) el.className = '';
+    if (H && H.setUiPaused) H.setUiPaused(false);
+  }
 
   function search(q) {
     q = (q || '').trim();
@@ -145,7 +179,7 @@ window.DriveNav = (function () {
           var name = r.name || (lat.toFixed(4) + ', ' + lon.toFixed(4));
           var b = document.createElement('button');
           b.className = 'ns-hit'; b.type = 'button'; b.textContent = name;
-          b.onclick = function () { $('#navsheet').className = ''; go({ lat: lat, lon: lon, label: name }); };
+          b.onclick = function () { closeSheet(); go({ lat: lat, lon: lon, label: name }); };
           box.appendChild(b);
         });
       })
@@ -307,7 +341,7 @@ window.DriveNav = (function () {
           '<button type="button" class="nb-ov" id="nbOv">Overview</button></span></div>';
       document.body.appendChild(b);
       // A tap on the card text opens the destination sheet; the buttons do not.
-      $('#nbTurn').onclick = openSheet;
+      $('#nbTurn').onclick = function () { openSheet(true); };
       $('#nbOv').onclick = function (e) { e.stopPropagation(); toggleOverview(); };
       paintLimit();
     }
