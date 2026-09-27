@@ -522,10 +522,15 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
             best, best_cams, best_hot = cand, cand_cams, cand_hot
         if not best_cams and not best_hot:
             break                       # clean - done
-        # Box whatever the current best route still passes and go again. If
-        # there is nothing new to box, or no budget left, another pass cannot
-        # change anything.
-        if _add(best_cams, ALPR_BOX_M) + _add(best_hot, HOT_BOX_M) == 0:
+        # 🚨 BOX THE ROUTE WE JUST TRIED, NOT THE BEST ONE. Each pass has to
+        # close off the roads the LAST attempt used, so the route is pushed
+        # progressively further out - even when that attempt was worse than the
+        # best so far. Re-boxing the best (usually still the base) adds only
+        # already-boxed cameras and the search stops dead after one detour that
+        # happened to hit more cameras, which is exactly what "it gives up too
+        # early" looked like. Nothing new to box, or no budget, means another
+        # pass cannot help.
+        if _add(cand_cams, ALPR_BOX_M) + _add(cand_hot, HOT_BOX_M) == 0:
             break
 
     cam_better = avoid_alpr and len(best_cams) < len(base_cams)
