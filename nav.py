@@ -110,6 +110,16 @@ ALPR_BOX_M = 55.0
 #: these are kept, and then only as many as the budget allows, so this is a
 #: pre-filter for the bounding-box query rather than a promise.
 ALPR_CORRIDOR_M = 4_000.0
+
+#: How close the route must pass a camera to count as driving PAST it. An ALPR
+#: sits a few metres off the lane it reads; a parallel road or a cross street is
+#: usually 50 m+ away, and at 60 m those neighbours were flagged as on-route
+#: (his catch: a red camera that was on a different road nearby). 30 m, measured
+#: to the nearest road SEGMENT, catches the camera on your road - even a wide
+#: divided one - while leaving the road one block over alone. An ALPR on the
+#: OPPOSITE carriageway is also excluded, which is correct: it reads oncoming
+#: traffic, not you.
+ALPR_ON_ROUTE_M = 30.0
 ALPR_MAX = 80
 
 #: How many times avoidance re-solves, each pass boxing the cameras the
@@ -337,11 +347,21 @@ def _subsample(path, cap: int = 700) -> list:
 
 
 def _min_dist_to_path_m(pt, path) -> float:
-    lat, lon = pt
+    """Distance from a point to the ACTUAL route, measured to the nearest
+    SEGMENT, not the nearest sampled vertex.
+
+    🚨 VERTEX DISTANCE FLAGGED THE WRONG ROAD. A camera beside a long straight
+    stretch is far from either end of that stretch but right next to the line
+    between them, so measuring only to vertices reported it as much farther than
+    it is (and, the other way, a vertex that happened to fall near a camera on a
+    PARALLEL road reported it as on-route). His catch, 2026-09-27: a red camera
+    that was on a different road just close by. Segment distance is the honest
+    number, and it is what lets the on-route radius be tightened without missing
+    cameras that really are on the road.
+    """
     best = float("inf")
-    for plat, plon in path:
-        my, mx = _m_per_deg((lat + plat) / 2.0)
-        d = math.hypot((lat - plat) * my, (lon - plon) * mx)
+    for i in range(len(path) - 1):
+        d = _point_to_segment_m(pt, path[i], path[i + 1])
         if d < best:
             best = d
     return best
@@ -355,7 +375,7 @@ def _box(lat, lon, half_m: float) -> list:
             [lon - dlon, lat - dlat]]
 
 
-def _cameras_on_path(path, radius_m: float = 60.0, cap: int = ALPR_MAX) -> list:
+def _cameras_on_path(path, radius_m: float = ALPR_ON_ROUTE_M, cap: int = ALPR_MAX) -> list:
     """ALPR cameras within radius_m of the ACTUAL route, nearest first.
 
     🚨 THIS IS WHY AVOIDANCE IS TWO-PASS. Excluding the cameras nearest the
@@ -380,7 +400,10 @@ def _cameras_on_path(path, radius_m: float = 60.0, cap: int = ALPR_MAX) -> list:
         ).fetchall()
     except sqlite3.Error:
         return []
-    sp = _subsample(path)
+    # Denser sample than the hotspot test uses: at a 30 m radius the straight
+    # line between sampled points must not cut a curve by more than a few
+    # metres, so ~10 m spacing (3000 points on a long route).
+    sp = _subsample(path, 3000)
     hits = []
     for clat, clon in rows:
         d = _min_dist_to_path_m((clat, clon), sp)
