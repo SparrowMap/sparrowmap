@@ -2607,7 +2607,7 @@ This camera reads none, so the sightings above cannot be told apart.">&mdash;</b
     ? `<span title="${s.heartbeats_total.toLocaleString()} heartbeats, one every 30 seconds. A lower bound: heartbeats were not always enabled and dropped ones are never counted."><b>${Math.round(s.heartbeats_total / 120).toLocaleString()}</b> hours watched</span>`
     : '';
   $('#stats').innerHTML = `
-    <span title="${everProduced} of these have ever sent a sighting. Enrolling a camera is one tap; keeping one running is the real contribution."><i>${s.nodes_online}</i>/<b>${s.nodes_active}</b> cameras online</span>
+    <span title="Public traffic cameras beating right now. ${everProduced} of all enrolled have ever produced a sighting."><i>${s.nodes_online}</i> cameras online</span>
     ${hours}
     <span class="movingstat" title="${movingTitle}"><b id="movingnow" class="${movingNow() ? 'on' : ''}">${movingNow().toLocaleString()}</b> moving now</span>
     <span><b>${(s.traffic_24h ?? 0).toLocaleString()}</b> passes 24h</span>

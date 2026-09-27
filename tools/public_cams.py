@@ -248,29 +248,23 @@ def ontario_index() -> list:
     would put a thousand nodes on the map that can never produce a sighting,
     and duplicate-and-useless nodes are the hardest thing here to take back.
     """
+    # 🚨 2026-09-27: Ontario KEY-GATED the old /api/v2/get/cameras (it now
+    # answers "Invalid Key") and moved to the Castle Rock DataTables platform -
+    # the same /List/GetData/Cameras + images[].id system az/ut/id already use.
+    # _castlerock_index reads it (1,660 views); this still returns ONLY what the
+    # probe measured past the bar, on the same reasoning as before. The camera
+    # URLs are new, so the probe has to be re-run once - until then this returns
+    # nothing rather than a wall of unmeasured cameras.
     probe = load_probe()
-    d = _get_json("https://511on.ca/api/v2/get/cameras")
     out, unprobed = [], 0
-    for st in d:
-        lat, lon = st.get("Latitude"), st.get("Longitude")
-        if lat in (None, 0) or lon in (None, 0):
+    for r in _castlerock_index("on", "511on.ca"):
+        w = probe.get(r["url"])
+        if w is None:
+            unprobed += 1
             continue
-        for v in (st.get("Views") or []):
-            if v.get("Status") != "Enabled" or not v.get("Url"):
-                continue
-            w = probe.get(v["Url"])
-            if w is None:
-                unprobed += 1
-                continue
-            if w < MIN_HD_WIDTH:
-                continue
-            desc = (v.get("Description") or "").strip()
-            name = (st.get("Location") or st.get("Roadway") or "Ontario camera")
-            if desc:
-                name = f"{name} ({desc})"
-            out.append({"src": "on", "ref": str(v["Id"]),
-                        "name": name[:60], "lat": float(lat), "lon": float(lon),
-                        "url": v["Url"]})
+        if w < MIN_HD_WIDTH:
+            continue
+        out.append(r)
     if unprobed:
         print(f"  ⚠ {unprobed} Ontario view(s) never measured - run "
               f"`public_cams.py probe --source on` or they stay out")

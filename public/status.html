@@ -208,7 +208,7 @@
       var cards = "";
       cards += card(ms + " ms", "your round trip to this server");
       cards += card(fmtUptime(h.uptime_s), "server uptime");
-      cards += card((s.nodes_online || 0) + "/" + (s.nodes_active || 0), "cameras online");
+      cards += card((s.nodes_online || 0), "cameras online");
       cards += card((s.sightings_24h || 0).toLocaleString(), "passes seen in 24h");
       $("#cards").innerHTML = cards;
 

@@ -810,7 +810,7 @@ curl https://map.sparrowmap.com/api/audit       <span class="c"># what the revie
     host.textContent = '';
     var grid = el('div', 'counters');
     var items = [
-      [(s.nodes_online != null ? s.nodes_online : '?') + ' / ' + (s.nodes_active != null ? s.nodes_active : '?'), 'cameras online', false],
+      [(s.nodes_online != null ? s.nodes_online : '?'), 'cameras online', false],
       [s.sightings_24h != null ? s.sightings_24h.toLocaleString() : '?', 'seen in 24h', false],
       [s.public_24h != null ? s.public_24h.toLocaleString() : '?', 'published in 24h', true],
       [s.traffic_24h != null ? s.traffic_24h.toLocaleString() : '?', 'private passes', false]
