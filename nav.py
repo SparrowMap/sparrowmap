@@ -281,6 +281,117 @@ def hotspot_polygons(cells, a, b, corridor_m: float = 25_000.0) -> list:
     return out
 
 
+def _decode_shape(shape, precision: float = 1e6) -> list:
+    """Valhalla's encoded polyline -> [(lat, lon), ...]. 1e6, not the 1e5 every
+    other library assumes; see the decoder in drive-nav.js for the same trap."""
+    i = lat = lon = 0
+    out = []
+    n = len(shape)
+    while i < n:
+        for k in range(2):
+            shift = res = 0
+            while True:
+                b = ord(shape[i]) - 63
+                i += 1
+                res |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            v = ~(res >> 1) if (res & 1) else (res >> 1)
+            if k == 0:
+                lat += v
+            else:
+                lon += v
+        out.append((lat / precision, lon / precision))
+    return out
+
+
+def _subsample(path, cap: int = 700) -> list:
+    """At most `cap` points along a path. A whole-US route is tens of thousands
+    of vertices; every camera-vs-path test walks this, so it is bounded. Valhalla
+    shapes are dense (metres apart), so 700 points on a long route still lands one
+    every few tens of metres - fine against a 60 m radius."""
+    if len(path) <= cap:
+        return path
+    step = len(path) // cap + 1
+    return path[::step]
+
+
+def _min_dist_to_path_m(pt, path) -> float:
+    lat, lon = pt
+    best = float("inf")
+    for plat, plon in path:
+        my, mx = _m_per_deg((lat + plat) / 2.0)
+        d = math.hypot((lat - plat) * my, (lon - plon) * mx)
+        if d < best:
+            best = d
+    return best
+
+
+def _box(lat, lon, half_m: float) -> list:
+    my, mx = _m_per_deg(lat)
+    dlat, dlon = half_m / my, half_m / mx
+    return [[lon - dlon, lat - dlat], [lon + dlon, lat - dlat],
+            [lon + dlon, lat + dlat], [lon - dlon, lat + dlat],
+            [lon - dlon, lat - dlat]]
+
+
+def _cameras_on_path(path, radius_m: float = 60.0, cap: int = ALPR_MAX) -> list:
+    """ALPR cameras within radius_m of the ACTUAL route, nearest first.
+
+    🚨 THIS IS WHY AVOIDANCE IS TWO-PASS. Excluding the cameras nearest the
+    straight line between origin and destination does nothing: measured on an
+    Atlanta route, the plain path passed 8 cameras and not one of them was among
+    the 20 nearest the straight line, so the exclusion changed no road at all.
+    The cameras that matter are the ones on the road you would actually drive,
+    which you only know once you have a route - so route() routes first, finds
+    the cameras on that path here, and reroutes around them.
+    """
+    conn = _alpr()
+    if conn is None or not path:
+        return []
+    la = [p[0] for p in path]
+    lo = [p[1] for p in path]
+    pad = radius_m / 111_320.0 + 5e-4
+    try:
+        rows = conn.execute(
+            "SELECT lat, lon FROM cams WHERE lat BETWEEN ? AND ? "
+            "AND lon BETWEEN ? AND ?",
+            (min(la) - pad, max(la) + pad, min(lo) - pad, max(lo) + pad)
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    sp = _subsample(path)
+    hits = []
+    for clat, clon in rows:
+        d = _min_dist_to_path_m((clat, clon), sp)
+        if d <= radius_m:
+            hits.append((d, clat, clon))
+    hits.sort()
+    return [(la_, lo_) for _, la_, lo_ in hits[:cap]]
+
+
+def _hotcells_on_path(cells, path, radius_m: float = HOT_BOX_M) -> list:
+    """Hot cells (n>=HOT_MIN_N) within radius_m of the actual route, hottest
+    first - the same path-based idea as the cameras, and better than the old
+    distance-to-straight-line: a cell near the line you never drive down is not
+    on your route."""
+    hits = []
+    sp = _subsample(path)
+    for c in cells or []:
+        try:
+            n = c.get("n") or 0
+            if n < HOT_MIN_N:
+                continue
+            lat, lon = float(c["lat"]), float(c["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _min_dist_to_path_m((lat, lon), sp) <= radius_m:
+            hits.append((n, lat, lon))
+    hits.sort(key=lambda t: -t[0])
+    return [(lat, lon) for _, lat, lon in hits]
+
+
 def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
           hot_cells=None, avoid_alpr: bool = False) -> dict:
     """A driving route from a=(lat,lon) to b=(lat,lon).
@@ -317,13 +428,29 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
         # The driver is on a phone in a car: the narrative is what gets spoken.
         "directions_type": "instructions",
     }
-    hp = hotspot_polygons(hot_cells, a, b) if hot_cells else []
-    ap = alpr_polygons(a, b) if avoid_alpr else []
+    # PASS ONE: an ordinary route. Needed anyway, and it is what tells us which
+    # hotspots and cameras are actually ON the way rather than merely near the
+    # straight line - the distinction that decides whether avoidance does
+    # anything (see _cameras_on_path).
+    base = _post("/route", body)["trip"]
+    plain = {"trip": base, "avoided_hotspots": False, "hotspot_fallback": False,
+             "avoided_alpr": False, "alpr_fallback": False}
+    want_hot = bool(hot_cells)
+    if not (want_hot or avoid_alpr):
+        return plain
+    try:
+        path = _decode_shape(base["legs"][0]["shape"])
+    except (KeyError, IndexError, TypeError):
+        return plain
 
-    # Fit both kinds under the one circumference cap. Hotspots first (a corridor
-    # rarely has many, and confirmed patrol history is the stronger signal),
-    # then ALPR cameras fill whatever budget is left. `continue`, not `break`,
-    # so a small camera box can still fit after a big hotspot box that did not.
+    hp = [_box(lat, lon, HOT_BOX_M)
+          for lat, lon in _hotcells_on_path(hot_cells, path)] if want_hot else []
+    ap = [_box(lat, lon, ALPR_BOX_M)
+          for lat, lon in _cameras_on_path(path)] if avoid_alpr else []
+
+    # PASS TWO: reroute with the things on the path closed off. One box per
+    # obstacle, hotspots first, under the one circumference cap Valhalla
+    # enforces, and never a box that walls in the origin or destination.
     polys, used, kept_hp, kept_ap = [], 0.0, 0, 0
     for ring in hp:
         if _ring_contains(ring, a) or _ring_contains(ring, b):
@@ -342,22 +469,23 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
             polys.append(ring)
             kept_ap += 1
 
-    if polys:
-        try:
-            trip = _post("/route", dict(body, exclude_polygons=polys))["trip"]
-            return {"trip": trip,
-                    "avoided_hotspots": kept_hp > 0,
-                    "hotspot_fallback": bool(hp) and kept_hp == 0,
-                    "avoided_alpr": kept_ap > 0,
-                    "alpr_fallback": bool(ap) and kept_ap == 0}
-        except Exception:
-            # No route with those areas closed. Fall through and say so for
-            # everything that was actually attempted.
-            pass
-    out = _post("/route", body)
-    return {"trip": out["trip"],
-            "avoided_hotspots": False, "hotspot_fallback": bool(hp),
-            "avoided_alpr": False, "alpr_fallback": bool(ap)}
+    # Nothing on the path to avoid: the ordinary route is already clear, which
+    # is a success, not a fallback.
+    if not polys:
+        return plain
+    try:
+        trip = _post("/route", dict(body, exclude_polygons=polys))["trip"]
+        return {"trip": trip,
+                "avoided_hotspots": kept_hp > 0,
+                "hotspot_fallback": want_hot and kept_hp == 0,
+                "avoided_alpr": kept_ap > 0,
+                "alpr_fallback": avoid_alpr and kept_ap == 0}
+    except Exception:
+        # No route with those areas closed. Give the ordinary one and say the
+        # driver is not getting what they asked for.
+        return {"trip": base,
+                "avoided_hotspots": False, "hotspot_fallback": bool(hp),
+                "avoided_alpr": False, "alpr_fallback": bool(ap)}
 
 
 def speed_limit(lat: float, lon: float) -> dict:
