@@ -186,11 +186,26 @@ def speed_limit(lat: float, lon: float) -> dict:
             names = info.get("names") or []
             if road is None and names:
                 road = names[0]
-            sl = edge.get("speed_limit")
+            # 🚨 THE KEY IS edge_info.speed_limit, NOT edge.speed_limit.
+            # Written from a remembered key name, this read `edge` and returned
+            # None for every road on earth - which looks exactly like "OSM has
+            # no maxspeed here", the answer that is genuinely correct most of
+            # the time. A wrong parser hiding behind a plausible empty result
+            # is the failure mode this file was warned about.
+            #
+            # Measured 2026-09-27 against the live engine, the first time it
+            # had ever run: /locate at Times Square returns
+            # edge_info.speed_limit = 40 with names ["7th Avenue"], while
+            # edge.speed_limit is absent. Before this fix /api/speedlimit
+            # answered {"mph": null, "road": "7th Avenue"} - it had found the
+            # road and thrown the number away.
+            sl = info.get("speed_limit") or edge.get("speed_limit")
             if sl and best is None:
                 best = float(sl)
-    # Valhalla reports speed limits in km/h. The exact key and unit are
-    # verified against a live /locate response before this ships - see
-    # tools/nav_probe.py, which prints what the engine actually returns rather
-    # than what a docstring somewhere believes.
+    # ✅ THE UNIT IS km/h, AND THAT IS NOW MEASURED RATHER THAN ASSUMED.
+    # Times Square returns 40 where the posted limit is 25 mph (40.2 km/h), and
+    # a downtown Los Angeles street returns 40 where California's urban default
+    # is 25 mph. Both land on the same conversion, and 40 would be a nonsense
+    # POSTED value for either road, so mph is ruled out.
+    #   40 km/h * 0.621371 = 24.9 -> 25 mph. Correct.
     return {"mph": int(round(best * 0.621371)) if best else None, "road": road}
