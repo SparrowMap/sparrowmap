@@ -446,6 +446,41 @@ def _cam_lists(on_route, avoided, cap: int = 300) -> dict:
     return {"alpr_on_route": fmt(on_route), "alpr_avoided": fmt(avoided)}
 
 
+def _route_avoiding(body, rings, a, b, max_relax: int = 6):
+    """Route excluding `rings`; return (trip_or_None, feasible_rings).
+
+    🚨 ONE UNAVOIDABLE CAMERA MUST NOT ABORT AVOIDING THE REST. Excluding every
+    camera on a path can leave Valhalla no route at all (error 442) - the boxes
+    on the first and last mile close the only way out of the origin or in to the
+    destination, which you cannot avoid because you have to start and finish
+    there. Measured in Dallas: 3 cameras, the reroute around them hit 7, and
+    boxing those 442'd, so avoidance gave up and the driver got all 3 back.
+
+    So when the full set has no path, the ring nearest an endpoint - the most
+    likely blocker, and unavoidable anyway - is dropped and it tries again,
+    until a route exists. The dropped rings are removed from the set returned,
+    so the caller stops re-sending them; their cameras stay honestly on-route.
+    """
+    cur = list(rings)
+
+    def _near_end(ring):
+        clat = (ring[0][1] + ring[2][1]) / 2.0
+        clon = (ring[0][0] + ring[2][0]) / 2.0
+        my, mx = _m_per_deg(clat)
+        return min(math.hypot((clat - a[0]) * my, (clon - a[1]) * mx),
+                   math.hypot((clat - b[0]) * my, (clon - b[1]) * mx))
+
+    for _ in range(max_relax + 1):
+        try:
+            body_x = body if not cur else dict(body, exclude_polygons=cur)
+            return _post("/route", body_x)["trip"], cur
+        except Exception:
+            if not cur:
+                return None, []
+            cur.pop(min(range(len(cur)), key=lambda k: _near_end(cur[k])))
+    return None, cur
+
+
 def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
           hot_cells=None, avoid_alpr: bool = False,
           alpr_detour_mi=None) -> dict:
@@ -557,11 +592,17 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     for _ in range(iters):
         if not polys:
             break
+        # Relax on infeasibility so an unavoidable endpoint camera cannot abort
+        # avoiding the rest; polys becomes the feasible subset that actually
+        # routed, so the next pass builds on it rather than re-sending a set
+        # that has no path.
+        cand, polys = _route_avoiding(body, polys, a, b)
+        if cand is None:
+            break
         try:
-            cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
             cpath = _decode_shape(cand["legs"][0]["shape"])
-        except Exception:
-            break                       # no route with these closed - keep what we have
+        except (KeyError, IndexError, TypeError):
+            break
         cand_cams, cand_hot = _cams(cpath), _hots(cpath)
         cands.append((len(cand_cams) + len(cand_hot), _len(cand), cand,
                       cand_cams, cand_hot))
