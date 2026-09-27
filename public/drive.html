@@ -164,12 +164,23 @@
   /* Camera glyphs for the route's ALPR markers (drive-nav.js). */
   .camic{background:none;border:0;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
   .camic svg{display:block}
+  /* 🚨 CLEAR THE DYNAMIC ISLAND / NOTCH AND THE HOME INDICATOR. His catch,
+     2026-09-27: on a Dynamic Island phone the "Where to?" box and Find button
+     sat UNDER the island and could not be scrolled to. The sheet is full-screen
+     (inset:0) so its top-aligned card began behind the island; the safe-area
+     insets push it into the visible screen. Same reason the HUD and side
+     buttons already use env(safe-area-inset-*). */
   #navsheet{position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);
-    display:none;align-items:flex-start;justify-content:center;padding:14px}
+    display:none;align-items:flex-start;justify-content:center;
+    padding:calc(env(safe-area-inset-top) + 12px) 12px
+            calc(env(safe-area-inset-bottom) + 12px)}
   #navsheet.show{display:flex}
   #navsheet .ns-card{width:100%;max-width:520px;background:#0d1219;
     border:1px solid var(--line);border-radius:18px;padding:14px;
-    max-height:88vh;overflow:auto}
+    /* Fit between the insets and scroll INSIDE the card, so a long turn list
+       never pushes the search box back off the top of the screen. */
+    max-height:calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+    overflow:auto}
   #nsform{display:flex;gap:8px}
   #nsq{flex:1;padding:12px 14px;border-radius:12px;border:1px solid var(--line);
     background:#111a24;color:#e6eef7;font-size:16px}
