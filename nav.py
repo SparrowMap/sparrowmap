@@ -178,6 +178,22 @@ def alpr_polygons(a, b) -> list:
     return out
 
 
+def _ring_contains(ring, pt) -> bool:
+    """Is (lat, lon) inside this axis-aligned [lon,lat] box?
+
+    🚨 A CAMERA AT YOUR ORIGIN OR DESTINATION BREAKS THE WHOLE REQUEST.
+    Valhalla answers error 442 "No path could be found" when a start or end
+    point sits inside an exclude polygon - and one wall-in box discards every
+    other exclusion with it, so a single camera next to where the driver is
+    standing would silently cancel all avoidance. You cannot avoid a camera you
+    are already beside, so such a box is dropped before the route is asked for.
+    """
+    lat, lon = pt
+    xs = [c[0] for c in ring]
+    ys = [c[1] for c in ring]
+    return min(xs) <= lon <= max(xs) and min(ys) <= lat <= max(ys)
+
+
 def _ring_perimeter_m(ring) -> float:
     """Length of a [lon,lat] ring in metres, for budgeting against the engine's
     exclude_polygons circumference cap."""
@@ -310,12 +326,16 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     # so a small camera box can still fit after a big hotspot box that did not.
     polys, used, kept_hp, kept_ap = [], 0.0, 0, 0
     for ring in hp:
+        if _ring_contains(ring, a) or _ring_contains(ring, b):
+            continue
         per = _ring_perimeter_m(ring)
         if used + per <= EXCLUDE_BUDGET_M:
             used += per
             polys.append(ring)
             kept_hp += 1
     for ring in ap:
+        if _ring_contains(ring, a) or _ring_contains(ring, b):
+            continue
         per = _ring_perimeter_m(ring)
         if used + per <= EXCLUDE_BUDGET_M:
             used += per
