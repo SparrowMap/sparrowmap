@@ -38,6 +38,8 @@ window.DriveNav = (function () {
   var limit = { mph: null, road: null };
   var limitAt = null;           // where the last speed-limit answer was for
   var opts = { hotspots: true, highways: false, tolls: false, alpr: false };
+  var camLayer = null;          // ALPR cameras on/around the route
+  var overview = false;         // route-overview (zoomed out) or follow
 
   /* Valhalla returns the route as an encoded polyline at 1e6 precision, not
    * the 1e5 every other polyline library assumes. Decoding at the wrong
@@ -199,14 +201,55 @@ window.DriveNav = (function () {
     destMarker = L.circleMarker([dest.lat, dest.lon], {
       radius: 8, color: '#fff', weight: 2, fillColor: '#3b82f6', fillOpacity: 1
     }).addTo(H.map);
+    drawCams(out);
     banner();
+  }
+
+  /* The license-plate cameras, so a driver can zoom out and SEE what is being
+   * routed around. Red = still on this route (unavoidable here), amber ring =
+   * one the plain route would have hit and this one skirts. These are fixed
+   * public camera positions, the same the avoidance is computed from. */
+  function drawCams(out) {
+    if (camLayer) { H.map.removeLayer(camLayer); camLayer = null; }
+    var on = (out && out.alpr_on_route) || [], av = (out && out.alpr_avoided) || [];
+    if (!on.length && !av.length) return;
+    camLayer = L.layerGroup();
+    av.forEach(function (c) {
+      L.circleMarker([c[0], c[1]], { radius: 5, color: '#f59e0b', weight: 2,
+        fillColor: '#f59e0b', fillOpacity: 0.25, interactive: false }).addTo(camLayer);
+    });
+    on.forEach(function (c) {
+      L.circleMarker([c[0], c[1]], { radius: 4, color: '#ef4444', weight: 1.5,
+        fillColor: '#ef4444', fillOpacity: 0.85, interactive: false }).addTo(camLayer);
+    });
+    camLayer.addTo(H.map);
+  }
+
+  /* Pull the map out to the whole trip so the cameras and the route are visible
+   * at once, then a tap on the same button drops back to driving. Follow mode
+   * is paused for the overview or the next GPS fix would snap back to the car. */
+  function toggleOverview() {
+    overview = !overview;
+    var b = $('#nbOv');
+    if (overview && shape.length) {
+      if (H.setFollow) H.setFollow(false);
+      if (H.markProgZoom) H.markProgZoom();
+      H.map.fitBounds(L.latLngBounds(shape), { padding: [50, 50] });
+      if (b) b.textContent = 'Driving';
+    } else {
+      if (H.setFollow) H.setFollow(true);
+      if (b) b.textContent = 'Overview';
+    }
   }
 
   function stop() {
     dest = null; trip = null; shape = []; manIdx = 0; lastIdx = -1;
     if (line) { H.map.removeLayer(line); line = null; }
     if (destMarker) { H.map.removeLayer(destMarker); destMarker = null; }
+    if (camLayer) { H.map.removeLayer(camLayer); camLayer = null; }
+    overview = false; if (H.setFollow) H.setFollow(true);
     var b = $('#navbar'); if (b) b.className = '';
+    var sp = $('#splimit'); if (sp) sp.style.display = '';
     H.toast('Navigation stopped');
   }
 
@@ -253,15 +296,28 @@ window.DriveNav = (function () {
     var b = $('#navbar');
     if (!b) {
       b = document.createElement('div'); b.id = 'navbar';
-      b.innerHTML = '<div class="nb-turn" id="nbTurn"></div>' +
-                    '<div class="nb-sub"><span id="nbDist"></span><span id="nbEta"></span></div>';
+      b.innerHTML =
+        '<div class="nb-top">' +
+          '<div class="nb-turn" id="nbTurn"></div>' +
+          '<div class="nb-lim unknown" id="nbLim"><div class="l-cap">SPEED<br>LIMIT</div>' +
+            '<div class="l-num" id="nbLimNum">—</div></div>' +
+        '</div>' +
+        '<div class="nb-sub"><span id="nbDist"></span>' +
+          '<span><span id="nbEta"></span>' +
+          '<button type="button" class="nb-ov" id="nbOv">Overview</button></span></div>';
       document.body.appendChild(b);
-      b.onclick = openSheet;
+      // A tap on the card text opens the destination sheet; the buttons do not.
+      $('#nbTurn').onclick = openSheet;
+      $('#nbOv').onclick = function (e) { e.stopPropagation(); toggleOverview(); };
+      paintLimit();
     }
     var leg = trip.legs[0], m = leg.maneuvers[manIdx];
     if (!m) { b.className = ''; return; }
     $('#nbTurn').textContent = m.instruction || '';
     b.className = 'show';
+    // The card now carries the limit, so the standalone plate would be a
+    // duplicate while navigating.
+    var sp = $('#splimit'); if (sp) sp.style.display = 'none';
   }
 
   function tick() {
@@ -339,6 +395,11 @@ window.DriveNav = (function () {
     }
     $('#slNum').textContent = limit.mph != null ? limit.mph : '—';
     el.className = 'show' + (limit.mph == null ? ' unknown' : '');
+    // The same value in the turn card, when navigating. The standalone plate
+    // (#splimit) stays for when the driver is not navigating.
+    var cn = $('#nbLimNum'), cl = $('#nbLim');
+    if (cn) cn.textContent = limit.mph != null ? limit.mph : '—';
+    if (cl) cl.className = 'nb-lim' + (limit.mph == null ? ' unknown' : '');
   }
 
   function start(hook) {

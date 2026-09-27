@@ -392,6 +392,18 @@ def _hotcells_on_path(cells, path, radius_m: float = HOT_BOX_M) -> list:
     return [(lat, lon) for _, lat, lon in hits]
 
 
+def _cam_lists(on_route, avoided, cap: int = 300) -> dict:
+    """The cameras to DRAW, so a driver can zoom out and see them.
+
+    `alpr_on_route` are the ones the chosen route still passes; `alpr_avoided`
+    are the ones the plain route would have passed and this one does not. Only
+    fixed camera positions from the public snapshot - nothing about the driver.
+    Capped so a long city route cannot turn one response into megabytes.
+    """
+    fmt = lambda xs: [[round(la, 5), round(lo, 5)] for la, lo in xs[:cap]]
+    return {"alpr_on_route": fmt(on_route), "alpr_avoided": fmt(avoided)}
+
+
 def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
           hot_cells=None, avoid_alpr: bool = False) -> dict:
     """A driving route from a=(lat,lon) to b=(lat,lon).
@@ -445,8 +457,8 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
 
     hp = [_box(lat, lon, HOT_BOX_M)
           for lat, lon in _hotcells_on_path(hot_cells, path)] if want_hot else []
-    ap = [_box(lat, lon, ALPR_BOX_M)
-          for lat, lon in _cameras_on_path(path)] if avoid_alpr else []
+    base_cams = _cameras_on_path(path) if avoid_alpr else []
+    ap = [_box(lat, lon, ALPR_BOX_M) for lat, lon in base_cams]
 
     # PASS TWO: reroute with the things on the path closed off. One box per
     # obstacle, hotspots first, under the one circumference cap Valhalla
@@ -472,7 +484,7 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     # Nothing on the path to avoid: the ordinary route is already clear, which
     # is a success, not a fallback.
     if not polys:
-        return plain
+        return dict(plain, **_cam_lists(base_cams, []))
 
     n_base_cam = len(ap)          # cameras / cells the plain route passed
     n_base_hot = len(hp)
@@ -480,9 +492,10 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
     def _fell_back():
         # The reroute was worse or impossible: keep the plain route and tell
         # the driver plainly that what they asked for could not be done here.
-        return {"trip": base,
-                "avoided_hotspots": False, "hotspot_fallback": want_hot,
-                "avoided_alpr": False, "alpr_fallback": avoid_alpr}
+        return dict({"trip": base,
+                     "avoided_hotspots": False, "hotspot_fallback": want_hot,
+                     "avoided_alpr": False, "alpr_fallback": avoid_alpr},
+                    **_cam_lists(base_cams, []))
 
     try:
         cand = _post("/route", dict(body, exclude_polygons=polys))["trip"]
@@ -503,7 +516,8 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
         cpath = _decode_shape(cand["legs"][0]["shape"])
     except (KeyError, IndexError, TypeError):
         return _fell_back()
-    n_cand_cam = len(_cameras_on_path(cpath)) if avoid_alpr else 0
+    cand_cams = _cameras_on_path(cpath) if avoid_alpr else []
+    n_cand_cam = len(cand_cams)
     n_cand_hot = len(_hotcells_on_path(hot_cells, cpath)) if want_hot else 0
 
     if (n_cand_cam + n_cand_hot) >= (n_base_cam + n_base_hot):
@@ -511,11 +525,14 @@ def route(a, b, avoid_highways: bool = False, avoid_tolls: bool = False,
 
     cam_better = avoid_alpr and n_cand_cam < n_base_cam
     hot_better = want_hot and n_cand_hot < n_base_hot
-    return {"trip": cand,
-            "avoided_hotspots": hot_better,
-            "hotspot_fallback": want_hot and not hot_better,
-            "avoided_alpr": cam_better,
-            "alpr_fallback": avoid_alpr and not cam_better}
+    on = set(cand_cams)
+    avoided = [c for c in base_cams if c not in on]
+    return dict({"trip": cand,
+                 "avoided_hotspots": hot_better,
+                 "hotspot_fallback": want_hot and not hot_better,
+                 "avoided_alpr": cam_better,
+                 "alpr_fallback": avoid_alpr and not cam_better},
+                **_cam_lists(cand_cams, avoided))
 
 
 def speed_limit(lat: float, lon: float) -> dict:

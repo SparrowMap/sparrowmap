@@ -120,11 +120,25 @@
      Sized for a phone in a windscreen mount at arm's length: the next turn is
      the largest text on the screen, and the speed limit is a US-style white
      plate because that is the shape a driver recognises without reading. */
-  #navbar{position:absolute;z-index:2050;left:8px;right:8px;top:8px;
+  /* 🚨 STOPS SHORT OF THE BUTTON COLUMN. It ran right:8px across the full
+     width at z-index 2050, over #side (right:12px, 48px buttons, z 1000), so
+     the turn card sat on top of the dashcam button - the one control a driver
+     reaches for mid-trip. 12 + 48 + 12 = 72. */
+  #navbar{position:absolute;z-index:2050;left:8px;right:72px;top:8px;
     background:rgba(13,18,25,.95);border:1px solid var(--line);border-radius:16px;
     padding:12px 14px;display:none;box-shadow:0 8px 28px rgba(0,0,0,.5)}
   #navbar.show{display:block}
-  #navbar .nb-turn{font-size:20px;font-weight:700;line-height:1.25}
+  #navbar .nb-top{display:flex;align-items:flex-start;gap:10px}
+  #navbar .nb-turn{font-size:20px;font-weight:700;line-height:1.25;flex:1;min-width:0}
+  /* The limit rides in the card while navigating - the one place the driver
+     is already looking - as the same white US-style plate as #splimit. */
+  #navbar .nb-lim{flex:0 0 auto;width:48px;background:#fff;color:#111;
+    border:2px solid #111;border-radius:6px;text-align:center;padding:2px 0 3px}
+  #navbar .nb-lim .l-cap{font-size:7px;font-weight:800;line-height:1.05;letter-spacing:.3px}
+  #navbar .nb-lim .l-num{font-size:20px;font-weight:800;line-height:1}
+  #navbar .nb-lim.unknown{opacity:.55}
+  #navbar .nb-ov{margin-left:10px;padding:2px 10px;border-radius:10px;
+    border:1px solid var(--line);background:#111a24;color:#cfe0f5;font-size:13px}
   #navbar .nb-sub{display:flex;justify-content:space-between;margin-top:6px;
     font-family:var(--mono,monospace);font-size:15px;color:#9fb3c8}
   /* The alert banner and the turn banner both want the top of the screen. The
@@ -164,12 +178,6 @@
   .ns-row button{flex:1;padding:12px;border-radius:12px;border:1px solid var(--line);
     background:#111a24;color:#e6eef7;font-size:15px}
   .ns-row .ns-stop{background:#3a1420;border-color:#5b2233;color:#ffd9e0}
-  #priv{position:absolute;z-index:1000;left:50%;transform:translateX(-50%);
-    bottom:calc(env(safe-area-inset-bottom) + 62px);font-size:.68rem;color:var(--dim);
-    background:rgba(13,18,25,.82);border:1px solid var(--line);border-radius:14px;
-    padding:6px 14px;backdrop-filter:blur(6px);
-    max-width:min(92vw,420px);width:max-content;text-align:center;
-    line-height:1.45;white-space:normal;text-wrap:balance}
   /* Leaflet's attribution ships light-on-white and lands as a bright bar across
      the bottom of a dark, night-driving screen. Attribution is required and
      stays - it is just dressed to match, and tucked left. */
@@ -347,7 +355,10 @@
      it is the narrower thing that IS true and is checkable: /api/policy
      publishes route_logging:false, the routing engine is on this machine's
      loopback, and nothing about a journey is written down. -->
-<div id="priv">Routed on our own machine · never logged, never shared · the dashcam sends only vehicle crops</div>
+<!-- The privacy promise used to repeat here as a strip across the live map.
+     His call, 2026-09-27: it is already on the start screen (the .lock line
+     under "Start driving mode") and again in the destination sheet, and on a
+     moving map it was one more thing covering the road. -->
 <!-- The bottom bar (sitenav.js) is the menu on BOTH states of this page: the
      start cover and the live driving screen. Everything here is positioned
      against the viewport, so the fixed bar simply sits over the bottom of the
@@ -385,7 +396,7 @@
 <script src="/vendor/maplibre-gl.js"></script>
 <script src="/vendor/leaflet-maplibre-gl.js"></script>
 <script src="/static/basemap.js?v=1"></script>
-<script src="/static/drive-nav.js?v=3"></script>
+<script src="/static/drive-nav.js?v=4"></script>
 <script>
 (function(){
   "use strict";
@@ -470,7 +481,7 @@
   $('#calReset').addEventListener('click',resetCal);
 
   // ---- state ----
-  var me=null, meMarker=null, accCircle=null, follow=true, lastFix=null;
+  var me=null, meMarker=null, accCircle=null, follow=true, lastFix=null, progZoom=false;
   var heading=null, speedMph=0;
 
   /* Which way the PHONE is pointing, from the magnetometer.
@@ -845,6 +856,14 @@
     n.querySelectorAll('[data-gone]').forEach(function(b){b.onclick=function(){vote(b.getAttribute('data-gone'),false);map.closePopup();};});
   });
   map.on('dragstart',function(){follow=false;$('#recenter').style.display='flex';});
+  /* 🚨 ZOOMING OUT HAS TO STICK. Follow mode re-centred on every fix with
+     setView(me, max(zoom, 16)), so a driver who pinched out to see what was
+     ahead was pulled back to street level a second later - only a DRAG broke
+     follow, a pinch never did. A zoom the page did not start is now treated the
+     same as a drag: follow pauses and ◎ Recenter appears. `progZoom` marks the
+     page's own setView calls so they are not mistaken for the driver's. */
+  map.on('zoomstart',function(){ if(!progZoom){ follow=false; $('#recenter').style.display='flex'; } });
+  map.on('zoomend',function(){ progZoom=false; });
 
   // ---- proximity ----
   /* 🚨 ONE CONTINUOUS WARNING FOR THE NEAREST THREAT, NOT ONE PER SIGHTING.
@@ -1069,7 +1088,7 @@
     $('#mph').textContent=Math.max(0,Math.round(speedMph));
     if(trailOn){ trail.push(now); if(trail.length>1200)trail.shift(); drawTrail(); }
     drawMe();
-    if(follow) map.setView(me, Math.max(map.getZoom(),16),{animate:true});
+    if(follow){ progZoom=(map.getZoom()<16); map.setView(me, Math.max(map.getZoom(),16),{animate:true}); }
     if(accCircle){accCircle.setLatLng(me).setRadius(c.accuracy||20);}
     else{accCircle=L.circle(me,{radius:c.accuracy||20,color:'#3b82f6',weight:1,
       opacity:.3,fillOpacity:.06,interactive:false}).addTo(map);}
@@ -1092,7 +1111,7 @@
   }
 
   // ---- controls ----
-  $('#recenter').onclick=function(){follow=true;this.style.display='none';if(me)map.setView(me,17);};
+  $('#recenter').onclick=function(){follow=true;this.style.display='none';if(me){progZoom=true;map.setView(me,17);}};
   $('#copyes').onclick=function(){sendLabel('police');};
   $('#copno').onclick=function(){sendLabel('civilian');};
   // "Not sure" is a real answer and must cost nothing. It sends NOTHING: the
@@ -1158,7 +1177,11 @@
       heading:function(){return heading;},
       speed:function(){return speedMph;},
       toast:toast, beep:beep, haversine:haversine, bearing:bearing,
-      soundOn:function(){return soundOn;}
+      soundOn:function(){return soundOn;},
+      // The route overview pulls the map out to the whole trip; it has to stop
+      // follow mode or the next fix would snap straight back to the car.
+      setFollow:function(v){follow=!!v; $('#recenter').style.display=v?'none':'flex';},
+      markProgZoom:function(){progZoom=true;}
     });
   }
   $('#startBtn').onclick=start;
