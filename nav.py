@@ -57,6 +57,30 @@ HOT_BOX_M = 150.0
 #: that can actually be on the route.
 HOT_MAX_POLYS = 60
 
+#: 🚨 VALHALLA REFUSES THE WHOLE REQUEST IF THE EXCLUSION RINGS ADD UP TO MORE
+#: THAN 10 km, AND THAT IS A TOTAL, NOT A PER-POLYGON LIMIT.
+#:
+#: Measured 2026-09-27, the first time the engine ever ran: asking to avoid
+#: hotspots on a Columbus corridor built 29 boxes and came back
+#:   {"error_code":167,"error":"Exceeded maximum circumference for
+#:    exclude_polygons: 10000 meters"}
+#: A single box routed fine. So the failure was not "no route exists with the
+#: hot areas closed" - it was the request being rejected before any routing
+#: happened, and route() caught the 400, fell back, and honestly reported
+#: hotspot_fallback=true. The driver asked to avoid patrols and got a plain
+#: route with a warning, every single time, on every corridor with more than
+#: eight hot cells near it.
+#:
+#: Each box is 2*HOT_BOX_M a side, so it spends 8*HOT_BOX_M of ring. At the
+#: default 150 m that is 1,200 m per hotspot and about seven of them fit.
+#: 9,000 leaves a margin under the engine's 10,000 so a rounding difference
+#: cannot put us back over the edge.
+#:
+#: ⚠️ RAISING THIS MEANS RAISING service_limits.max_exclude_polygons_length in
+#: valhalla.json to match, and every extra polygon costs routing time on a box
+#: that is also running the map.
+EXCLUDE_BUDGET_M = 9_000.0
+
 
 def _post(path: str, body: dict) -> dict:
     req = urllib.request.Request(
@@ -103,17 +127,28 @@ def hotspot_polygons(cells, a, b, corridor_m: float = 25_000.0) -> list:
     near = []
     for c in cells or []:
         try:
-            if (c.get("n") or 0) < HOT_MIN_N:
+            n = c.get("n") or 0
+            if n < HOT_MIN_N:
                 continue
             lat, lon = float(c["lat"]), float(c["lon"])
         except (KeyError, TypeError, ValueError):
             continue
         d = _point_to_segment_m((lat, lon), a, b)
         if d <= corridor_m:
-            near.append((d, lat, lon))
-    near.sort()
-    out = []
-    for _, lat, lon in near[:HOT_MAX_POLYS]:
+            near.append((d, lat, lon, n))
+    # 🚨 SPEND THE BUDGET ON THE WORST HOTSPOTS, NOT THE FIRST ONES.
+    # Only a handful of boxes fit (see EXCLUDE_BUDGET_M), so ordering by
+    # distance alone would hand the whole allowance to whichever cells happen
+    # to sit nearest the line and drop a corridor's busiest one. Hottest first,
+    # nearest as the tie-break.
+    near.sort(key=lambda t: (-t[3], t[0]))
+    out, used = [], 0.0
+    # A box is 2*HOT_BOX_M on each side, so its ring is 8*HOT_BOX_M long.
+    per = 8.0 * HOT_BOX_M
+    for _, lat, lon, _n in near[:HOT_MAX_POLYS]:
+        if used + per > EXCLUDE_BUDGET_M:
+            break
+        used += per
         my, mx = _m_per_deg(lat)
         dlat, dlon = HOT_BOX_M / my, HOT_BOX_M / mx
         out.append([[lon - dlon, lat - dlat], [lon + dlon, lat - dlat],
