@@ -106,25 +106,73 @@ window.sparrowTransparency = async function () {
        * being credited, and one that starts cannot be forgotten. */
       const credit = $('#camsources');
       if (credit) {
+        /* Every source the poller can run, so none is ever shown as a bare
+         * code. A licence is NAMED only where it was checked and found (the
+         * open-data ones); everything else says 'public feed' rather than
+         * claiming a licence nobody verified. [name, site, licence, licence URL] */
         const SRC = {
-          fi:  ['Fintraffic', 'https://www.fintraffic.fi/en', 'CC BY 4.0'],
-          ia:  ['Iowa DOT', 'https://data.iowadot.gov/', 'CC BY 4.0'],
+          fi:  ['Fintraffic', 'https://www.fintraffic.fi/en', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/'],
+          ia:  ['Iowa DOT', 'https://data.iowadot.gov/', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/'],
           atx: ['City of Austin', 'https://data.austintexas.gov/', 'public domain'],
-          on:  ['Ontario 511 (MTO)', 'https://511on.ca/', 'Open Government Licence – Ontario'],
+          on:  ['Ontario 511 (MTO)', 'https://511on.ca/', 'Open Government Licence – Ontario', 'https://www.ontario.ca/page/open-government-licence-ontario'],
           nyc: ['NYC DOT', 'https://webcams.nyctmc.org/', 'public feed'],
+          oh:  ['Ohio DOT (OHGO)', 'https://www.ohgo.com/', 'public feed'],
+          ny:  ['511NY (NYSDOT)', 'https://511ny.org/', 'public feed'],
+          nm:  ['New Mexico DOT (NMRoads)', 'https://nmroads.com/', 'public feed'],
+          mo:  ['Missouri DOT', 'https://traveler.modot.org/', 'public feed'],
+          mi:  ['Michigan DOT (Mi Drive)', 'https://mdotjboss.state.mi.us/MiDrive/', 'public feed'],
+          in:  ['Indiana DOT (TrafficWise)', 'https://pws.trafficwise.org/', 'public feed'],
+          al:  ['ALDOT (ALGO Traffic)', 'https://algotraffic.com/', 'public feed'],
+          aldot: ['Alabama DOT', 'https://www.dot.state.al.us/', 'public feed'],
+          ne_511: ['New England 511 (VT / NH / ME)', 'https://www.newengland511.org/', 'public feed'],
+          nc:  ['NCDOT (DriveNC)', 'https://www.drivenc.gov/', 'public feed'],
+          il:  ['Travel Midwest (Illinois)', 'https://www.travelmidwest.com/', 'public feed'],
+          sd:  ['South Dakota DOT', 'https://www.sd511.org/', 'public feed'],
+          az:  ['Arizona DOT (AZ511)', 'https://www.az511.gov/', 'public feed'],
+          ut:  ['Utah DOT', 'https://www.udottraffic.utah.gov/', 'public feed'],
+          id:  ['Idaho 511 (ITD)', 'https://511.idaho.gov/', 'public feed'],
+          tx:  ['Texas DOT', 'https://its.txdot.gov/', 'public feed'],
+          ne:  ['Nebraska DOT', 'https://511.nebraska.gov/', 'public feed'],
+          ks:  ['Kansas DOT (KanDrive)', 'https://www.kandrive.gov/', 'public feed'],
+          mn:  ['Minnesota DOT', 'https://511mn.org/', 'public feed'],
+          co:  ['Colorado DOT', 'https://www.cotrip.org/', 'public feed'],
+          kytc: ['Kentucky Transportation Cabinet', 'https://goky.ky.gov/', 'public feed'],
+          sea: ['Seattle DOT', 'https://web.seattle.gov/travelers/', 'public feed'],
+          wsd: ['WSDOT', 'https://wsdot.com/travel/real-time/', 'public feed'],
+          or:  ['WSDOT travel information', 'https://wsdot.com/travel/real-time/', 'public feed'],
+          kc:  ['King County, WA', 'https://kingcounty.gov/', 'public feed'],
+          kirk: ['City of Kirkland, WA', 'https://www.kirklandwa.gov/', 'public feed'],
+          tor: ['City of Toronto', 'https://www.toronto.ca/', 'public feed'],
+          nl:  ['Newfoundland and Labrador', 'https://www.gov.nl.ca/', 'public feed'],
+          fl:  ['FL511 (Florida DOT)', 'https://fl511.com/', 'public feed'],
+          ga:  ['Georgia DOT', 'https://511ga.org/', 'public feed'],
+          ca:  ['Caltrans', 'https://cwwp2.dot.ca.gov/', 'public feed'],
+          es_mad: ['Ayuntamiento de Madrid', 'https://datos.madrid.es/', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/'],
+          es_dgt: ['Dirección General de Tráfico (DGT)', 'https://nap.dgt.es/', 'CC BY', 'https://nap.dgt.es/en/dataset/camaras-dgt-datex2-v3-7'],
+          no:  ['Statens vegvesen', 'https://www.vegvesen.no/trafikk/', 'NLOD 2.0', 'https://data.norge.no/nlod/en/2.0'],
+          ee:  ['Transpordiamet (Tark Tee)', 'https://tarktee.ee/', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0/'],
+          fr_lyon: ['Métropole de Lyon', 'https://data.grandlyon.com/', 'Licence Ouverte 2.0', 'https://www.etalab.gouv.fr/licence-ouverte-open-licence/'],
+          sg:  ['Traffic Images from data.gov.sg (LTA)', 'https://data.gov.sg/', 'Singapore Open Data Licence 1.0', 'https://data.gov.sg/open-data-licence'],
+          mnt: ['Manatee County, FL', 'https://www.mymanatee.org/', 'public feed'],
+          kcs: ['KC Scout (MoDOT / KDOT)', 'https://www.kcscout.net/', 'public feed'],
         };
         const seen = {};
         pub.forEach((n) => {
-          const m = /\[([a-z]+):[^\]]*\]$/.exec(n.name || '');
+          // ⚠️ [a-z0-9_]: source ids like ne_511 and es_mad have digits and
+          // underscores, and [a-z]+ silently credited none of them.
+          const m = /\[([a-z0-9_]+):[^\]]*\]$/.exec(n.name || '');
           if (m) seen[m[1]] = (seen[m[1]] || 0) + 1;
         });
         const rows = Object.entries(seen)
           .sort((a, b) => b[1] - a[1])
           .map(([k, count]) => {
-            const [name, url, lic] = SRC[k] || [k, '', 'see the source'];
+            const [name, url, lic, licUrl] = SRC[k] || [k, '', 'see the source'];
+            const licHtml = licUrl
+              ? `<a href="${esc(licUrl)}" rel="noopener noreferrer" target="_blank">${esc(lic)}</a>`
+              : esc(lic);
             return `<li>${count.toLocaleString()} from <a href="${esc(url)}" `
                  + `rel="noopener noreferrer" target="_blank">${esc(name)}</a> `
-                 + `— ${esc(lic)}</li>`;
+                 + `— ${licHtml}</li>`;
           });
         credit.innerHTML = rows.length
           ? `<p>Those images come from these networks, used under their own `

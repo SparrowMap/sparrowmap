@@ -545,7 +545,10 @@ def michigan_index(measured_only: bool = True) -> list:
 # 308 - it caps at 352px and its `-fullJpeg.jpg` really is 352x198 - and Iowa
 # already comes through the ArcGIS layer, which is a better index for it.
 CARS = {
-    "in": ("intg", "Indiana"),
+    # ⚠️ Indiana is NOT here although it answers this door: its previews are
+    # 352px while pws.trafficwise.org has the same cameras full-size. See
+    # indiana_index. (Listed here, it silently REPLACED indiana_index, because
+    # the loop that registers CARS states runs after SOURCES is built.)
     "ne": ("netg", "Nebraska"),
     "ks": ("kstg", "Kansas"),
     "mn": ("mntg", "Minnesota"),
@@ -739,37 +742,132 @@ def alaska_index(measured_only: bool = True) -> list:
     return probe_filter(out, "ak") if measured_only else out
 
 
-def indiana_index(measured_only: bool = True) -> list:
-    """INDOT, via the CARS platform. Only reachable from the US box.
+_IN_PWS_ROAD = re.compile(
+    r"^(ky)?(\d+)-(\d{3})-(\d{3})-(\d)-[^-]+-[^-]+-(r?)cam-(\d+)$")
+_IN_PWS_SIG = re.compile(r"^(\d+)-(\d{3})-(\d{3})-(?:_-_-)?cam-?(\d*)$")
 
-    ⚠️ THE FULL-SIZE MIRROR DOES NOT COVER THIS INDEX. pws.trafficwise.org
-    serves 738 full-resolution JPEGs and looks like the obvious better source -
-    86% of THOSE clear the bar against 15% of the index's own previews. But the
-    two barely overlap: the files are named by route (01-002-073, 01-006-003)
-    and the index's cameras are on routes with no files at all - there is not a
-    single 01-094-* image for any of its I-94 cameras. Measured: 33 of 740 join.
-    The previews, probed, yield about a hundred. Fewer good pictures beats more
-    good pictures of somewhere else.
 
-    ⚠️ So this takes videoPreviewUrl and lets `probe` find the HD subset, which
-    is the same bargain every other mixed network here makes.
+def _in_key_pws(stem: str):
+    """pws file stem -> (type, route, milepost, tenth, rwis, cam number).
+
+    The ramp/direction fields ('_-_', 'eb-ra') are deliberately NOT part of
+    the key: INDOT's camera list names the main camera only, and its ramp
+    views are the same pole - they share its coordinates.
     """
+    m = _IN_PWS_ROAD.match(stem)
+    if m:
+        ky, t, r, mi, dd, rc, n = m.groups()
+        return ((ky or "") + str(int(t)), r, mi, dd, bool(rc), int(n))
+    m = _IN_PWS_SIG.match(stem)
+    if m:
+        t, r, mi, n = m.groups()
+        return ("0" + str(int(t)), r, mi, "", False, int(n or 1))
+    return None
+
+
+def _in_key_cars(name: str):
+    """INDOT camera-list name -> the same key as _in_key_pws, leniently.
+
+    The list spells one camera several ways: '1-065-089-5-2 SR 44',
+    '1-465-005-9-_-_-cam-2 I-465/5.9 ...', '1-074-155-7-1-rwis PENNTOWN',
+    '1-069-157-7- - -cam-2' (spaces for underscores), glued suffixes like
+    '1-094-023-2-1E OF US 20', and 'sigcam-01-022-037' for signal cameras.
+    """
+    s = re.sub(r"-\s+-\s+-", "-_-_-", (name or "").lower().strip())
+    s = s.split(" ")[0]
+    m = re.match(r"^(ky)?(\d+)-(\d{3})-(\d{3})-(\d)-[^-]+-[^-]+-(r?)cam-(\d+)", s)
+    if m:
+        ky, t, r, mi, dd, rc, n = m.groups()
+        return ((ky or "") + str(int(t)), r, mi, dd, bool(rc), int(n))
+    m = re.match(r"^(ky)?(\d+)-(\d{3})-(\d{3})-(\d)(?:-(\d+))?(-rwis|-cam)?", s)
+    if m:
+        ky, t, r, mi, dd, n, suf = m.groups()
+        return ((ky or "") + str(int(t)), r, mi, dd, suf == "-rwis", int(n or 1))
+    m = (re.match(r"^(?:sigcam-)?(\d{2})-(\d{3})-(\d{3})(?:-_-_)?-?cam-?(\d*)", s)
+         or re.match(r"^sigcam-(\d{2})-(\d{3})-(\d{3})()", s))
+    if m:
+        t, r, mi, n = m.groups()
+        return ("0" + str(int(t)), r, mi, "", False, int(n or 1))
+    return None
+
+
+def _indiana_fetch() -> list:
+    listing = fetch("https://pws.trafficwise.org/cctv/", timeout=60).decode(
+        "utf-8", "replace")
+    # ⚠️ The listing writes href=FILE.jpg with NO quotes; a quoted-only pattern
+    # returns zero cameras from a 739-file directory.
+    stems = sorted({f[:-4] for f in re.findall(r'href=["\']?([^"\'\s>/?]+\.jpg)',
+                                               listing)
+                    if not f.endswith("t.jpg") and not f.startswith("0_")})
     rows = _get_json("https://intg.carsprogram.org/cameras_v1/api/cameras",
                      timeout=60)
-    out = []
+    cars = {}
     for c in rows:
+        k = _in_key_cars(c.get("name") or "")
         loc = c.get("location") or {}
         lat, lon = loc.get("latitude"), loc.get("longitude")
-        if lat in (None, 0) or lon in (None, 0):
+        if not k or lat in (None, 0) or lon in (None, 0):
             continue
-        for i, v in enumerate(c.get("views") or []):
-            url = v.get("videoPreviewUrl")
-            if not url or not url.lower().startswith("http"):
+        lon = -abs(float(lon))        # one INDOT row has its longitude sign flipped
+        if not (37.5 < float(lat) < 42.0 and -88.3 < lon < -84.5):
+            continue
+        cars.setdefault(k, {"name": c.get("name") or "", "lat": float(lat),
+                            "lon": lon})
+    out = []
+    for stem in stems:
+        k = _in_key_pws(stem)
+        if not k:
+            continue
+        hit = cars.get(k)
+        if not hit:
+            # Same road and camera type, milepost within half a mile, same
+            # camera number preferred: INDOT sometimes lists a camera a tenth
+            # of a mile from where its file name puts it.
+            try:
+                mp = int(k[2]) + (int(k[3]) / 10 if k[3] else 0)
+            except ValueError:
                 continue
-            out.append({"src": "in", "ref": f"{c.get('id')}-{i}",
-                        "name": (v.get("name") or c.get("name")
-                                 or "Indiana camera")[:60],
-                        "lat": float(lat), "lon": float(lon), "url": url})
+            best = None
+            for k2, c2 in cars.items():
+                if k2[0] != k[0] or k2[1] != k[1] or k2[4] != k[4]:
+                    continue
+                try:
+                    d = abs(mp - (int(k2[2]) + (int(k2[3]) / 10 if k2[3] else 0)))
+                except ValueError:
+                    continue
+                score = (d, k2[5] != k[5])
+                if d <= 0.5 and (best is None or score < best[0]):
+                    best = (score, c2)
+            hit = best[1] if best else None
+        if not hit:
+            continue
+        out.append({"src": "in", "ref": stem,
+                    "name": (hit["name"] or stem)[:60],
+                    "lat": hit["lat"], "lon": hit["lon"],
+                    "url": f"https://pws.trafficwise.org/cctv/{stem}.jpg"})
+    return out
+
+
+def indiana_index(measured_only: bool = True) -> list:
+    """INDOT's FULL-SIZE stills (pws.trafficwise.org), placed by INDOT's list.
+
+    🚨 THE PREVIEW DOOR WAS 1.5% HD AND THIS ONE IS 93%. For the SAME cameras.
+    The CARS index serves `videoPreviewUrl` previews measured at 352x240 (9 HD
+    of 300 in a sample on 2026-09-28; 11 of 748 in use); pws.trafficwise.org
+    serves the same cameras' 1920x1080 originals, rewritten every 2 minutes,
+    and its landing page offers the whole set as a tarball.
+
+    ⚠️ AND AN EARLIER NOTE HERE SAID THE TWO "BARELY OVERLAP - 33 OF 740
+    JOIN". That was a spelling problem, not a coverage one: the file is
+    '1-065-058-3-_-_-cam-1' and the list says '1-065-058-3-1'. Keyed on road,
+    milepost and camera number (see _in_key_*), ~712 of 739 files join, and a
+    contact sheet of joined pairs showed the same scene in 23 of 24.
+
+    The directory has NO coordinates (its old cctv.json has been 0 bytes since
+    Feb 2026), so INDOT's camera list is still fetched - for WHERE, not for the
+    picture. Ref = the file stem, which is what names the camera here.
+    """
+    out = cached_index("in_pws", _indiana_fetch)
     return probe_filter(out, "in") if measured_only else out
 
 
@@ -848,6 +946,252 @@ def missouri_index(measured_only: bool = True) -> list:
                     "name": (c.get("caption") or "Missouri camera")[:60],
                     "lat": float(lat), "lon": float(lon), "url": url})
     return probe_filter(out, "mo") if measured_only else out
+
+
+# --------------------------------------------------------------------------
+# 2026-09-28 survey: sources found and measured by a regional sweep, each one
+# re-measured by an independent verifier who tried to refute it (liveness,
+# what the frames show, licence, robots.txt, overlap with what we have).
+# --------------------------------------------------------------------------
+def _lname(tag: str) -> str:
+    """An XML tag without its namespace - these feeds use four at once."""
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def madrid_index(measured_only: bool = True) -> list:
+    """Ayuntamiento de Madrid, city streets. CC BY 4.0 (datos.madrid.es).
+
+    292 of 357 measured HD - the densest urban HD network in the survey. The
+    KML is the city's open-data door; the image URL is built from `Numero`,
+    which is also the stable id.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(fetch(
+        "https://datos.madrid.es/egob/catalogo/202088-0-trafico-camaras.kml",
+        timeout=60))
+    out = []
+    for pm in root.iter():
+        if _lname(pm.tag) != "placemark":
+            continue
+        data, coords = {}, None
+        for el in pm.iter():
+            t = _lname(el.tag)
+            if t == "data":
+                val = next((c.text for c in el if _lname(c.tag) == "value"), None)
+                data[(el.get("name") or "").lower()] = (val or "").strip()
+            elif t == "coordinates":
+                coords = (el.text or "").strip()
+        num = data.get("numero")
+        if not num or not coords:
+            continue
+        try:
+            lon, lat = (float(x) for x in coords.split(",")[:2])
+        except ValueError:
+            continue
+        out.append({"src": "es_mad", "ref": num,
+                    "name": (data.get("nombre") or f"Madrid {num}")[:60],
+                    "lat": lat, "lon": lon,
+                    "url": f"https://informo.madrid.es/cameras/Camara{num}.jpg"})
+    return probe_filter(out, "es_mad") if measured_only else out
+
+
+def dgt_index(measured_only: bool = True) -> list:
+    """Spain's state road network (DGT), via its National Access Point.
+
+    DATEX II v3.7, CC BY. 1,952 cameras, ~156 HD - a big network that is
+    mostly small frames, so `probe` decides, as everywhere else.
+    ⚠️ Not Catalonia or the Basque Country: they run their own networks.
+    """
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(fetch(
+        "https://nap.dgt.es/datex2/v3/dgt/DevicePublication/camaras_datex2_v37.xml",
+        timeout=90))
+    out = []
+    for dev in root.iter():
+        if _lname(dev.tag) != "device" or not dev.get("id"):
+            continue
+        f = {}
+        for el in dev.iter():
+            t = _lname(el.tag)
+            if t not in f and el.text and el.text.strip():
+                f[t] = el.text.strip()
+        if f.get("typeofdevice", "camera") != "camera":
+            continue
+        try:
+            lat, lon = float(f["latitude"]), float(f["longitude"])
+        except (KeyError, ValueError):
+            continue
+        url = f.get("deviceurl")
+        if not url or not url.lower().startswith("http"):
+            continue
+        bits = [f.get("roadname"), f.get("kilometerpoint") and
+                f"km {f['kilometerpoint']}", f.get("province")]
+        out.append({"src": "es_dgt", "ref": dev.get("id"),
+                    "name": (" ".join(b for b in bits if b) or "DGT camera")[:60],
+                    "lat": lat, "lon": lon, "url": url})
+    return probe_filter(out, "es_dgt") if measured_only else out
+
+
+def norway_index(measured_only: bool = True) -> list:
+    """Statens vegvesen webcams. NLOD 2.0 (attribution).
+
+    ⚠️ `STATUS_STILL_IMAGE_AVAILABILITY` MEANS SOMETHING HERE, unlike most
+    flags in this file: filtering on it removes 45 of the 46 "camera fault"
+    placeholders before a single image is fetched.
+    """
+    d = _get_json("https://ogckart-sn1.atlas.vegvesen.no/ows?service=WFS"
+                  "&version=2.0.0&request=GetFeature"
+                  "&typeNames=datex_3_1:CctvSimple_v2"
+                  "&outputFormat=application/json&srsName=EPSG:4326", timeout=90)
+    out = []
+    for f in d.get("features") or []:
+        pr = f.get("properties") or {}
+        geo = (f.get("geometry") or {}).get("coordinates") or []
+        if len(geo) < 2 or pr.get("STATUS_STILL_IMAGE_AVAILABILITY") \
+                != "videoOrImagesAvailable":
+            continue
+        cid = pr.get("CAMERA_ID")
+        url = pr.get("STILL_IMAGE_URL") or (
+            cid and f"https://kamera.atlas.vegvesen.no/api/images/{cid}")
+        if not cid or not url:
+            continue
+        name = " ".join(x for x in (pr.get("DESCRIPTION"),
+                                    pr.get("ORIENTATION_DESCRIPTION")) if x)
+        out.append({"src": "no", "ref": str(cid),
+                    "name": (name or "Norway camera")[:60],
+                    "lat": float(geo[1]), "lon": float(geo[0]), "url": url})
+    return probe_filter(out, "no") if measured_only else out
+
+
+def estonia_index(measured_only: bool = True) -> list:
+    """Transpordiamet road cameras (tarktee.ee). CC BY. ROTATING.
+
+    The image path carries the capture minute (956/956_202609281800.jpg), so
+    the camera is identified by `objectid` and its URL is re-read each cycle -
+    see ROTATING and probe_key.
+    """
+    d = _get_json("https://tarktee.ee/tarktee/rest/services/tram/road_cameras"
+                  "/MapServer/0/query?where=1%3D1&outFields=objectid,site_name,"
+                  "image_path&f=geojson&outSR=4326", timeout=60)
+    out = []
+    for f in d.get("features") or []:
+        pr = f.get("properties") or {}
+        geo = (f.get("geometry") or {}).get("coordinates") or []
+        oid, path = pr.get("objectid"), pr.get("image_path")
+        if len(geo) < 2 or oid is None or not path:
+            continue
+        out.append({"src": "ee", "ref": str(oid), "pkey": f"ee:{oid}",
+                    "name": (pr.get("site_name") or "Estonia camera")[:60],
+                    "lat": float(geo[1]), "lon": float(geo[0]),
+                    "url": "https://tarktee.ee/images/" + str(path).lstrip("/")})
+    return probe_filter(out, "ee") if measured_only else out
+
+
+def lyon_index(measured_only: bool = True) -> list:
+    """Métropole de Lyon CRITER web cameras. Licence Ouverte 2.0."""
+    d = _get_json("https://download.data.grandlyon.com/wfs/rdata?SERVICE=WFS"
+                  "&VERSION=2.0.0&request=GetFeature"
+                  "&typename=pvo_patrimoine_voirie.pvocameracriter"
+                  "&outputFormat=application/json;%20subtype=geojson"
+                  "&SRSNAME=EPSG:4326&count=1000", timeout=60)
+    out = []
+    for f in d.get("features") or []:
+        pr = f.get("properties") or {}
+        geo = (f.get("geometry") or {}).get("coordinates") or []
+        ref, url = pr.get("numeromaintenance"), pr.get("url")
+        if len(geo) < 2 or not ref or not url:
+            continue
+        name = " - ".join(x for x in (pr.get("libellelong"), pr.get("nom")) if x)
+        out.append({"src": "fr_lyon", "ref": str(ref),
+                    "name": (name or "Lyon camera")[:60],
+                    "lat": float(geo[1]), "lon": float(geo[0]), "url": url})
+    return probe_filter(out, "fr_lyon") if measured_only else out
+
+
+def singapore_index(measured_only: bool = True) -> list:
+    """LTA traffic images via data.gov.sg. Singapore Open Data Licence. ROTATING.
+
+    Only 8 are HD - most expressway cameras were decommissioned - but they are
+    among the busiest roads in the survey (the Woodlands Causeway).
+    """
+    d = _get_json("https://api.data.gov.sg/v1/transport/traffic-images",
+                  timeout=60)
+    items = d.get("items") or [{}]
+    out = []
+    for c in items[0].get("cameras") or []:
+        loc = c.get("location") or {}
+        cid, url = c.get("camera_id"), c.get("image")
+        lat, lon = loc.get("latitude"), loc.get("longitude")
+        if not cid or not url or lat is None or lon is None:
+            continue
+        out.append({"src": "sg", "ref": str(cid), "pkey": f"sg:{cid}",
+                    "name": f"LTA traffic camera {cid}",
+                    "lat": float(lat), "lon": float(lon), "url": url})
+    return probe_filter(out, "sg") if measured_only else out
+
+
+def manatee_index(measured_only: bool = True) -> list:
+    """Manatee County FL traffic cameras (its own RTMC; also FDOT/Sarasota).
+
+    🚨 outFields IS AN ALLOW-LIST ON PURPOSE. This layer's SFS_INPUT_URL column
+    holds RTSP URLs WITH CREDENTIALS. `outFields=*` would pull them into
+    memory and into data/index_cache on disk. Ask only for what is used.
+    The picture is the county's own public frame endpoint (go2rtc), keyed on
+    ENDPOINT_NAME - the same key its public viewer uses.
+    """
+    d = _get_json("https://www.mymanatee.org/gisits/rest/services/traffic"
+                  "/TMC_Camera_Feeds/FeatureServer/3/query?where=1%3D1"
+                  "&outFields=ENDPOINT_NAME,DESCRIPTION,STATUS&f=geojson"
+                  "&outSR=4326", timeout=60)
+    out = []
+    for f in d.get("features") or []:
+        pr = f.get("properties") or {}
+        geo = (f.get("geometry") or {}).get("coordinates") or []
+        ep = str(pr.get("ENDPOINT_NAME") or "").strip()
+        if len(geo) < 2 or not ep or ep == "0" or pr.get("STATUS") == "DEFAULT":
+            continue
+        out.append({"src": "mnt", "ref": ep,
+                    "name": (pr.get("DESCRIPTION") or ep)[:60],
+                    "lat": float(geo[1]), "lon": float(geo[0]),
+                    "url": "https://video.mymanatee.org/go2rtc/api/frame.jpeg"
+                           f"?src={up.quote(ep, safe='')}"})
+    return probe_filter(out, "mnt") if measured_only else out
+
+
+def kcscout_index(measured_only: bool = True) -> list:
+    """KC Scout (MoDOT/KDOT) - ONLY the cameras Kansas CARS does not carry.
+
+    🚨 ~310 of KC Scout's ~330 HD cameras already arrive through the Kansas
+    CARS feed, under refs hashed from their URL. Taken whole, this index would
+    poll those twice under different names - double the load on MoDOT's server
+    and two dots per camera. So anything the ks feed already lists (compared
+    on the image file name, case-insensitively, '-LQ' stripped) is dropped;
+    what is left is the ~19 cameras only KC Scout publishes.
+    """
+    req = urllib.request.Request(
+        "https://www.kcscout.net/DataProvider.asmx/LoadEntities", data=b"{}",
+        method="POST", headers={"User-Agent": UA_SURVEY,
+                                "Content-Type": "application/json; charset=utf-8"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        d = json.loads(r.read()).get("d") or {}
+    have = set()
+    for c in cars_index("ks", measured_only=False):
+        stem = c["url"].rsplit("/", 1)[-1].split("?")[0].lower()
+        have.add(re.sub(r"(-lq)?\.jpg$", "", stem))
+    out, seen = [], set()
+    for c in d.get("Camera") or []:
+        cid = str(c.get("ID") or "").strip()
+        lat, lon = c.get("Latitude"), c.get("Longitude")
+        if not cid or cid in seen or not lat or not lon or cid.lower() in have:
+            continue
+        seen.add(cid)
+        name = " ".join(str(x) for x in (c.get("OnStreetName"), c.get("Direction"))
+                        if x and x != "(none)")
+        out.append({"src": "kcs", "ref": cid, "name": (name or cid)[:60],
+                    "lat": float(lat), "lon": float(lon),
+                    "url": "https://www.kcscout.net/TransSuite.VCS.CameraSnapshots/"
+                           f"{cid}.jpg"})
+    return probe_filter(out, "kcs") if measured_only else out
 
 
 # --------------------------------------------------------------------------
@@ -997,7 +1341,10 @@ SOURCES = {"nyc": nyc_index, "fi": finland_index, "atx": austin_index,
            "in": indiana_index, "al": alabama_index,
            "ne_511": newengland_index, "nc": northcarolina_index,
            "il": illinois_index, "sd": southdakota_index,
-           "az": arizona_index, "ut": utah_index, "id": idaho_index}
+           "az": arizona_index, "ut": utah_index, "id": idaho_index,
+           "es_mad": madrid_index, "es_dgt": dgt_index, "no": norway_index,
+           "ee": estonia_index, "fr_lyon": lyon_index, "sg": singapore_index,
+           "mnt": manatee_index, "kcs": kcscout_index}
 for _k in ARCGIS:
     SOURCES[_k] = (lambda k: lambda: arcgis_index(k))(_k)
 
@@ -1018,7 +1365,7 @@ SELF_DESCRIBING = {"fi"}
 # cycle and each camera's URL is replaced by its current one, matched on
 # src:ref. An index that fails to refresh keeps last cycle's URLs rather than
 # dropping the cameras.
-ROTATING: set = set()
+ROTATING: set = {"ee", "sg"}
 
 
 # --------------------------------------------------------------------------
