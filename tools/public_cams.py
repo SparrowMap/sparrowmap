@@ -1615,7 +1615,12 @@ def cmd_probe(args) -> int:
             return k, 0, ""        # 0 = measured and unusable, not unmeasured
 
     done, digest = 0, {}
-    with cf.ThreadPoolExecutor(max_workers=16) as pool:
+    # ⚠️ Some image servers GRAB a frame per request rather than serve a file
+    # (Manatee County's go2rtc pulls one from an RTSP stream). Sixteen at once
+    # made 101 of 372 fail - and a failure is recorded as width 0, "measured
+    # and unusable", which drops a working camera for good. --workers exists
+    # so those can be measured gently.
+    with cf.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         for u, w, h in pool.map(one, todo):
             if h:
                 digest[u] = h
@@ -2697,6 +2702,7 @@ def main() -> int:
     e.set_defaults(fn=cmd_enrol)
     pr = sub.add_parser("probe")
     pr.add_argument("--source", required=True)
+    pr.add_argument("--workers", type=int, default=16)
     pr.set_defaults(fn=cmd_probe)
     t = sub.add_parser("tokens")
     t.add_argument("--out", default=str(ROOT / "data" / "cam_tokens.json"))
