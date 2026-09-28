@@ -220,7 +220,14 @@ def iowa_index() -> list:
         img = pr.get("ImageURL") or pr.get("IMAGEURL") or pr.get("imageUrl")
         if not img:
             continue
-        out.append({"src": "ia", "ref": str(pr.get("device_id") or img)[-24:],
+        # 🚨 THE REF IS THE IMAGE URL, BECAUSE `device_id` IS REGENERATED.
+        # Measured 2026-09-28: the same camera, same picture, went 59623301 ->
+        # 59625026 in twelve days, and every one of 1,073 Iowa cameras was
+        # reaching the poller only through _rejoin_by_position. The URL held
+        # still: 1,238 of today's 1,256 are URLs measured in August. Same
+        # lesson as MnDOT (see cars_index): an agency id that happens to hold
+        # still is not an identifier.
+        out.append({"src": "ia", "ref": _url_ref(img),
                     "name": (pr.get("Desc_") or pr.get("Route")
                              or "Iowa camera")[:60],
                     "lat": float(geo[1]), "lon": float(geo[0]), "url": img})
@@ -1698,6 +1705,66 @@ def cmd_tokens(args) -> int:
     return 0
 
 
+def cmd_rename(args) -> int:
+    """Re-anchor nodes the poller finds only BY POSITION to their current name.
+
+    RUN WHERE THE DATABASE IS.
+
+    🚨 A RENUMBERED SOURCE IS HANDLED, BUT ONLY FOR AS LONG AS NOTHING MOVES.
+    _rejoin_by_position keeps a renumbered fleet polling, and it does it on
+    every restart, from scratch, by distance. That is the right emergency
+    brake and a bad steady state: at a rest area where three views share one
+    coordinate the pairing is decided by tie-break order, and every further
+    renumbering stacks another layer of guessing on the last. Measured
+    2026-09-28: all 1,073 Iowa cameras, 1,698 Utah and 1,223 Illinois were
+    reaching the poller only this way.
+
+    So once a pairing is established, write it down: rename each such node to
+    the name its camera has NOW, and the next join is an exact name match
+    again. It changes no pairing - only records the one already in use, which
+    is where that node's sightings have been landing all along.
+    """
+    sys.path.insert(0, str(ROOT))
+    import db                                             # noqa: E402
+
+    rows = [n for n in db.nodes(active_only=False)
+            if (n.get("kind") or "") == "public_cam"]
+    creds = creds_by_name(rows)
+    names = {n["id"]: n.get("name") or "" for n in rows}
+    probe = load_probe()
+    todo = []
+    for src in args.sources.split(","):
+        try:
+            idx, _dead = polled_index(src, probe)
+        except Exception as exc:
+            print(f"  {src}: skipped - index unavailable here "
+                  f"({type(exc).__name__}: {str(exc)[:50]})")
+            continue
+        matched, _, _ = join_source(src, idx, creds)
+        mine = [(m["node_id"], names.get(m["node_id"], ""), node_name_for(m))
+                for m in matched if names.get(m["node_id"]) != node_name_for(m)]
+        todo.extend(mine)
+        print(f"  {src}: {len(mine)} of {len(matched)} matched node(s) carry "
+              f"a stale name")
+    if not todo:
+        print("nothing to rename")
+        return 0
+    for nid, old, new in todo[:5]:
+        print(f"    {nid}\n      was {old}\n      now {new}")
+    if not args.apply:
+        print(f"\nDRY RUN - {len(todo)} rename(s). Re-run with --apply, then "
+              f"re-export tokens and restart every poller that uses them.")
+        return 0
+    conn = db.connect()
+    conn.executemany("UPDATE nodes SET name = ? WHERE id = ?",
+                     [(new, nid) for nid, _old, new in todo])
+    conn.commit()
+    print(f"\nrenamed {len(todo)} node(s). NOW re-export tokens and restart "
+          f"the pollers - a poller holding the old file joins by position "
+          f"until it does.")
+    return 0
+
+
 def dedupe_index(idx: list) -> list:
     """Drop cameras that are literally the same picture twice.
 
@@ -2287,6 +2354,10 @@ def main() -> int:
     t = sub.add_parser("tokens")
     t.add_argument("--out", default=str(ROOT / "data" / "cam_tokens.json"))
     t.set_defaults(fn=cmd_tokens)
+    rn = sub.add_parser("rename")
+    rn.add_argument("--sources", required=True)
+    rn.add_argument("--apply", action="store_true")
+    rn.set_defaults(fn=cmd_rename)
     r = sub.add_parser("run"); r.add_argument("--once", action="store_true")
     r.add_argument("--tokens", default="",
                    help="credentials exported by the `tokens` command; poll the "
