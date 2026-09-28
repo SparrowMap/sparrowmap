@@ -62,40 +62,42 @@ def main() -> int:
           + (f" ({dropped} dropped as the same image under another URL)"
              if dropped else ""))
 
-    # 🚨 HOW MANY ARE REGISTERED UNDER THAT NAME, NOT WHETHER ANY IS.
+    # 🚨 "ALREADY REGISTERED" IS DECIDED BY THE POLLER'S OWN JOIN, NOT BY NAME.
     #
-    # Even the full name is not unique. Iowa runs three cameras at one rest area
-    # - ENTRY, CENTER and EXIT - sharing coordinates, device_id and description,
-    # so 101 names cover 499 real cameras. A set says "registered" after the
-    # first of them, and the other two would never be created; the run would
-    # report success having quietly enrolled a third of that rest area.
+    # This once counted exact names, which is right for a NEW camera and wrong
+    # for a RENAMED one: when a source renumbers its catalogue every name
+    # changes, so every camera looked new and got a second node - while the
+    # first sat orphaned holding the history. That is where Iowa's 1,431 dead
+    # nodes (09-16) and Ontario's 401 (09-27) came from. pc.join_source pairs by
+    # name and then by position, exactly as the poller does, so a camera the
+    # poller would find is never registered twice.
     #
-    # Counting instead makes this idempotent AND complete: register the
-    # shortfall, whatever it is, and nothing on a re-run.
-    have: dict = {}
-    for n in db.nodes():
-        nm = n.get("name") or ""
-        if nm.startswith(PREFIX):
-            have[nm] = have.get(nm, 0) + 1
+    # Counting still matters and join_source keeps it: one name can cover
+    # several real cameras (Iowa's ENTRY/CENTER/EXIT share coordinates,
+    # device_id and description - 101 names, 499 cameras), so it pairs a LIST
+    # of nodes per name rather than asking whether any exists.
+    #
+    # ⚠️ EVERY STATUS, NOT JUST ACTIVE. A camera whose node is paused IS
+    # registered; counting only active nodes re-registers it. If the camera is
+    # offered again (it is in the measured list, so it measures usable now) the
+    # right fix is to un-pause its node - done below - never a duplicate.
+    rows = [n for n in db.nodes(active_only=False)
+            if (n.get("kind") or "") == "public_cam"]
+    creds = pc.creds_by_name(rows)
+    status = {n["id"]: (n.get("status") or "") for n in rows}
+    for i, c in enumerate(cams):
+        c["_i"] = i
+    matched, _, _ = pc.join_source(a.source, cams, creds)
+    got = {m["_i"] for m in matched}
+    wake = sorted({m["node_id"] for m in matched
+                   if status.get(m["node_id"]) == "paused"})
+    # pc.node_name_for is the ONE definition of the name - the poller has to
+    # rebuild this identical string to find the credentials again.
+    todo = [(pc.node_name_for(c), c) for c in cams if c["_i"] not in got]
 
-    # 🚨 THE NAME IS THE DURABLE LINK AND IT IS BUILT IN EXACTLY ONE PLACE.
-    #
-    # Neither half of it is unique alone. Fintraffic reuses preset names across
-    # stations ("Tienpinta" at almost every site), so the human part cannot be
-    # the key; Iowa reuses device_id across views, so the source ref cannot be
-    # either. pc.node_name_for is the one definition - the poller has to rebuild
-    # this identical string to find the credentials again, and a second copy of
-    # the formula would drift silently in both directions.
-    registered = sum(have.values())
-    todo = []
-    for c in cams:
-        name = pc.node_name_for(c)
-        if have.get(name, 0) > 0:
-            have[name] -= 1
-            continue
-        todo.append((name, c))
-
-    print(f"  {registered} already registered, {len(todo)} new")
+    print(f"  {len(matched)} already registered, {len(todo)} new"
+          + (f", {len(wake)} registered but PAUSED and offered again "
+             f"(will be un-paused)" if wake else ""))
     batch = todo[:a.limit]
     print(f"  this run would create {len(batch)}")
 
@@ -106,6 +108,14 @@ def main() -> int:
             print(f"    ... and {len(batch) - 10} more")
         print("\nDRY RUN - nothing written. Re-run with --apply.")
         return 0
+
+    if wake:
+        conn = db.connect()
+        conn.executemany("UPDATE nodes SET status = 'active' "
+                         "WHERE id = ? AND status = 'paused'",
+                         [(i,) for i in wake])
+        conn.commit()
+        print(f"  un-paused {len(wake)} node(s) whose camera is offered again")
 
     made = failed = 0
     for name, c in batch:

@@ -115,9 +115,49 @@ def main() -> int:
         else:
             keep += 1
 
+    # 🚨 AN ORPHAN WITH A SUCCESSOR IS NOT A DEAD CAMERA, IT IS A RENAMED ONE.
+    # Most orphans exist because a source renumbered and a second node was
+    # registered for the same camera (Iowa 09-16, Ontario 09-27). The camera is
+    # alive and beating - under its NEW node. Pausing the old row would file a
+    # working camera as dead; the true record is `superseded_by`, the mark
+    # nodes.enroll already writes when a camera moves: "this row is where the
+    # camera used to be, and it is now <node>". Its history stays attached, it
+    # leaves the map and the online count, and the lineage is kept.
+    #
+    # Same evidence as the poller's own re-join: same source, within REJOIN_M,
+    # assigned nearest-first one-to-one so two old rows cannot both claim one
+    # live camera. An orphan with no live node near it really is gone, and is
+    # paused.
+    succ: dict = {}
+    orphans = [n for n, w in doomed if w == -1]
+    if orphans and live:
+        import math
+        pairs = []
+        for i, n in enumerate(orphans):
+            if n.get("lat") is None or n.get("lon") is None:
+                continue
+            kx = 111320.0 * math.cos(math.radians(n["lat"]))
+            for j, c in enumerate(live):
+                d = math.hypot((n["lon"] - c["lon"]) * kx,
+                               (n["lat"] - c["lat"]) * 111320.0)
+                if d <= pc.REJOIN_M:
+                    pairs.append((d, i, j))
+        pairs.sort()
+        ti, tj = set(), set()
+        for d, i, j in pairs:
+            if i in ti or j in tj:
+                continue
+            ti.add(i)
+            tj.add(j)
+            succ[orphans[i]["id"]] = live[j]["node_id"]
+
     print(f"  {keep} still qualify (in use by the poller, or measured HD)")
     if already:
         print(f"  {already} already paused")
+    if orphans:
+        print(f"  {len(orphans)} orphan(s): {len(succ)} renamed (a live node "
+              f"within {pc.REJOIN_M:.0f} m -> superseded_by), "
+              f"{len(orphans) - len(succ)} gone (-> paused)")
     print(f"  {unmeasured} unmeasured or no longer offered - LEFT ALONE")
     print(f"  {len(doomed)} measured as unusable (placeholder, too small, "
           f"or a mosaic)")
@@ -131,11 +171,18 @@ def main() -> int:
         return 0
 
     conn = db.connect()
+    paused = 0
     for n, _w in doomed:
+        if n["id"] in succ:
+            continue
         conn.execute("UPDATE nodes SET status = 'paused' WHERE id = ?",
                      (n["id"],))
+        paused += 1
     conn.commit()
-    print(f"\npaused {len(doomed)} node(s); their sightings and history stay")
+    for old, new in succ.items():
+        db.set_superseded(old, new)
+    print(f"\npaused {paused} node(s), marked {len(succ)} superseded by their "
+          f"live successor; every sighting and all history stay")
     return 0
 
 
