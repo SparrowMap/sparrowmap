@@ -52,25 +52,45 @@ def main() -> int:
         print("no measurements on this machine - copy data/probe/ here first")
         return 1
 
-    # What the source offers now, unfiltered, so a node can be matched to the
-    # measurement of its own image.
-    raw = pc.SOURCES[a.source](measured_only=False) \
-        if a.source in ("oh", "nm", "mo", "ny", "mi", "in", "tx", "al", "ne",
-                        "nc") \
-        else (pc.arcgis_index(a.source, measured_only=False)
-              if a.source in pc.ARCGIS else pc.SOURCES[a.source]())
-    hi = pc.SRC_MAX_WIDTH.get(a.source, 10 ** 9)
-    by_name = {pc.node_name_for(c): c for c in raw}
-
     rows = [n for n in db.nodes(active_only=False)
             if (n.get("kind") or "") == "public_cam"
             and pc.ref_of(n.get("name") or "").startswith(a.source + ":")]
-    print(f"{len(rows)} registered {a.source} node(s); "
-          f"{len(raw)} offered by the source now")
+    creds = pc.creds_by_name(rows)
 
-    doomed, unmeasured, keep = [], 0, 0
+    # 🚨 FIRST: WHICH NODES IS THE POLLER USING RIGHT NOW? Those are never
+    # touched, whatever else is true of them. Answered by the poller's own
+    # list and the poller's own join (name, then position) - see
+    # pc.join_source for the Utah/Illinois near-miss that made this a rule.
+    # If the live list cannot be read, stop: acting without it is guessing.
+    try:
+        polled, _dead = pc.polled_index(a.source, probe)
+    except Exception as exc:
+        print(f"cannot read what the poller uses for {a.source} "
+              f"({type(exc).__name__}: {str(exc)[:80]}) - refusing to act")
+        return 1
+    live, _, _ = pc.join_source(a.source, polled, creds)
+    live_ids = {c["node_id"] for c in live}
+
+    # Then everything the source offers, unfiltered, joined the same way, so
+    # each remaining node is judged by the measurement of its OWN image.
+    raw = pc.dedupe_index(pc.raw_index(a.source))
+    hi = pc.SRC_MAX_WIDTH.get(a.source, 10 ** 9)
+    matched, _, _ = pc.join_source(a.source, raw, creds)
+    by_node = {c["node_id"]: c for c in matched}
+
+    print(f"{len(rows)} registered {a.source} node(s); "
+          f"{len(raw)} offered by the source now; "
+          f"{len(live_ids)} in use by the poller")
+
+    doomed, unmeasured, keep, already = [], 0, 0, 0
     for n in rows:
-        c = by_name.get(n["name"])
+        if n["id"] in live_ids:
+            keep += 1
+            continue
+        if (n.get("status") or "") == "paused":
+            already += 1
+            continue
+        c = by_node.get(n["id"])
         if not c:
             # 🚨 AN ORPHAN CANNOT EVER BE POLLED AGAIN, AND THAT IS DIFFERENT
             # FROM UNMEASURED. The poller finds a node by rebuilding its NAME
@@ -87,7 +107,7 @@ def main() -> int:
             else:
                 unmeasured += 1
             continue
-        w = probe.get(c["url"])
+        w = probe.get(pc.probe_key(c))
         if w is None:
             unmeasured += 1              # missing data is not negative data
         elif w == 0 or w < pc.MIN_HD_WIDTH or w > hi:
@@ -95,7 +115,9 @@ def main() -> int:
         else:
             keep += 1
 
-    print(f"  {keep} still qualify")
+    print(f"  {keep} still qualify (in use by the poller, or measured HD)")
+    if already:
+        print(f"  {already} already paused")
     print(f"  {unmeasured} unmeasured or no longer offered - LEFT ALONE")
     print(f"  {len(doomed)} measured as unusable (placeholder, too small, "
           f"or a mosaic)")

@@ -999,6 +999,20 @@ for _k in ARCGIS:
 # for the cost of 809 small metadata requests.
 SELF_DESCRIBING = {"fi"}
 
+# 🚨 SOURCES WHOSE IMAGE URL NAMES ONE FRAME, NOT THE CAMERA.
+#
+# Alaska, Wyoming and Montana put the capture time in the file name, so a URL
+# read from the index is stale within minutes. Everything else here assumes a
+# camera HAS a durable URL, and three things break without one: the node name
+# (fixed by building the ref from the agency's site and view ids, never the
+# URL), the probe cache (fixed by probe_key filing these under src:ref), and
+# the poller, which reads each index ONCE at start-up. That last one is fixed
+# in cmd_run: for these sources only, the index is re-read at the top of every
+# cycle and each camera's URL is replaced by its current one, matched on
+# src:ref. An index that fails to refresh keeps last cycle's URLs rather than
+# dropping the cameras.
+ROTATING: set = set()
+
 
 # --------------------------------------------------------------------------
 # the resolution probe
@@ -1030,7 +1044,7 @@ def probe_filter(cams: list, src: str) -> list:
     hi = SRC_MAX_WIDTH.get(src, 10 ** 9)
     out, unmeasured, small, big = [], 0, 0, 0
     for c in cams:
-        w = probe.get(c["url"])
+        w = probe.get(probe_key(c))
         if w is None:
             unmeasured += 1
         elif w < MIN_HD_WIDTH:
@@ -1105,6 +1119,49 @@ def _url_ref(url: str) -> str:
     """
     import hashlib
     return hashlib.blake2b(url.encode(), digest_size=5).hexdigest()
+
+
+def probe_key(c: dict) -> str:
+    """What a camera's measurement is filed under. THE SINGLE DEFINITION.
+
+    Normally its image URL: resolution belongs to the picture, and the URL is
+    what names the picture.
+
+    🚨 EXCEPT WHERE THE URL NAMES ONE FRAME RATHER THAN THE CAMERA. Some
+    networks stamp the capture time into the file name
+    (Vid-000351001-00-00-2026-08-16-03-09.jpg), so the URL a camera had when it
+    was measured is gone minutes later. Filed by URL, every camera would read
+    as "never measured" on the next index fetch and the whole state would drop
+    out. Those indexes set `pkey` to `src:ref`, which is stable because the ref
+    is the agency's site and view, never the URL. See ROTATING.
+    """
+    return c.get("pkey") or c["url"]
+
+
+def raw_index(src: str) -> list:
+    """Everything a source offers, UNFILTERED by measurement.
+
+    🚨 ONE DEFINITION, BECAUSE THREE CALLERS EACH HAD THEIR OWN LIST OF WHICH
+    SOURCES TAKE `measured_only`, AND THE LISTS HAD DRIFTED. probe needs the
+    raw list or it can never bootstrap (a gated index returns nothing
+    unmeasured); retire_dead_cams needs it or every camera below the bar looks
+    like an orphan. retire's copy was missing il, sd, az, ut, id, ne_511 and
+    every CARS state - so for those it silently read the FILTERED list.
+    """
+    if src == "on":
+        # Ontario moved to Castle Rock; its index function is probe-gated by
+        # hand rather than through probe_filter.
+        return _castlerock_index("on", "511on.ca")
+    if src in ARCGIS:
+        return arcgis_index(src, measured_only=False)
+    fn = SOURCES[src]
+    # Asked of the signature, not by catching TypeError: a TypeError raised
+    # INSIDE a gated index would otherwise fall through to the filtered call
+    # and hand back the measured subset as if it were everything.
+    import inspect
+    if "measured_only" in inspect.signature(fn).parameters:
+        return fn(measured_only=False)
+    return fn()                  # never gated: nyc, fi, atx, ia
 
 
 def content_hash(raw: bytes) -> str:
@@ -1185,30 +1242,23 @@ def cmd_probe(args) -> int:
     # 🚨 THE RAW LIST, NOT THE FILTERED ONE, OR THIS CAN NEVER BOOTSTRAP.
     # Every probe-gated index refuses to return unmeasured cameras by design,
     # so asking it what to measure would answer "nothing" for ever.
-    if args.source == "on":
-        # Ontario moved to Castle Rock (see ontario_index); measure the raw
-        # Castle Rock list, not the old key-gated API.
-        urls = [c["url"] for c in _castlerock_index("on", "511on.ca")]
-    elif args.source in ARCGIS:
-        urls = [c["url"] for c in arcgis_index(args.source, measured_only=False)]
-    elif (args.source in ("oh", "nm", "mo", "ny", "mi", "in", "tx", "al",
-                          "ne_511", "nc", "il", "sd", "az", "ut", "id")
-          or args.source in CARS):
-        urls = [c["url"] for c in SOURCES[args.source](measured_only=False)]
-    else:
-        urls = [c["url"] for c in SOURCES[args.source]()]
-    todo = [u for u in urls if u not in everyone]
+    raw_cams = raw_index(args.source)
+    # Measured by URL, FILED by probe_key - the same thing for every source
+    # except the rotating ones, where the URL is one frame's name.
+    urls = list(dict.fromkeys(probe_key(c) for c in raw_cams))
+    fetch_url = {probe_key(c): c["url"] for c in raw_cams}
+    todo = [k for k in urls if k not in everyone]
     print(f"{len(urls)} camera(s), {len(known)} already measured, "
           f"{len(todo)} to do")
 
-    def one(u):
+    def one(k):
         try:
-            raw = fetch_image(u, timeout=20)
+            raw = fetch_image(fetch_url[k], timeout=20)
             # The bytes are kept so identical images can be found afterwards -
             # see the placeholder sweep below.
-            return u, Image.open(io.BytesIO(raw)).size[0], content_hash(raw)
+            return k, Image.open(io.BytesIO(raw)).size[0], content_hash(raw)
         except Exception:
-            return u, 0, ""        # 0 = measured and unusable, not unmeasured
+            return k, 0, ""        # 0 = measured and unusable, not unmeasured
 
     done, digest = 0, {}
     with cf.ThreadPoolExecutor(max_workers=16) as pool:
@@ -1740,6 +1790,100 @@ def _rejoin_by_position(src: str, orphans: list, creds: dict,
     return out
 
 
+def polled_index(src: str, probe: dict) -> tuple:
+    """Exactly the cameras the poller sweeps for one source: (cams, n_dead).
+
+    Shared with retire_dead_cams.py so "is this node in use" is answered by
+    the same list the poller actually uses. Raises if the index is
+    unreachable or the source has never been measured - a caller that cannot
+    see the live list must not act as if it were empty.
+    """
+    idx = dedupe_index(SOURCES[src]())
+    # 🚨 DO NOT SPEND A SWEEP ON A CAMERA MEASURED AS DEAD. Austin's index
+    # offers 1,005 cameras and 163 of them do not return an image at all -
+    # they are listed, they are gone, and every cycle paid a connection and
+    # up to the fetch timeout to rediscover that.
+    #
+    # ⚠️ ONLY width == 0, which means MEASURED AND UNLOADABLE. A camera with
+    # no probe entry is UNMEASURED and is kept: missing data is not negative
+    # data, and silently dropping everything unprobed would quietly delete
+    # whole networks the moment the probe file went missing.
+    live = [c for c in idx if probe.get(probe_key(c), 1) != 0]
+    return live, len(idx) - len(live)
+
+
+def creds_by_name(rows) -> dict:
+    """Node rows -> {name: [credential, ...]}, the shape `tokens` exports.
+
+    For callers that read the DATABASE directly (retire_dead_cams.py) and must
+    join exactly as the poller does from the exported file.
+    """
+    out: dict = {}
+    for n in rows:
+        if (n.get("kind") or "") != "public_cam" or not ref_of(n.get("name") or ""):
+            continue
+        out.setdefault(n["name"], []).append(
+            {"node_id": n["id"], "token": n.get("token") or "",
+             "lat": n.get("lat"), "lon": n.get("lon"),
+             "status": n.get("status") or "?"})
+    return out
+
+
+def join_source(src: str, idx: list, creds: dict) -> tuple:
+    """Pair ONE source's live cameras with the credentials held for it.
+
+    Returns (matched cameras with node_id/token, count left unmatched, count
+    paired by position within a shared name).
+
+    🚨 THE ONE DEFINITION OF "WHICH NODE IS THIS CAMERA", SHARED BY THE POLLER
+    AND BY retire_dead_cams.py. Retire once decided orphans by exact NAME
+    alone, while the poller also re-joins a renumbered source BY POSITION
+    (_rejoin_by_position). So every camera the poller rescues - 1,698 in Utah,
+    1,223 in Illinois - has a name the source no longer produces, and
+    `retire --orphans` would have PAUSED all of them: live, beating cameras,
+    taken off the map by the tool meant to tidy up dead ones. A node is an
+    orphan only if THIS function cannot find a camera for it.
+    """
+    groups: dict = {}
+    for c in idx:
+        groups.setdefault(node_name_for(c), []).append(c)
+    out, orphans, ambiguous = [], [], 0
+    used: set = set()
+    for name, views in groups.items():
+        pool = list(creds.get(name) or [])
+        if not pool:
+            # NOT "unregistered" yet - the name may simply have changed.
+            # _rejoin_by_position gets a look before that is decided.
+            orphans.extend(views)
+            continue
+        if len(views) > 1:
+            ambiguous += len(views) - 1
+        for c in sorted(views, key=lambda v: v.get("url") or ""):
+            if not pool:
+                orphans.append(c)
+                continue
+            # Nearest first. Where a name covers cameras at genuinely
+            # different points this is exact; where they share a position
+            # every candidate ties and the sorted order decides, which is
+            # arbitrary but at least the SAME arbitrary every restart.
+            pool.sort(key=lambda cr: ((cr.get("lat") or 0) - c["lat"]) ** 2
+                                     + ((cr.get("lon") or 0) - c["lon"]) ** 2)
+            cr = pool.pop(0)
+            used.add(cr.get("node_id"))
+            # Position comes from the DB, which is what the map draws. A
+            # source quietly moving a camera must not make the dots
+            # disagree with the node.
+            out.append({**c, "node_id": cr["node_id"], "token": cr["token"],
+                        "lat": cr.get("lat", c["lat"]),
+                        "lon": cr.get("lon", c["lon"])})
+    unmatched = 0
+    if orphans:
+        rescued = _rejoin_by_position(src, orphans, creds, used)
+        out.extend(rescued)
+        unmatched = len(orphans) - len(rescued)
+    return out, unmatched, ambiguous
+
+
 def cams_from_tokens(tokens_path: str, sources: list) -> list:
     """Join the live source indexes to exported credentials.
 
@@ -1756,63 +1900,17 @@ def cams_from_tokens(tokens_path: str, sources: list) -> list:
     cams, missing, ambiguous, dead = [], 0, 0, 0
     for src in sources:
         try:
-            idx = dedupe_index(SOURCES[src]())
+            idx, n_dead = polled_index(src, probe)
         except Exception as exc:
             print(f"  ⚠ {src} index unavailable ({type(exc).__name__}: "
                   f"{str(exc)[:60]}) - its cameras are skipped this run")
             continue
-        # 🚨 DO NOT SPEND A SWEEP ON A CAMERA MEASURED AS DEAD. Austin's index
-        # offers 1,005 cameras and 163 of them do not return an image at all -
-        # they are listed, they are gone, and every cycle paid a connection and
-        # up to the fetch timeout to rediscover that.
-        #
-        # ⚠️ ONLY width == 0, which means MEASURED AND UNLOADABLE. A camera with
-        # no probe entry is UNMEASURED and is kept: missing data is not negative
-        # data, and silently dropping everything unprobed would quietly delete
-        # whole networks the moment the probe file went missing.
-        before = len(idx)
-        idx = [c for c in idx if probe.get(c["url"], 1) != 0]
-        dead += before - len(idx)
-        groups: dict = {}
-        for c in idx:
-            groups.setdefault(node_name_for(c), []).append(c)
-        hit = 0
-        orphans: list = []
-        used: set = set()
-        for name, views in groups.items():
-            pool = list(creds.get(name) or [])
-            if not pool:
-                # NOT "unregistered" yet - the name may simply have changed.
-                # _rejoin_by_position gets a look before that is decided.
-                orphans.extend(views)
-                continue
-            if len(views) > 1:
-                ambiguous += len(views) - 1
-            for c in sorted(views, key=lambda v: v.get("url") or ""):
-                if not pool:
-                    orphans.append(c)
-                    continue
-                # Nearest first. Where a name covers cameras at genuinely
-                # different points this is exact; where they share a position
-                # every candidate ties and the sorted order decides, which is
-                # arbitrary but at least the SAME arbitrary every restart.
-                pool.sort(key=lambda cr: ((cr.get("lat") or 0) - c["lat"]) ** 2
-                                         + ((cr.get("lon") or 0) - c["lon"]) ** 2)
-                cr = pool.pop(0)
-                used.add(cr.get("node_id"))
-                # Position comes from the DB, which is what the map draws. A
-                # source quietly moving a camera must not make the dots
-                # disagree with the node.
-                cams.append({**c, "node_id": cr["node_id"], "token": cr["token"],
-                             "lat": cr.get("lat", c["lat"]),
-                             "lon": cr.get("lon", c["lon"])})
-                hit += 1
-        if orphans:
-            rescued = _rejoin_by_position(src, orphans, creds, used)
-            cams.extend(rescued)
-            hit += len(rescued)
-            missing += len(orphans) - len(rescued)
-        print(f"  {src}: {hit} of {len(idx)} camera(s) matched to a node")
+        dead += n_dead
+        matched, unmatched, amb = join_source(src, idx, creds)
+        cams.extend(matched)
+        missing += unmatched
+        ambiguous += amb
+        print(f"  {src}: {len(matched)} of {len(idx)} camera(s) matched to a node")
     if dead:
         print(f"  {dead} camera(s) skipped: measured and never return an image")
     if ambiguous:
@@ -2031,9 +2129,37 @@ def cmd_run(args) -> int:
         except Exception as exc:
             return c, None, f"{type(exc).__name__}: {str(exc)[:40]}"
 
+    def refresh_rotating() -> None:
+        """Point every ROTATING camera at its CURRENT frame URL. See ROTATING."""
+        for src in sorted({c.get("src") for c in cams} & ROTATING):
+            try:
+                fresh = {probe_key(c): c["url"] for c in SOURCES[src]()}
+            except Exception as exc:
+                print(f"  ⚠ {src}: rotating index did not refresh "
+                      f"({type(exc).__name__}: {str(exc)[:50]}) - "
+                      f"polling last cycle's URLs")
+                continue
+            moved = gone = 0
+            for c in cams:
+                if c.get("src") != src:
+                    continue
+                u = fresh.get(probe_key(c))
+                if not u:
+                    gone += 1
+                elif u != c["url"]:
+                    c["url"] = u
+                    moved += 1
+            print(f"  {src}: {moved} rotating URL(s) refreshed"
+                  + (f", {gone} not in this index" if gone else ""))
+
+    first_cycle = True
     try:
         while True:
             cycle_started = time.time()
+            if not first_cycle:
+                # The start-up join already read every index once.
+                refresh_rotating()
+            first_cycle = False
             unchanged = 0
             reached = []
             posts = []
