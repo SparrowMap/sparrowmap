@@ -183,6 +183,21 @@ _last_prune = 0.0
 _INBOX_MAX_FILES = 12000
 _inbox_count = None          # cached; refreshed by the prune, not per write
 
+# 🚨 THE FLEET WAS FILLING THE BOUND AND A CONTRIBUTOR'S CROPS FELL OFF IT.
+#
+# ~19,900 `public_cam` traffic nodes post ~27,700 crops an hour into this same
+# inbox, and a puller cycle takes ~40 minutes for ~6,000 of them, so the inbox
+# sits at the bound and every write past it is dropped. A DOT camera losing a
+# crop costs nothing - it posts another in five minutes. A person who set up a
+# camera for us losing one costs a vehicle nobody will ever see: on 2026-09-29
+# a contributor's two AXIS cameras lost 33 of 56 crops, one unbroken 21-minute
+# block, while the sighting rows landed and looked normal.
+#
+# So contributors (every kind except public_cam) get headroom the fleet cannot
+# use. Their volume is tiny next to the fleet's, so this reserve is a ceiling
+# against abuse, not a budget anyone should reach.
+_CONTRIBUTOR_RESERVE = 4000
+
 
 def _scandir_json(d: Path):
     """Entries ending .json, without building a Path per file.
@@ -248,7 +263,7 @@ def _prune_inbox(force: bool = False) -> None:
 
 
 def quarantine_write(sighting_id: int, crop_bytes: bytes,
-                     meta: dict) -> Optional[str]:
+                     meta: dict, contributor: bool = False) -> Optional[str]:
     """Park one plate-less phone crop for the home classifier to pull.
 
     The crop is ALREADY below plate legibility when it reaches here (the phone
@@ -263,7 +278,8 @@ def quarantine_write(sighting_id: int, crop_bytes: bytes,
         _prune_inbox()
         # Bounded. See _INBOX_MAX_FILES: past this the home node is not going to
         # get to these crops anyway, and parking them makes every pull slower.
-        if _inbox_count is not None and _inbox_count >= _INBOX_MAX_FILES:
+        cap = _INBOX_MAX_FILES + (_CONTRIBUTOR_RESERVE if contributor else 0)
+        if _inbox_count is not None and _inbox_count >= cap:
             return None
         stem = str(int(sighting_id))
         (INBOX / f"{stem}.jpg").write_bytes(crop_bytes)

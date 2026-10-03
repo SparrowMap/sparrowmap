@@ -819,6 +819,14 @@
     if(it.reported && it.why){
       fl.textContent = "⚑ " + it.why;
       fl.classList.remove("hidden");
+    } else if(it.near_miss){
+      /* Under the classifier's bar, sent here so a person decides instead of
+         the bin. Say so, or it reads as a confident candidate. */
+      fl.textContent = "Near miss: the classifier scored this " +
+        (it.score == null ? "just" : Number(it.score).toFixed(2)) +
+        (it.threshold == null ? " under its bar" : ", under its bar of " + Number(it.threshold).toFixed(2)) +
+        ". Look closely.";
+      fl.classList.remove("hidden");
     } else {
       fl.textContent = ""; fl.classList.add("hidden");
     }

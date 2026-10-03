@@ -16,7 +16,8 @@ given as JSON on stdin:
             exists to prevent. So a head-positive is NOT published: its crop is
             moved from the inbox into data/review/ and the row is left private
             (an anonymous traffic dot, no government claim) until a human looks.
-  discard - the head said ordinary. Delete the crop from the inbox.
+  discard - the head said ordinary. Delete the crop from the inbox and mark the
+            row `auto_discarded` (a model's call - see discard_one).
   publish - a human (box_review.py) confirmed a reviewed crop is a real,
             clearly-identifiable government vehicle. Promote the row to the
             public tier, attach the crop as its photo, and clear the review pen.
@@ -102,6 +103,7 @@ def review_one(item: dict) -> None:
     # head already rejected.
     meta["head"] = {"conf": item.get("head_conf"), "vclass": item.get("vclass"),
                     "threshold": item.get("head_threshold"),
+                    "near_miss": bool(item.get("near_miss")),
                     "why": item.get("why"), "at": time.time()}
     # The crop the reviewer sees. Prefer the box's own inbox copy; fall back to
     # the crop the puller carried in the verdict. mirror._prune_inbox deletes
@@ -199,7 +201,38 @@ def reject_one(sid: int) -> None:
         # because a silent failure here is what put the row back in the queue.
         print(f"warning: could not record the retraction for {sid}: {exc}",
               file=sys.stderr)
-    db.audit("review:reject", str(sid), actor="box_review", ip="")
+    # `box_review_cli`, not `box_review`: that name is on 13.8M AUTOMATIC
+    # discards from before discard_one existed, so sync_review_labels ignores it.
+    db.audit("review:reject", str(sid), actor="box_review_cli", ip="")
+    _delete(*_review_paths(sid), *_inbox_paths(sid))
+
+
+def discard_one(sid: int) -> None:
+    """The trained head said ordinary. A MODEL's verdict, never a person's.
+
+    🚨 THIS USED TO BE reject_one, AND THAT LIED ABOUT WHO DECIDED.
+    box_puller's `discard` list was routed through reject_one ("A human said a
+    reviewed crop is not a government vehicle"), so every automatic discard:
+      * was audited as `review:reject` by `box_review` - 13,795,024 of them by
+        2026-09-29, ~350k/day, outnumbering every real reviewer combined;
+      * was stamped "retracted by the camera operator: not a public-tier
+        vehicle" on a row no operator ever saw;
+      * fed tools/sync_review_labels.py, which turns `review:reject` into a
+        human `civilian` training label - the head's own misses coming back as
+        ground truth.
+    Found when a contributor reported "verified police rejected" and the audit
+    pointed at a reviewer who did not exist.
+
+    `reviewed='auto_discarded'` keeps the row out of backfill_pen and the
+    possibly-missed queue exactly as before, leaves vclass/why as the hub set
+    them, and writes NO audit row: the row itself records the decision, and an
+    audit line per passing car is how the table reached 13.8M.
+    """
+    try:
+        db.review_sighting(sid, "auto_discarded")
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"warning: could not record the discard for {sid}: {exc}",
+              file=sys.stderr)
     _delete(*_review_paths(sid), *_inbox_paths(sid))
 
 
@@ -224,7 +257,7 @@ def main() -> None:
 
     run(req.get("review", []),  review_one,  "reviewed",  lambda it: it.get("id"))
     run(req.get("publish", []), publish_one, "published", lambda it: it.get("id"))
-    run(req.get("discard", []), lambda sid: reject_one(int(sid)), "discarded", lambda x: x)
+    run(req.get("discard", []), lambda sid: discard_one(int(sid)), "discarded", lambda x: x)
     run(req.get("reject", []),  lambda sid: reject_one(int(sid)), "rejected",  lambda x: x)
 
     print(json.dumps({"ok": not errors, **counts, "errors": errors}))

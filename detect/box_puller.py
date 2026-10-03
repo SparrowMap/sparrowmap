@@ -90,6 +90,26 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 
 MARKED_CLASSES = {"police"}
 MIN_CONF, MIN_MARGIN = 0.96, 0.90
 
+# 🚨 A NEAR MISS GOES TO A PERSON, NOT THE BIN.
+#
+# The head's operating point (0.97915 since 2026-09-02) was chosen for a CLEAN
+# pen, and it does that. But everything under it was discarded unseen, and the
+# labelled bank says what lives just below the bar (bank_index, all-time):
+#
+#     0.95 - 0.979   21 police /  0 civilian
+#     0.90 - 0.95    19 police /  8 other
+#     0.80 - 0.90    23 police /  8 civilian
+#
+# So most of what the head nearly accepted WAS police, and none of it reached a
+# reviewer. Found 2026-09-29 when a contributor's grey Tahoe scored head 0.877 /
+# CLIP police 0.889 and was thrown away without a human ever seeing it.
+#
+# Measured volume: ~40 crops/day in [0.80, threshold) on 2026-08-16/17, against
+# ~22/day above the bar. A few dozen extra cards a day is what the pen is for.
+# They are flagged `near_miss` so the reviewer knows the model said "almost",
+# and the threshold itself is NOT lowered - nothing publishes without a person.
+NEAR_MISS_FLOOR = 0.80
+
 # 🚨 THE SAME CROP WAS BEING SCORED UP TO FOUR TIMES.
 #
 # Measured 2026-09-03 over one run: 10,449 of 90,687 sightings were scored more
@@ -363,8 +383,11 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
         # Nothing is lost by declining: every pulled crop is banked as training
         # data above, BEFORE this decision, and the ones a head rejects are the
         # hard negatives that improve it most.
+        near_miss = False
         if call.get("source") == "head":
             candidate = bool(head_pos)
+            if not candidate and hc is not None and hc >= NEAR_MISS_FLOOR:
+                candidate = near_miss = True
         else:
             candidate = r["vclass"] in MARKED_CLASSES
 
@@ -419,6 +442,9 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
                 # both CLIP and the head called clearly-marked - the ones that
                 # used to publish themselves.
                 "strong": bool(marked),
+                # Below the head's bar but above NEAR_MISS_FLOOR. review_api
+                # shows it in the normal queue instead of the rejected pile.
+                "near_miss": near_miss,
                 # 🚨 CARRY THE CROP TO THE PEN. The box moves its own inbox
                 # copy into the review pen - but mirror._prune_inbox deletes
                 # inbox crops after 12h, so if this puller was delayed (a
@@ -432,8 +458,10 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
                         + ("clearly-marked " if marked else "")
                         + f"{r['vclass']} conf {r['conf']:.2f}"
                         + (f", head {hc:.2f}" if hc is not None else "")
+                        + (" (near miss, under the bar)" if near_miss else "")
                         + " - needs a human")})
-            tag = "  -> REVIEW (strong)" if marked else "  -> REVIEW"
+            tag = ("  -> REVIEW (strong)" if marked
+                   else "  -> REVIEW (near miss)" if near_miss else "  -> REVIEW")
             _remember(sid, digest, review[-1])
         else:
             discard.append(sid)

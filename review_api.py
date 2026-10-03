@@ -69,6 +69,11 @@ def head_rejected(meta: dict) -> bool:
     opposite failure hides a real patrol unit for ever.
     """
     h = meta.get("head") or {}
+    # A near miss was parked ON PURPOSE because it scored under the bar - see
+    # box_puller.NEAR_MISS_FLOOR. Hiding it here again would put it straight
+    # back in the pile nobody works, which is the bug that parked it.
+    if h.get("near_miss"):
+        return False
     conf, thr = h.get("conf"), h.get("threshold")
     if conf is None or thr is None:
         return False
@@ -142,6 +147,8 @@ def queue(reviewer: dict, scope: str = "pool", limit: int = 60,
             "ts": meta.get("ts") or (row or {}).get("ts"),
             "crop": f"/api/rv/crop/{sid}",
             "rejected": was_rejected,
+            "near_miss": bool((meta.get("head") or {}).get("near_miss")),
+            "threshold": (meta.get("head") or {}).get("threshold"),
             # 🚨 A FLAG THE REVIEWER CANNOT SEE IS STILL A BLACK HOLE.
             # park_reported writes `why` into the pen meta under a comment
             # saying it is "shown to the reviewer as the reason this is in

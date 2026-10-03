@@ -55,7 +55,13 @@ def fetch_verdicts(args) -> list[dict]:
         "c=db.connect();"
         f"rows=[dict(r) for r in c.execute("
         f"\\\"SELECT action,target,actor,ts FROM audit WHERE action IN "
-        f"('review:confirm','review:reject') AND ts>? ORDER BY ts DESC\\\","
+        f"('review:confirm','review:reject') AND ts>? "
+        # 🚨 NOT actor 'box_review' rejects: 13.8M of those are the HEAD's own
+        # automatic discards, mislogged as human until 2026-09-29 (see
+        # box_publish.discard_one). Labelling them 'civilian' would train the
+        # head on its own misses. Human CLI rejects now log as box_review_cli.
+        f"AND NOT (action='review:reject' AND actor='box_review') "
+        f"ORDER BY ts DESC\\\","
         f"(time.time()-{int(args.days)}*86400,))];"
         "print(json.dumps(rows))\"")
     out = ssh(args, remote, timeout=90).strip()
