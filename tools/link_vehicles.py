@@ -121,7 +121,9 @@ def main() -> int:
         return 0
 
     since = time.time() - a.days * 86400
-    rows = [r for r in db.recent_sightings(since=since, limit=100000)
+    # all_sightings + vclass="public": recent_sightings silently capped this at
+    # 5000 rows of ALL traffic, i.e. the last ~15 minutes, not `a.days`.
+    rows = [r for r in db.all_sightings(since=since, vclass="public")
             if r.get("tier") == "public"
             and (r.get("vclass") or "") in db.TAGGABLE]
     print(f"{len(rows)} published police/government sighting(s) in "

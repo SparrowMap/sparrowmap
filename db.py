@@ -1002,11 +1002,36 @@ _HAS_PHOTO = "snap IS NOT NULL AND snap <> ''"
 _PUBLISHABLE = f"(tier <> 'public' OR ({_HAS_PHOTO}))"
 
 
+def all_sightings(since: float = 0, vclass: Optional[str] = None,
+                  bbox: Optional[tuple] = None) -> list[dict]:
+    """Every matching row, newest first, paged past recent_sightings' ceiling.
+
+    For server-side tools. tools/link_vehicles.py asked recent_sightings for
+    limit=100000, got the silent 5000 instead, and at ~480k sightings a day that
+    was the last ~15 minutes of traffic, not the N days it reported."""
+    out: list[dict] = []
+    before = None
+    while True:
+        page = recent_sightings(since, 5000, vclass, bbox, before)
+        out += page
+        if len(page) < 5000:
+            return out
+        before = (page[-1]["ts"], page[-1]["id"])
+
+
 def recent_sightings(since: float = 0, limit: int = 500,
                      vclass: Optional[str] = None,
-                     bbox: Optional[tuple] = None) -> list[dict]:
+                     bbox: Optional[tuple] = None,
+                     before: Optional[tuple] = None) -> list[dict]:
+    """Newest first. `before=(ts, id)` is a keyset cursor: rows strictly older
+    than that row, so a caller can page past the per-call ceiling below."""
     sql = "SELECT * FROM sightings WHERE ts > ?"
     args: list[Any] = [since]
+    if before:
+        # (ts, id), not ts alone: two rows can share a timestamp, and a bare
+        # `ts < ?` would silently skip the rest of a tie at the page boundary.
+        sql += " AND (ts < ? OR (ts = ? AND id < ?))"
+        args += [before[0], before[0], before[1]]
     if vclass and vclass != "all":
         if vclass == "public":
             sql += f" AND tier = 'public' AND {_HAS_PHOTO}"
@@ -1018,8 +1043,13 @@ def recent_sightings(since: float = 0, limit: int = 500,
     if bbox:
         sql += " AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?"
         args += [bbox[0], bbox[2], bbox[1], bbox[3]]
-    sql += " ORDER BY ts DESC LIMIT ?"
+    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
     # 🚨 A CEILING BELOW THE THING IT IS SERVING IS A SILENT TRUNCATION.
+    # ...and it happened AGAIN at 5000 (2026-10-02: 5,626 public rows, map
+    # "maxed at 5000 and not rising" - each new approval pushed the oldest off).
+    # Raising the number twice proved the number is not the fix. It is now a
+    # PAGE size: the map pages with `before` until a page comes back short, so
+    # no total can ever be capped by it again.
     # This sat at 2000 while the public tier passed 2,621 sightings, so the map
     # simply stopped showing the oldest ones and looked "stuck at 2000" with no
     # error anywhere. Raised with headroom, and it is affordable now that a row

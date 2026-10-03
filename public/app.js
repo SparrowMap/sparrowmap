@@ -2415,6 +2415,27 @@ function fetchJSON(url, ms = FETCH_TIMEOUT_MS) {
     .finally(() => clearTimeout(t));
 }
 
+/* 🚨 PAGE, DON'T CAP. The public feed was one fetch of at most PUBLIC_LIMIT
+   rows, and the map got "stuck" twice: at 2000, then at 5000 once the public
+   tier passed it (5,626 on 2026-10-02) - every new approval pushed the oldest
+   off and the count never moved. PUBLIC_LIMIT is now a PAGE size: keep asking
+   for rows older than the last one (`before` = its ts + id) until a page comes
+   back short. Only the full sweep past 5,000 rows ever needs a second page, so
+   the edge-cached first page stays the hot path. */
+async function fetchPublic(since, timeoutMs) {
+  const out = [];
+  let before = '';
+  for (let page = 0; page < 50; page++) {   // 50 pages = 250k rows: a backstop, not a cap
+    const rows = await fetchJSON(
+      `/api/sightings?since=${since}&vclass=public&limit=${PUBLIC_LIMIT}${before}`, timeoutMs);
+    out.push(...rows);
+    if (rows.length < PUBLIC_LIMIT) break;
+    const last = rows[rows.length - 1];
+    before = `&before=${last.ts}&before_id=${last.id}`;
+  }
+  return out;
+}
+
 async function load() {
   const trafficCut = bucketed(serverNow() - TRAFFIC_FADE_S);
   // Full sweep on the first load and every PUB_FULL_EVERY_MS; otherwise just
@@ -2428,8 +2449,7 @@ async function load() {
   // can least afford to retry it. The incremental poll keeps the short timeout,
   // because there a slow answer really is a broken one.
   const [pub, live] = await Promise.all([
-    fetchJSON(`/api/sightings?since=${pubSince}&vclass=public&limit=${PUBLIC_LIMIT}`,
-              full ? 60000 : FETCH_TIMEOUT_MS),
+    fetchPublic(pubSince, full ? 60000 : FETCH_TIMEOUT_MS),
     fetchJSON(`/api/sightings?since=${trafficCut}&limit=400`),
   ]);
   // ⚠️ The clear() is why drawSnapshot must never run after this: live data
@@ -2599,10 +2619,9 @@ This camera reads none, so the sightings above cannot be told apart.">&mdash;</b
   const shown = _liveArrived ? publicInWindow() : null;
   const pubCount = shown === null ? s.public_24h : shown;
   const pubWindow = shown === null ? '24h' : wl;
-  // The fetch asks for at most PUBLIC_LIMIT rows, so a count that lands exactly
-  // on it is a floor rather than a total. Say so with a + instead of quietly
-  // publishing the cap as if it were the answer.
-  const capped = shown !== null && state.sightings.size >= PUBLIC_LIMIT;
+  // fetchPublic pages to the end, so the count is a floor only if its 50-page
+  // backstop was hit. Say so with a + rather than publish a cap as the answer.
+  const capped = shown !== null && state.sightings.size >= PUBLIC_LIMIT * 50;
   const hours = s.heartbeats_total
     ? `<span title="${s.heartbeats_total.toLocaleString()} heartbeats, one every 30 seconds. A lower bound: heartbeats were not always enabled and dropped ones are never counted."><b>${Math.round(s.heartbeats_total / 120).toLocaleString()}</b> hours watched</span>`
     : '';

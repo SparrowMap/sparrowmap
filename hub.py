@@ -3290,7 +3290,15 @@ class Handler(BaseHTTPRequestHandler):
                         bbox = tuple(float(x) for x in q["bbox"][0].split(","))
                     except ValueError:
                         bbox = None
-                rows = db.recent_sightings(since, limit, vclass, bbox)
+                # Keyset paging cursor - see db.recent_sightings.
+                before = None
+                if "before" in q:
+                    try:
+                        before = (float(q["before"][0]),
+                                  int(q.get("before_id", [2**62])[0]))
+                    except ValueError:
+                        before = None
+                rows = db.recent_sightings(since, limit, vclass, bbox, before)
                 return self._json(_public_rows(rows))
 
             if p.startswith("/api/sighting/"):
