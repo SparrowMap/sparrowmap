@@ -1704,7 +1704,10 @@ class Handler(BaseHTTPRequestHandler):
     # What each cacheable route ACTUALLY reads. Anything else is noise and must
     # not reach the cache key.
     _MICRO_PARAMS = {
-        "/api/sightings":   ("since", "limit", "vclass", "bbox"),
+        # before/before_id: the paging cursor (2026-10-02). Shipped WITHOUT them
+        # first and page 2 came back as a cached copy of page 1 - exactly the
+        # poisoning the note below warns about.
+        "/api/sightings":   ("since", "limit", "vclass", "bbox", "before", "before_id"),
         "/api/leaderboard": ("hours",),
         # 🚨 A PARAMETER THAT CHANGES THE ANSWER AND IS NOT LISTED HERE IS A
         # CACHE POISONING BUG, NOT AN OMISSION. /api/nodes now returns a
