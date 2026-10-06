@@ -258,6 +258,28 @@ running costs below are the part that does that.</p>"""
     return _page(s, c, gauges, need, goals_block)
 
 
+# Monero, added 2026-10-06 at his request. The address was checked before it
+# went in: the QR (public/monero-qr.png, his own image) decodes to exactly this
+# string, and its base58 + keccak checksum verifies as a mainnet address. If
+# either is ever changed, re-check BOTH against each other - a QR and a printed
+# address that disagree would send someone's money to the wrong place.
+XMR_ADDRESS = ("47uEmSACPB9YpdEUG99jnwAUKVBAEQtKH7EvU95Yxa1HcC7g5CefBDxexWKrLE"
+               "jDEodZwT24HVQ61NoYeqaadQHMKYJ6JN6")
+
+
+def _monero_block() -> str:
+    # No copy button: the CSP is script-src 'self', so inline JS is refused.
+    # user-select:all makes one tap select the whole address instead.
+    return f"""<div class=xmr>
+ <a href="monero:{XMR_ADDRESS}" title="Open in a Monero wallet"><img src="/static/monero-qr.png" width=150 height=150 alt="Monero address QR code"></a>
+ <div>
+  <b>Or send Monero (XMR)</b>
+  <p class=n>Scan the code, or tap the address once to select all of it.</p>
+  <code class=addr>{XMR_ADDRESS}</code>
+ </div>
+</div>"""
+
+
 def _page(s: dict, c: dict, gauges: str, need: str, goals_block: str) -> str:
     e = html.escape
     days = (time.time() - s["first_ts"]) / DAY if s["first_ts"] else 0
@@ -367,6 +389,14 @@ the map is public and stays public either way.</p>"""
  .goal .gt{{margin:8px 0 6px}}
  .goal .gt span{{background:var(--cam)}}
  .goal p{{margin:8px 0 0;font-size:13.5px}}
+ .xmr{{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:10px 0 6px;
+   background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:14px}}
+ .xmr img{{display:block;border-radius:6px;background:#fff;padding:6px}}
+ .xmr div{{flex:1 1 240px;min-width:0}}
+ .xmr p{{margin:4px 0 8px}}
+ .addr{{display:block;user-select:all;-webkit-user-select:all;word-break:break-all;
+   font:12.5px/1.5 var(--mono);color:var(--ink);background:var(--bg);
+   border:1px solid var(--line2);border-radius:7px;padding:8px 10px;cursor:text}}
 </style>
 <div class=wrap>
 <p><a href="/" class=n>&larr; back to the map</a></p>
@@ -376,6 +406,7 @@ the map is public and stays public either way.</p>"""
 here is produced by <code>tools/support_page.py</code> reading the database, not
 typed in by hand.</p>
 <p><a class=cta href="https://cash.app/$sparrowmap">Chip in &mdash; $sparrowmap on Cash App</a></p>
+{_monero_block()}
 
 <h2>The volunteer network</h2>
 <div class=big>
@@ -424,6 +455,7 @@ one because publishing one takes a human confirming it.</p>
 {cost_block}
 {supporters}
 <p><a class=cta href="https://cash.app/$sparrowmap">Chip in &mdash; $sparrowmap on Cash App</a></p>
+{_monero_block()}
 <p class=n>If money ever exceeds what the servers cost, the surplus goes to the
 same place: more polling capacity and bandwidth. There is no salary in this.</p>
 
