@@ -368,6 +368,12 @@ _PEAK = {"fd_pct": 0.0, "threads": 0}
 # protection.
 CACHE_BUCKET_S = 4
 
+# How far a NON-moving camera's event GPS may be from its enrolled position
+# before the sighting is refused (see the check in _ingest). 1 km clears any
+# honest GPS wobble from a window or a pole and still catches a phone that is
+# driving around under a stationary camera's id.
+FIXED_NODE_MAX_AWAY_M = 1000.0
+
 MAX_REQUESTS = 200
 
 # 🚨 A SECOND CAP, BECAUSE MAX_REQUESTS COUNTS THE WRONG NOUN AND THE KERNEL
@@ -5612,6 +5618,32 @@ class Handler(BaseHTTPRequestHandler):
         # The seed makes the position stable for this sighting and different
         # from the next one, so passes spread along the watched stretch instead
         # of stacking 31 dots on one pixel.
+        # 🚨 A FIXED CAMERA THAT IS SOMEWHERE ELSE IS NOT THAT CAMERA.
+        # sighting_position puts a fixed camera's sightings on its watched span
+        # whatever GPS the event carries - right for a camera bolted to a
+        # window, and exactly wrong for a phone that reused that camera's id in
+        # drive mode: 2026-10-07 his drive posted 217 sightings under his
+        # stationary node "2", and every one was drawn on his home road while
+        # he was miles away. A sighting is a claim about a place; refuse it
+        # rather than store it in the wrong one (drive.html now enrols its own
+        # mobile node, this is the backstop for any client that does not).
+        if (ev.get("lat") is not None and ev.get("lon") is not None
+                and nd.get("lat") is not None
+                # `fixed` only: a person's own camera. public_cam is placed by
+                # the catalogue we scrape, which can renumber under us, and
+                # must never be refused in bulk by a check written for phones.
+                and (nd.get("kind") or "fixed") == "fixed"):
+            try:
+                away = _haversine_m(float(ev["lat"]), float(ev["lon"]),
+                                   float(nd["lat"]), float(nd["lon"]))
+            except (TypeError, ValueError):
+                away = 0.0
+            if away > FIXED_NODE_MAX_AWAY_M:
+                return self._err(409, (
+                    f"this camera is registered at a fixed place, and this "
+                    f"sighting is {away / 1000:.1f} km from it - a moving "
+                    f"camera needs its own (mobile) id"))
+
         s_lat, s_lon = node_mod.sighting_position(
             nd, ev.get("lat"), ev.get("lon"),
             seed=f"{nid}:{ts:.3f}:{ev.get('snap_sha256') or plate or ''}")

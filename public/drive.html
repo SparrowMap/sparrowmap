@@ -1900,8 +1900,13 @@ function redactPlateBand(cv, geom) {
   // time, and everyone waiting gets the same node.
   var driveEnrolling = false, driveWaiting = [];
   function getDriveNode(cb){
-    var n=null; try{n=JSON.parse(localStorage.getItem('sparrow.node')||'null');}catch(e){}
-    if(n&&n.id&&n.token)return cb(n);
+    /* 🚨 NEVER BORROW `sparrow.node`. That key holds the phone's STATIONARY
+       camera (a window, a porch) when it has one, and a stationary camera's
+       sightings are drawn on its watched road whatever GPS they carry. On
+       2026-10-07 his drive posted 217 sightings under his home camera "2" and
+       every one landed on his own street while he was miles away. Driving
+       always uses its own MOBILE node, placed by GPS. */
+    var n=null;
     try{n=JSON.parse(localStorage.getItem('sparrow.drive.node')||'null');}catch(e){}
     if(n&&n.id&&n.token)return cb(n);
     if(!me)return cb(null);
