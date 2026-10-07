@@ -70,8 +70,10 @@ try:
         except Exception:
             time.sleep(0.2)
 
-    HOME = (42.8155, -83.7822)
-    FAR = (42.5600, -83.3000)                      # ~48 km away
+    # Synthetic, never a real place (a real one would publish somebody's
+    # camera: the preflight personal-data check exists for exactly that).
+    HOME = (10.0, 20.0)
+    FAR = (HOME[0] + 0.3, HOME[1] + 0.3)       # ~47 km away
     nodes = {}
     for kind in ("fixed", "mobile"):
         st, r = call("/api/enroll", {"name": f"t-{kind}", "kind": kind,
