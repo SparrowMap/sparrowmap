@@ -158,6 +158,9 @@ APPROVED_FOR_TRAINING = {
     "patrol",      # the same queue with heavy plant filtered out - his clicks
     "remote",      # other people's nodes, oldest first - his clicks
     "confirmed",   # a machine or community label he has approved on /proof
+    "pen",         # human review-pen verdicts (tools/sync_pen_labels.py). The
+                   # head CHOSE these crops, so they train but are never in
+                   # MEASURABLE - measuring on them is selection bias.
 }
 
 # ⚠️ THE LIST ABOVE IS EVERY MODE THE LABELLING PAGE OFFERS, AND THAT IS THE
@@ -271,7 +274,17 @@ def load() -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
         # training positive for a police head. The NEGATIVE keys are unaffected:
         # `civilian` and `fleet` meant the same thing under both vocabularies,
         # so their 1,440 vocab-1 rows still train.
-        if lab in POSITIVE and int(d.get("label_vocab") or 1) < labelbank.LABEL_VOCAB:
+        # 🚨 PEN VERDICTS WERE SILENTLY DROPPED HERE (found 2026-10-07).
+        # tools/sync_review_labels.py never wrote label_vocab, so every `police`
+        # it synced read as a vocab-1 "government" click and was skipped - not
+        # one review-pen confirmation ever trained the head. The pen's buttons
+        # have asked "police?" vs "government, not police?" separately since
+        # the vocab-2 split (2026-08-10), so a pen `police` IS a police label.
+        pen = d.get("labelled_from") == "rv_review"
+        # Before the split a pen "confirm" meant government; those stay dropped.
+        pen_v2 = pen and float(d.get("labelled_at") or 0) >= 1786320000  # 2026-08-10
+        if (lab in POSITIVE and not pen_v2
+                and int(d.get("label_vocab") or 1) < labelbank.LABEL_VOCAB):
             continue
         if lab in POSITIVE:
             y.append(1)
@@ -307,7 +320,11 @@ def load() -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
         # ("hunt"), which silently destroys the one field that says this row is
         # a press photograph rather than a frame from his window. `source` is
         # written by the ingest and never touched again.
-        src.append("scraped" if d.get("source") == "scraped"
+        # Pen rows are "pen" whatever the old sync stamped on them: it wrote
+        # sampling="review", which would have put head-chosen crops in the
+        # measured set.
+        src.append("pen" if pen else
+                   "scraped" if d.get("source") == "scraped"
                    else (d.get("sampling") or "review"))
         meta.append({"rel": rel, "clip_conf": float(clip.get("conf") or 0),
                      "clip_class": clip.get("vclass"),
