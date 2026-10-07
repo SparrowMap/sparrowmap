@@ -126,6 +126,31 @@ try:
     check("0.99 goes to review, not near miss", 903 in rv and not rv[903].get("near_miss"))
     check("0.30 is discarded", 902 in captured.get("discard", []), str(captured.get("discard")))
 
+    # ---- 2b. a contributor's crop is scored and sent BEFORE the fleet's ----
+    inbox2 = SCRATCH / "fake_inbox2"
+    inbox2.mkdir()
+    for s, contrib in ((951, False), (952, False), (953, True), (954, False)):
+        cv2.imwrite(str(inbox2 / f"{s}.jpg"), img)
+        (inbox2 / f"{s}.json").write_text(json.dumps(
+            {"sighting_id": s, "node_name": "t", "contributor": contrib}))
+    seen_order, calls = [], []
+
+    class OrderVid:
+        def classify(self, _img):
+            return {"vclass": "civilian", "conf": 0.9, "margin": 0.5, "scores": {}, "_s": 0.1}
+
+    VehicleIdentifier.gov_call = staticmethod(lambda r: {
+        "source": "head", "gov": False, "conf": r["_s"], "threshold": 0.97915})
+    box_puller.apply_verdict = lambda a, p, rv, d, s, l: calls.append(list(d)) or {"discarded": len(d)}
+    box_puller._seen.clear()
+    try:
+        out = box_puller._run_once(OrderVid(), SimpleNamespace(limit=0, dry_run=False), inbox2, True)
+    finally:
+        VehicleIdentifier.gov_call = real
+    check("contributor verdict sent first, alone", calls[:1] == [[953]], str(calls))
+    check("fleet verdict sent after", len(calls) == 2 and sorted(calls[1]) == [951, 952, 954], str(calls))
+    check("cycle totals still count everything", out.get("discarded") == 4, str(out))
+
     # ---- 3. a contributor is not crowded out by the fleet ------------------
     mirror._last_prune = 1e18          # keep the prune from recounting
     mirror._inbox_count = mirror._INBOX_MAX_FILES

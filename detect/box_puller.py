@@ -300,12 +300,38 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
     if args.limit:
         metas = metas[:args.limit]
 
+    # 🚨 A PERSON'S CROP FIRST, AND ITS VERDICT SENT BEFORE THE FLEET'S.
+    # A cycle scores ~6,000-7,000 traffic-camera crops (~11 min) and only then
+    # sends every verdict at once, so a driver's crop waited behind all of
+    # them: 2026-10-07 his drive-mode patrol car was posted 15:31:56 and parked
+    # 15:46:38, after drive mode's 12-minute "is this a cop?" window had closed
+    # and after he had stopped driving - the popup never appeared. The mirror
+    # marks contributor crops (mirror.quarantine_write); they are scored first
+    # and their verdict is applied the moment they are done.
+    def _contrib(jm):
+        try:
+            return bool(json.loads(jm.read_text(encoding="utf-8")).get("contributor"))
+        except Exception:
+            return False
+    flags = {jm: _contrib(jm) for jm in metas}
+    metas.sort(key=lambda jm: not flags[jm])          # stable: sid order kept
+    n_contrib = sum(flags.values())
+    early = None
+    early_counts = (0, 0, 0)
+
     publish, review, discard = [], [], []
     # Crops that arrived corrupt. Counted, never destroyed - see below.
     undecodable = 0
     # Byte-identical re-arrivals answered from cache instead of from CLIP.
     repeats = 0
-    for jm in metas:
+    for i, jm in enumerate(metas):
+        if (i == n_contrib and n_contrib and not args.dry_run
+                and (publish or review or discard)):
+            early = apply_verdict(args, publish, review, discard, src, is_local)
+            early_counts = (len(publish), len(review), len(discard))
+            print(f"contributors first: {n_contrib} scored, "
+                  f"{len(review)} to review, verdict sent", flush=True)
+            publish, review, discard = [], [], []
         stem = jm.stem
         jpg_path = jm.with_suffix(".jpg")
         if not jpg_path.exists():
@@ -479,8 +505,15 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
                 "undecodable": undecodable, "repeats": repeats, "dry": True}
 
     res = apply_verdict(args, publish, review, discard, src, is_local)
-    return {"pulled": len(metas), "marked": len(publish),
-            "review": len(review), "discarded": len(discard),
+    if early and isinstance(res, dict) and isinstance(early, dict):
+        # One summary line per cycle, as before: fold the early batch in.
+        res = dict(res)
+        for k in ("published", "reviewed", "discarded"):
+            res[k] = (res.get(k) or 0) + (early.get(k) or 0)
+        res["errors"] = (res.get("errors") or []) + (early.get("errors") or [])
+    return {"pulled": len(metas), "marked": len(publish) + early_counts[0],
+            "review": len(review) + early_counts[1],
+            "discarded": len(discard) + early_counts[2],
             "undecodable": undecodable, "repeats": repeats, "box": res}
 
 

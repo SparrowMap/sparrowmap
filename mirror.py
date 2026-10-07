@@ -284,7 +284,9 @@ def quarantine_write(sighting_id: int, crop_bytes: bytes,
         stem = str(int(sighting_id))
         (INBOX / f"{stem}.jpg").write_bytes(crop_bytes)
         (INBOX / f"{stem}.json").write_text(json.dumps(
-            {**meta, "sighting_id": int(sighting_id), "written": time.time()},
+            {**meta, "sighting_id": int(sighting_id), "written": time.time(),
+             # box_puller scores these before the fleet's - see _run_once.
+             "contributor": bool(contributor)},
             indent=1), encoding="utf-8")
         return stem
     except Exception:
