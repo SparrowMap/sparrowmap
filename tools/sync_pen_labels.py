@@ -48,6 +48,11 @@ import labelbank       # noqa: E402
 
 BANK = DATA / "training"
 LOG = DATA.parent / "logs" / "box_puller.log"
+# sid -> "remote_<day>/<stem>" for every crop already found. The runner kills
+# this step whenever BeamNG starts and re-runs it later; without this file every
+# re-run repeated the whole search (10-07 night: 8 h re-finding crops already
+# labelled). With it a re-run resumes where the last one stopped.
+CACHE = BANK / "pen_sync_found.json"
 VERDICT_LABEL = {"review:confirm": "police", "review:confirm_gov": "gov",
                  "review:reject": "civilian"}
 CROP = re.compile(r"^\s+#(\d+): ")
@@ -189,10 +194,32 @@ def main() -> None:
 
     from tools import bank_index
     db = None if args.dry_run else bank_index.connect()
+    try:
+        cache = json.loads(CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        cache = {}
+    print(f"{len(cache):,} crops already found by an earlier run", flush=True)
+
+    def save_cache():
+        if not args.dry_run:
+            tmp = CACHE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, CACHE)
+
     applied = same = missing = conflict = 0
     for n, (sid, info) in enumerate(sorted(found.items())):
-        ts = ts_of(sid, anchors)
-        jf = locate(sid, info, ts) if ts else None
+        if n % 250 == 0:
+            print(f"  {n:,}/{len(found):,}  applied {applied:,}  already {same:,}  "
+                  f"missing {missing:,}  ({time.time() - t0:.0f}s)", flush=True)
+            save_cache()
+            if db:
+                db.commit()
+        jf = BANK / cache[str(sid)] if str(sid) in cache else None
+        if jf is None or not jf.exists():
+            ts = ts_of(sid, anchors)
+            jf = locate(sid, info, ts) if ts else None
+            if jf:
+                cache[str(sid)] = f"{jf.parent.name}/{jf.name}"
         if not jf:
             missing += 1
             continue
@@ -212,12 +239,8 @@ def main() -> None:
                      label_vocab=labelbank.LABEL_VOCAB)
             jf.write_text(json.dumps(d, indent=1), encoding="utf-8")
             bank_index.update_one(db, jf.parent.name, jf.stem, commit=False)
-            if applied % 200 == 0:
-                db.commit()
         applied += 1
-        if n % 500 == 0:
-            print(f"  {n:,}/{len(found):,}  applied {applied:,}  "
-                  f"missing {missing:,}  ({time.time() - t0:.0f}s)", flush=True)
+    save_cache()
     if db:
         db.commit()
     print(f"\napplied {applied:,}, already done {same:,}, crop not found "
