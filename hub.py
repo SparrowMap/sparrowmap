@@ -3750,11 +3750,15 @@ class Handler(BaseHTTPRequestHandler):
                         # decode_upload's cap and EXIF strip run in here, before
                         # anything touches the disk.
                         full = snapshot.decode_bytes(str(b["snap_b64"]))
-                        review_api.attach_confirmed_photo(
+                        name = review_api.attach_confirmed_photo(
                             sid, row, full,
                             ts=row.get("ts"),
                             node_name=nd.get("name") or "a camera",
                             vclass=("police" if label == "police" else "gov"))
+                        # Without this want_full kept asking for a picture
+                        # that had already arrived, and the phone sent it again.
+                        if name:
+                            db.mark_fullres(sid, name)
                     except Exception as exc:
                         # The vehicle is on the map either way. A rejected
                         # picture must not un-publish it, and the operator has
@@ -3958,6 +3962,11 @@ class Handler(BaseHTTPRequestHandler):
                 want = []
                 try:
                     want = db.wants_fullres(nd["id"])
+                    # `held`: crops the phone still keeps on the device, which
+                    # can be days old (db.wants_fullres_among says why).
+                    if b.get("held"):
+                        want += [i for i in db.wants_fullres_among(nd["id"], b["held"])
+                                 if i not in want]
                 except Exception as exc:
                     print(f"[parked] wants_fullres failed for {nd['id']}: {exc}")
                 return self._json({"parked": out, "want_full": want})

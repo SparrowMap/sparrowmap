@@ -1147,6 +1147,34 @@ def wants_fullres(node_id: str, limit: int = 5) -> list[int]:
     return [int(r["id"]) for r in cur.fetchall()]
 
 
+def wants_fullres_among(node_id: str, ids) -> list[int]:
+    """Of the ids a camera says it still HOLDS, the published ones without the
+    full picture. No time window, unlike wants_fullres.
+
+    🚨 2026-10-11: sixteen drive-mode police cars were confirmed on /rv about
+    nine and a half hours after the drive. The phone had dropped its good crops
+    after an hour (FULLRES_WINDOW_S), so all sixteen kept the preview with the
+    plate band painted out. A drive phone now keeps its crops on the device for
+    days and names them here whenever drive mode is open; the hour still bounds
+    what the hub volunteers to ask for, this only answers about crops the camera
+    itself says it has. Same guards as wants_fullres: own node, public tier.
+    """
+    try:
+        ids = sorted({int(i) for i in ids})[:400]
+    except (TypeError, ValueError):
+        return []
+    if not ids:
+        return []
+    q = ",".join("?" * len(ids))
+    cur = connect().execute(
+        f"""SELECT id FROM sightings
+             WHERE node_id = ? AND tier = 'public' AND id IN ({q})
+               AND snap IS NOT NULL AND snap != ''
+               AND (snap_full IS NULL OR snap_full = '')
+             ORDER BY ts DESC""", (node_id, *ids))
+    return [int(r["id"]) for r in cur.fetchall()]
+
+
 def mark_fullres(sid: int, name: str) -> None:
     """Remember that the good picture arrived, so it is never asked for twice."""
     c = connect()
