@@ -878,6 +878,30 @@ def _download_url():
     return DOWNLOAD_URL if ok else None
 
 
+_APP_V = {"mtime": None, "v": None}
+
+
+def _app_version() -> "int | None":
+    """The sparrow-app.js version /app currently loads (its ?v= in app.html).
+
+    🚨 2026-10-13: a volunteer's phone runs /app for days with the screen on, so
+    a fix reached it only when somebody happened to reload - the clear-photo fix
+    shipped while both online phone cameras kept the old code. The beat carries
+    this number and a phone that is behind reloads itself and resumes watching.
+    Read from the page itself, so the ?v= bump preflight already enforces is the
+    only thing a deploy has to get right.
+    """
+    try:
+        p = PUBLIC / "app.html"
+        mt = p.stat().st_mtime
+        if _APP_V["mtime"] != mt:
+            m = re.search(r"sparrow-app\.js\?v=(\d+)", p.read_text(encoding="utf-8"))
+            _APP_V.update(mtime=mt, v=int(m.group(1)) if m else None)
+        return _APP_V["v"]
+    except Exception:
+        return None
+
+
 def _plate_from_node(b: dict, row: dict, sid: int) -> bool:
     """Record a plate a camera read, for a row that is ALREADY public.
 
@@ -4176,7 +4200,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     print(f"[beat] wants_fullres failed for {nd['id']}: {exc}")
                 return self._json({"ok": True, "posting": True, "ts": now(),
-                                   "want_full": want})
+                                   "want_full": want, "app_v": _app_version()})
 
             if p == "/api/signals":
                 # 🚨 AN OUTSIDE SENSOR NETWORK REPORTING WHAT A VEHICLE

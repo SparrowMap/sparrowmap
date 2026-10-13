@@ -13,6 +13,11 @@ const $ = (s) => document.querySelector(s);
 const KEY = 'sparrow.node';
 
 let node = JSON.parse(localStorage.getItem(KEY) || 'null');
+// The ?v= this file was loaded with; the beat says when the hub has a newer one.
+const APP_V = (() => {
+  try { const m = (document.currentScript.src || '').match(/[?&]v=(\d+)/); return m ? +m[1] : 0; }
+  catch (e) { return 0; }
+})();
 let pos = null, chosenCam = '';
 
 /* ---- 0 · a key handed to this device ---------------------------------
@@ -438,6 +443,7 @@ async function sendBeat() {
       try {
         const d = await r.json();
         if (d && d.want_full && d.want_full.length) sendHeldFull(d.want_full);
+        if (d) maybeUpdate(d.app_v);
       } catch (e) { /* an older hub answers without want_full */ }
       say($('#watchMsg'), 'Watching — this camera is LIVE on the map.', true);
     } else if (r.status === 401) {
@@ -833,6 +839,28 @@ setInterval(syncHeld, 60000);
 
 let fullSent = 0;
 
+/* 🚨 A PHONE CAMERA PICKS UP A FIX BY ITSELF.
+ * 2026-10-13: volunteers run this page for days with the screen on, so a fix
+ * reached a phone only when somebody happened to reload it - the clear-photo
+ * fix shipped while both online phone cameras kept the old code. The beat now
+ * carries the hub's current version; a phone that is behind reloads and, if it
+ * was watching, starts watching again with no tap (camera permission is already
+ * granted on this origin). Pages and /static/ are network-first in sw.js, so a
+ * reload gets the new code.
+ * ⚠️ ONCE PER VERSION per tab: if the reload still comes back old (offline, a
+ * cache), it does not loop. Never while the "is this a cop?" card is open. */
+function maybeUpdate(v) {
+  if (!v || !APP_V || v <= APP_V) return;
+  try {
+    if (sessionStorage.getItem('sparrow.upd') === String(v)) return;
+    const ask = $('#askNow');
+    if (ask && !ask.classList.contains('hidden')) return;
+    sessionStorage.setItem('sparrow.upd', String(v));
+    if (running) sessionStorage.setItem('sparrow.resume', '1');
+  } catch (e) { return; }      // no sessionStorage: no loop guard, so no reload
+  location.reload();
+}
+
 async function submit(tr) {
   try {
     const r = await fetch('/api/sightings', {
@@ -1208,6 +1236,13 @@ if (!(node && node.token)) {
   if (back) back.classList.remove('hidden');
 }
 go(node && node.token ? 'watch' : 'setup');
+// Back from a self-update (maybeUpdate): carry on watching, as before the reload.
+try {
+  if (sessionStorage.getItem('sparrow.resume') === '1') {
+    sessionStorage.removeItem('sparrow.resume');
+    if (node && node.token) start();
+  }
+} catch (e) { /* no sessionStorage: nothing was saved, nothing to resume */ }
 
 /* 🚨 ASK THE BROWSER TO KEEP THE KEY, BECAUSE LOSING IT IS THE #1 REPORTED BUG.
  *
