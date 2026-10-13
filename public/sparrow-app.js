@@ -437,7 +437,6 @@ async function sendBeat() {
       // The hub only asks for pictures of vehicles it has already published.
       try {
         const d = await r.json();
-        reapFull();
         if (d && d.want_full && d.want_full.length) sendHeldFull(d.want_full);
       } catch (e) { /* an older hub answers without want_full */ }
       say($('#watchMsg'), 'Watching — this camera is LIVE on the map.', true);
@@ -656,36 +655,118 @@ function redactPlateBand(cv, geom) {
  * it over only when the hub says that sighting was PUBLISHED. Nothing is sent
  * on the strength of this phone's opinion.
  *
- * ⚠️ BOUNDED HARD. A phone holding pictures indefinitely is a memory leak on
- * the device least able to afford one: at most FULL_KEEP entries, each dropped
- * after FULL_TTL_MS whether or not it was ever asked for. */
-// 🚨 THE HOLD HAS TO OUTLAST REVIEW. The hub asks for the good crop when it
-// PUBLISHES the vehicle (db.FULLRES_WINDOW_S = 1 hour), which is usually well
-// after the pass - a reviewer gets to it minutes or hours later. At 15 min the
-// crop was evicted before the hub ever asked, so every phone-camera police
-// sighting published at 200px (measured: 0 of 12 had a full crop). Match the
-// server window, and keep more entries so a busier road still catches its own.
-const FULL_EDGE = 900, FULL_KEEP = 48, FULL_TTL_MS = 60 * 60 * 1000;
-const heldFull = new Map();          // sighting id -> { data, at }
+ * ⚠️ BOUNDED HARD. At most FULL_MAX_OPEN undecided crops, each deleted once the
+ * hub says it can never be published; only candidates are kept for days. */
+// 🚨 THE HUB DECIDES HOW LONG A CROP IS HELD, NOT THE PHONE.
+// 2026-10-13: every phone-camera police sighting published that week kept the
+// painted-out preview (7 of 7). The phone guessed: 48 crops for 1 hour, in
+// memory. A busy road (~200 cars an hour) pushed a crop out in ~15 minutes, a
+// review lands 2.6 h after capture at the median and up to 6.9 days later, and
+// a reload forgot everything. And a phone crop is never `parked` at ingest -
+// box_puller scores it at home and moves it to the pen minutes later - so the
+// phone cannot tell a candidate from ordinary traffic on its own.
+//
+// So the clear crop goes to IndexedDB (survives a reload), and once a minute
+// the phone names what it holds on /api/node/parked. The hub answers
+// `want_full` (published: upload it now) and `keep` (still in the inbox or the
+// review pen: may yet be published). Anything else is deleted after
+// FULL_GRACE_MS, which covers the inbox -> pen hop. So only candidates are kept
+// for days; ordinary traffic leaves the phone within minutes.
+const FULL_EDGE = 900;
+const FULL_KEEP_MS = 10 * 24 * 3600 * 1000;   // a pen card has waited 6.9 days
+const FULL_GRACE_MS = 15 * 60 * 1000;         // box_puller's inbox -> pen hop
+const FULL_ORPHAN_MS = 12 * 3600 * 1000;      // never answered (mirror.INBOX_TTL)
+const FULL_MAX_OPEN = 300;                    // undecided crops, ~100 KB each
+const fullMem = new Map();   // the fallback when IndexedDB is unavailable
+let _fullDb;
+
+function fullDb() {
+  if (_fullDb !== undefined) return Promise.resolve(_fullDb);
+  return new Promise((res) => {
+    try {
+      const rq = indexedDB.open('sparrow-app-full', 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore('full', { keyPath: 'id' });
+      rq.onsuccess = () => res(_fullDb = rq.result);
+      rq.onerror = () => res(_fullDb = null);
+    } catch (e) { res(_fullDb = null); }
+  });
+}
+
+async function fullTx(mode, fn) {
+  const d = await fullDb();
+  if (!d) return fn(null);
+  return new Promise((res) => {
+    try {
+      const t = d.transaction('full', mode);
+      let out;
+      Promise.resolve(fn(t.objectStore('full'))).then((v) => { out = v; });
+      t.oncomplete = () => res(out);
+      t.onerror = t.onabort = () => res(out);
+    } catch (e) { res(fn(null)); }
+  });
+}
 
 function holdFull(id, data) {
-  if (!id || !data) return;
-  heldFull.set(id, { data: data, at: Date.now() });
-  // Oldest out first, so a busy road cannot grow this without limit.
-  while (heldFull.size > FULL_KEEP) heldFull.delete(heldFull.keys().next().value);
+  if (!id || !data || !node) return;
+  const row = { id: id, node: node.id, data: data, at: Date.now(), keep: false };
+  fullMem.set(id, row);
+  // Out of memory only once the disk copy has committed.
+  fullTx('readwrite', (s) => { if (s) { s.put(row); return true; } })
+    .then((ok) => { if (ok) fullMem.delete(id); });
+  // No IndexedDB: memory is all there is, so bound it the same way.
+  if (fullMem.size > FULL_MAX_OPEN) {
+    const open = [...fullMem.values()].filter((r) => !r.keep).sort((a, b) => a.at - b.at);
+    open.slice(0, fullMem.size - FULL_MAX_OPEN).forEach((r) => fullMem.delete(r.id));
+  }
 }
 
-function reapFull() {
-  const cut = Date.now() - FULL_TTL_MS;
-  for (const [id, v] of heldFull) if (v.at < cut) heldFull.delete(id);
+function fullGet(id) {
+  if (fullMem.has(id)) return Promise.resolve(fullMem.get(id));
+  return fullTx('readonly', (s) => s && new Promise((res) => {
+    const r = s.get(id); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null);
+  }));
 }
 
-/* Answer the hub's want_full list. One at a time and only for what we still
-   hold - a phone that has already forgotten simply says nothing. */
+function fullDel(id) {
+  fullMem.delete(id);
+  return fullTx('readwrite', (s) => { if (s) s.delete(id); });
+}
+
+/* Every held row WITHOUT its picture, expired and foreign ones removed. */
+function fullRows() {
+  const now = Date.now();
+  const ok = (v) => node && v.node === node.id
+    && now - v.at < (v.keep ? FULL_KEEP_MS : FULL_ORPHAN_MS);
+  const mem = [...fullMem.values()];
+  return fullTx('readwrite', (s) => {
+    if (!s) return mem.filter(ok);
+    return new Promise((res) => {
+      const rows = [];
+      const c = s.openCursor();
+      c.onsuccess = () => {
+        const cur = c.result;
+        if (!cur) {
+          // Undecided crops past the cap go oldest first; kept ones never do.
+          const open = rows.filter((r) => !r.keep).sort((a, b) => b.at - a.at);
+          open.slice(FULL_MAX_OPEN).forEach((r) => s.delete(r.id));
+          const drop = new Set(open.slice(FULL_MAX_OPEN).map((r) => r.id));
+          return res(rows.filter((r) => !drop.has(r.id)).concat(mem.filter(ok)));
+        }
+        const v = cur.value;
+        if (ok(v)) rows.push({ id: v.id, at: v.at, keep: v.keep });
+        else cur.delete();
+        cur.continue();
+      };
+      c.onerror = () => res(rows);
+    });
+  });
+}
+
+/* Upload the clear crop for each id the hub wants, one at a time. */
 async function sendHeldFull(ids) {
   if (!Array.isArray(ids) || !node) return;
   for (const id of ids) {
-    const held = heldFull.get(id);
+    const held = await fullGet(id);
     if (!held) continue;
     try {
       const r = await fetch('/api/sighting/fullres', {
@@ -697,11 +778,58 @@ async function sendHeldFull(ids) {
       // Drop it whether accepted or refused: a refusal will not become an
       // acceptance on the next beat, and retrying forever is how a phone ends
       // up uploading the same rejected picture all day.
-      heldFull.delete(id);
+      await fullDel(id);
       if (r && r.ok) fullSent++;
     } catch (e) { /* offline; it will be asked again while we still hold it */ }
   }
 }
+
+/* Once a minute, watching or not: the verdict usually lands long after the pass. */
+let fullSyncing = false;
+async function syncHeld() {
+  if (!(node && node.id && node.token) || fullSyncing) return;
+  fullSyncing = true;
+  try {
+    const rows = await fullRows();
+    if (!rows.length) return;
+    // Kept ones first, then the newest: what is most likely to be asked for.
+    rows.sort((a, b) => (b.keep - a.keep) || (b.at - a.at));
+    const sent = rows.slice(0, 400);
+    const r = await fetch('/api/node/parked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ' + node.token },
+      body: JSON.stringify({ node_id: node.id, ids: [], held: sent.map((x) => x.id) }),
+    });
+    if (!r.ok) return;
+    const d = await r.json();
+    const want = new Set(d.want_full || []);
+    if (want.size) await sendHeldFull([...want]);
+    // ⚠️ Delete only on an ANSWER. An older hub, or one whose lookup failed,
+    // sends no `keep`, and a missing answer must never read as "drop it all".
+    if (!Array.isArray(d.keep)) return;
+    const keep = new Set(d.keep);
+    const now = Date.now();
+    await fullTx('readwrite', (s) => {
+      for (const x of sent) {
+        if (want.has(x.id)) continue;
+        if (keep.has(x.id)) {
+          if (!x.keep) {
+            if (s) { const g = s.get(x.id);
+                     g.onsuccess = () => { if (g.result) s.put({ ...g.result, keep: true }); }; }
+            else if (fullMem.has(x.id)) fullMem.get(x.id).keep = true;
+          }
+        } else if (now - x.at > FULL_GRACE_MS) {
+          if (s) s.delete(x.id);
+          fullMem.delete(x.id);
+        }
+      }
+    });
+  } catch (e) { /* offline: nothing is deleted, it is asked again next minute */ }
+  finally { fullSyncing = false; }
+}
+setTimeout(syncHeld, 4000);
+setInterval(syncHeld, 60000);
 
 let fullSent = 0;
 

@@ -3959,7 +3959,7 @@ class Handler(BaseHTTPRequestHandler):
                 # plate - that photograph is the public record - so asking only
                 # when a human happens to answer a popup at 40 mph is asking
                 # for half of them to be lost.
-                want = []
+                want, want_ok = [], False
                 try:
                     want = db.wants_fullres(nd["id"])
                     # `held`: crops the phone still keeps on the device, which
@@ -3967,9 +3967,21 @@ class Handler(BaseHTTPRequestHandler):
                     if b.get("held"):
                         want += [i for i in db.wants_fullres_among(nd["id"], b["held"])
                                  if i not in want]
+                    want_ok = True
                 except Exception as exc:
                     print(f"[parked] wants_fullres failed for {nd['id']}: {exc}")
-                return self._json({"parked": out, "want_full": want})
+                # `keep`: held crops that may still be published, so the phone
+                # holds them for days and deletes everything else
+                # (review_api.fullres_keep). Left out on any failure: the phone
+                # deletes only on an answer, never on a missing one.
+                res = {"parked": out, "want_full": want}
+                if b.get("held") and want_ok:
+                    try:
+                        res["keep"] = [i for i in review_api.fullres_keep(nd["id"], b["held"])
+                                       if i not in want]
+                    except Exception as exc:
+                        print(f"[parked] fullres_keep failed for {nd['id']}: {exc}")
+                return self._json(res)
 
             if p == "/api/node/key":
                 # 🚨 A CAMERA REGISTERS ITS OWN SIGNING KEY, WITHOUT RE-ENROLLING.

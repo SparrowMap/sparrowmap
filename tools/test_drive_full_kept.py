@@ -127,6 +127,46 @@ try:
     st, r = call("/api/node/parked", {"node_id": me["id"], "ids": [],
                                       "held": [pub]}, me["token"])
     check("and it stops being asked for", pub not in (r.get("want_full") or []), str(r))
+
+    # 2026-10-13: `keep` - which held crops may still be published. A crop still
+    # in the inbox (not yet scored) or the review pen (not yet answered) is kept;
+    # a decided private one is not, and nor is anything of another camera's.
+    import mirror
+    assert str(mirror.INBOX).startswith(str(SCRATCH)), mirror.INBOX
+    assert str(mirror.REVIEW).startswith(str(SCRATCH)), mirror.REVIEW
+    mirror.INBOX.mkdir(parents=True, exist_ok=True)
+    mirror.REVIEW.mkdir(parents=True, exist_ok=True)
+    inbox, pen, done = row("me", "private"), row("me", "private"), row("me", "private")
+    their_pen = row("other", "private")
+    (mirror.INBOX / f"{inbox}.json").write_text("{}")
+    (mirror.REVIEW / f"{pen}.json").write_text("{}")
+    (mirror.REVIEW / f"{their_pen}.json").write_text("{}")
+    pub2 = row("me", "public")
+
+    st, r = call("/api/node/parked", {"node_id": me["id"], "ids": [],
+                                      "held": [inbox, pen, done, their_pen, pub2]},
+                 me["token"])
+    keep = r.get("keep")
+    check("`keep` is answered when `held` is sent", isinstance(keep, list), f"{st} {r}")
+    keep = keep or []
+    check("still in the inbox -> keep", inbox in keep, str(keep))
+    check("waiting in the review pen -> keep", pen in keep, str(keep))
+    check("decided private -> not kept (phone deletes it)", done not in keep, str(keep))
+    check("another camera's pen card -> not kept", their_pen not in keep, str(keep))
+    check("published -> wanted, not kept", pub2 in (r.get("want_full") or [])
+          and pub2 not in keep, str(r))
+
+    st, r = call("/api/node/parked", {"node_id": me["id"], "ids": []}, me["token"])
+    check("no `held` -> no `keep` (a missing answer never means delete)",
+          "keep" not in r, str(r))
+
+    # A reviewer answers the pen card: it is published, so it becomes wanted.
+    (mirror.REVIEW / f"{pen}.json").unlink()
+    c.execute("UPDATE sightings SET tier='public' WHERE id=?", (pen,)); c.commit()
+    st, r = call("/api/node/parked", {"node_id": me["id"], "ids": [],
+                                      "held": [pen]}, me["token"])
+    check("pen card confirmed days later -> asked for", pen in (r.get("want_full") or []),
+          str(r))
     srv.shutdown()
 finally:
     try:

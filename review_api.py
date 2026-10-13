@@ -41,6 +41,41 @@ def _pen_meta(sid: int) -> dict:
     return {}
 
 
+def fullres_keep(node_id: str, ids) -> list[int]:
+    """Of the ids a phone says it still HOLDS, the ones it must keep holding.
+
+    🚨 2026-10-13: every phone-camera police sighting published in the week
+    before (7 of 7 fixed, 16 of 17 drive) kept the 200px preview with the plate
+    band painted out. The phone guessed how long to hold its clear crop (1 h,
+    48 entries) and a review lands 2.6 h after capture at the median and up to
+    6.9 days later. A busy road pushed 48 entries out in about 15 minutes.
+
+    So the phone no longer guesses: it names what it holds and the hub, which
+    knows, says which are still undecided. A crop still waiting in the inbox
+    (box_puller has not scored it) or in the review pen (a human has not
+    answered) may yet be published; everything else can never be, and the phone
+    deletes it. Published rows are not here - they are wanted, not kept.
+
+    ⚠️ OWN NODE ONLY, same as wants_fullres_among: ids are public, and answering
+    for another camera's sightings would be a government-candidate oracle.
+    """
+    try:
+        ids = sorted({int(i) for i in ids})[:400]
+    except (TypeError, ValueError):
+        return []
+    if not ids:
+        return []
+    q = ",".join("?" * len(ids))
+    rows = db.connect().execute(
+        f"""SELECT id FROM sightings
+             WHERE node_id = ? AND id IN ({q}) AND tier != 'public'
+               AND (snap_full IS NULL OR snap_full = '')""",
+        (node_id, *ids)).fetchall()
+    return [int(r["id"]) for r in rows
+            if (mirror.INBOX / f"{r['id']}.json").exists()
+            or (mirror.REVIEW / f"{r['id']}.json").exists()]
+
+
 def _score(meta: dict, row: Optional[dict]) -> Optional[float]:
     if meta.get("score") is not None:
         return meta["score"]
