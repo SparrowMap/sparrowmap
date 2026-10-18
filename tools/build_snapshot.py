@@ -57,7 +57,10 @@ def main() -> int:
     pub = db.recent_sightings(since=0, limit=PUBLIC_LIMIT, vclass="public")
 
     # 🚨 THE SAME FUNCTION THE API USES. Not a copy of its rules.
-    pub = [privacy.redact(r, "anon") for r in pub]
+    # And the same null-drop as hub._public_rows (10-17): without it the first build on the box was
+    # 1,268 KB against the API's 599 KB for the same 2,000 rows - 12 always-empty keys (plate_text,
+    # plate_hash, make, speed_mph...) on every row. Compared row by row: no value differed.
+    pub = [{k: v for k, v in privacy.redact(r, "anon").items() if v is not None} for r in pub]
 
     # 🚨 NO LIVE TRAFFIC IN HERE, AND THE FIRST VERSION HAD IT WRONG.
     #

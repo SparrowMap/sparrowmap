@@ -1,0 +1,16 @@
+# Paired with sparrowmap-snapshot.timer. Rebuilds public/snapshot.json, the cached opening view the
+# map draws before live data lands (tools/build_snapshot.py). 10-17: the builder existed but nothing
+# ran it on this box, so every visitor got a 404 and an empty map for ~0.7 s.
+
+[Unit]
+Description=SparrowMap opening-view snapshot (one shot)
+After=sparrowmap.service
+
+[Service]
+Type=oneshot
+User=sparrow
+WorkingDirectory=/opt/sparrowmap
+ExecStart=/opt/sparrowmap/.venv/bin/python tools/build_snapshot.py
+Nice=10
+# A wedged build is killed and the next tick runs clean.
+TimeoutStartSec=60

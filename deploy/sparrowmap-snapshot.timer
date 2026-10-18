@@ -1,0 +1,18 @@
+# Every two minutes: the snapshot is a head start, never claimed live, and the page swaps in live
+# data the moment it lands. build_snapshot.py takes well under a second.
+#
+# Install:
+#   sudo cp deploy/sparrowmap-snapshot.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sparrowmap-snapshot.timer
+
+[Unit]
+Description=Rebuild the SparrowMap opening-view snapshot every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
