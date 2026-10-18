@@ -53,8 +53,11 @@ LOG = DATA.parent / "logs" / "box_puller.log"
 # re-run repeated the whole search (10-07 night: 8 h re-finding crops already
 # labelled). With it a re-run resumes where the last one stopped.
 CACHE = BANK / "pen_sync_found.json"
+# review:reversed (10-17): an operator took another reviewer's police call back off the map on
+# /rv/approved. It is written AFTER the confirm, and fetch() keeps the latest verdict per sighting,
+# so the reversal is what trains - without it a reversed vehicle kept its "police" label.
 VERDICT_LABEL = {"review:confirm": "police", "review:confirm_gov": "gov",
-                 "review:reject": "civilian"}
+                 "review:reject": "civilian", "review:reversed": "civilian"}
 CROP = re.compile(r"^\s+#(\d+): ")
 CYCLE = re.compile(r"^pulled (\d+),.* at (\d\d):(\d\d):(\d\d)\s*$")
 
@@ -72,7 +75,7 @@ def fetch(args, since: float) -> tuple[dict, list]:
 import sqlite3, json
 c = sqlite3.connect("file:data/sparrow.db?mode=ro", uri=True)
 v = c.execute(\"\"\"SELECT target, action, actor, ts FROM audit
-  WHERE ts > ? AND action IN ('review:confirm','review:confirm_gov','review:reject')
+  WHERE ts > ? AND action IN ('review:confirm','review:confirm_gov','review:reject','review:reversed')
   AND actor NOT IN ('box_review') ORDER BY ts\"\"\", ({since},)).fetchall()
 a = c.execute("SELECT id, ts FROM sightings WHERE ts > ? AND (tier='public' OR id % 200 = 0)",
               ({since - 3 * 86400},)).fetchall()

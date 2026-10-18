@@ -37,7 +37,10 @@ from core import DATA                       # noqa: E402
 
 BANK = DATA / "training"
 # What a verdict means in the label vocabulary the trainer reads.
-VERDICT_LABEL = {"review:confirm": "police", "review:reject": "civilian"}
+# review:reversed (10-17): an operator took someone else's police call back off the map
+# (/rv/approved). Latest wins (newest_per_target), so the reversal outranks the confirm.
+VERDICT_LABEL = {"review:confirm": "police", "review:reject": "civilian",
+                 "review:reversed": "civilian"}
 
 
 def ssh(args, cmd: str, timeout: int = 60) -> str:
@@ -55,7 +58,7 @@ def fetch_verdicts(args) -> list[dict]:
         "c=db.connect();"
         f"rows=[dict(r) for r in c.execute("
         f"\\\"SELECT action,target,actor,ts FROM audit WHERE action IN "
-        f"('review:confirm','review:reject') AND ts>? "
+        f"('review:confirm','review:reject','review:reversed') AND ts>? "
         # 🚨 NOT actor 'box_review' rejects: 13.8M of those are the HEAD's own
         # automatic discards, mislogged as human until 2026-09-29 (see
         # box_publish.discard_one). Labelling them 'civilian' would train the

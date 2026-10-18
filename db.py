@@ -203,6 +203,33 @@ CREATE TABLE IF NOT EXISTS signal_obs (
 );
 CREATE INDEX IF NOT EXISTS ix_sigobs_ts ON signal_obs(ts);
 CREATE INDEX IF NOT EXISTS ix_sigobs_sig ON signal_obs(signature);
+
+-- WHO MADE EACH POLICE CALL (10-17). `audit` keeps only a LABEL, and a label
+-- is a camera's name for anyone signed in with a camera key - two cameras
+-- called "iPhone" are indistinguishable there. A reversal has to reach the
+-- person who made the call, so the reviewer's id is kept beside it.
+CREATE TABLE IF NOT EXISTS rv_calls (
+    sid          INTEGER PRIMARY KEY,
+    reviewer_id  TEXT,          -- review_tokens.id, or "key:<node_id>" for a camera key
+    label        TEXT,
+    ts           REAL
+);
+CREATE INDEX IF NOT EXISTS ix_rvcalls_ts ON rv_calls(ts DESC);
+
+-- A Cop call another reviewer reversed, waiting to be SHOWN to whoever made it.
+-- His ask (10-17): reviewers confirming non-police vehicles are not being
+-- careless on purpose; nothing ever told them they were wrong. seen_at is set
+-- when they tap "Got it" in /rv.
+CREATE TABLE IF NOT EXISTS rv_feedback (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    sid          INTEGER,
+    reviewer_id  TEXT,          -- NULL for a call made before rv_calls existed: matched by label
+    label        TEXT,
+    reversed_by  TEXT,
+    ts           REAL,
+    seen_at      REAL
+);
+CREATE INDEX IF NOT EXISTS ix_rvfb_label ON rv_feedback(label, seen_at);
 """
 
 
@@ -1891,6 +1918,60 @@ def add_review_token(token_hash: str, label: str, scope: str,
         (token_hash, label, scope, nodes, now(), created_by))
     conn.commit()
     return int(cur.lastrowid)
+
+
+def record_call(sid: int, reviewer_id: str, label: str) -> None:
+    """Remember who confirmed this sighting as police (see rv_calls)."""
+    conn = connect()
+    conn.execute("INSERT OR REPLACE INTO rv_calls(sid, reviewer_id, label, ts) VALUES (?,?,?,?)",
+                 (int(sid), str(reviewer_id), label or "", now()))
+    conn.commit()
+
+
+def confirmed_calls(since: float) -> list[dict]:
+    """Every human police call since `since` whose sighting is STILL public, newest first:
+    [{sid, reviewer_id, label, ts}]. Calls made before rv_calls existed were copied in from
+    `audit` once (tools/backfill_rv_calls.py, label only) - `audit` itself is 15M rows with no
+    index on action, so it is never scanned per request."""
+    conn = connect()
+    return [dict(r) for r in conn.execute(
+        "SELECT c.sid, c.reviewer_id, c.label, c.ts FROM rv_calls c JOIN sightings s ON s.id = c.sid "
+        "WHERE c.ts >= ? AND s.tier = 'public' AND s.reviewed = 'confirmed' ORDER BY c.ts DESC",
+        (since,)).fetchall()]
+
+
+def call_for(sid: int) -> Optional[dict]:
+    """Who made the police call on this sighting, or None if nobody recorded one."""
+    r = connect().execute("SELECT sid, reviewer_id, label, ts FROM rv_calls WHERE sid = ?",
+                          (int(sid),)).fetchone()
+    return dict(r) if r else None
+
+
+def add_feedback(sid: int, reviewer_id: Optional[str], label: str, reversed_by: str) -> None:
+    conn = connect()
+    conn.execute("INSERT INTO rv_feedback(sid, reviewer_id, label, reversed_by, ts) VALUES (?,?,?,?,?)",
+                 (int(sid), reviewer_id, label or "", reversed_by or "", now()))
+    conn.commit()
+
+
+def unseen_feedback(reviewer_id: str, label: str) -> list[dict]:
+    """Reversals this reviewer has not acknowledged: their id, or (a call older than rv_calls)
+    their label."""
+    return [dict(r) for r in connect().execute(
+        "SELECT id, sid, ts FROM rv_feedback WHERE seen_at IS NULL AND "
+        "(reviewer_id = ? OR (reviewer_id IS NULL AND label = ?)) ORDER BY ts DESC LIMIT 200",
+        (str(reviewer_id), label or "")).fetchall()]
+
+
+def ack_feedback(ids: list, reviewer_id: str, label: str) -> int:
+    conn = connect()
+    n = 0
+    for i in ids[:200]:
+        n += conn.execute("UPDATE rv_feedback SET seen_at = ? WHERE id = ? AND seen_at IS NULL AND "
+                          "(reviewer_id = ? OR (reviewer_id IS NULL AND label = ?))",
+                          (now(), int(i), str(reviewer_id), label or "")).rowcount
+    conn.commit()
+    return n
 
 
 def review_token_by_hash(token_hash: str) -> Optional[dict]:

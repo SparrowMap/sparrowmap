@@ -28,7 +28,7 @@ import db
 import mirror
 import snapshot
 import review_auth
-from core import EVIDENCE, HELD, SNAPS
+from core import CONFIG, EVIDENCE, HELD, SNAPS
 
 
 def _pen_meta(sid: int) -> dict:
@@ -902,6 +902,10 @@ def verdict(reviewer: dict, sid: int, call: str, ip: str = "",
                     "note": "this card has been cleared - the vehicle it "
                             "referred to is no longer in the database"}
         db.audit("review:confirm", str(sid), actor=who, ip=ip)
+        try:
+            db.record_call(sid, str(reviewer.get("id") or ""), who)      # so a reversal can reach them
+        except Exception:
+            pass
         return {"ok": True, "id": sid, "verdict": "cop"}
     if call == "gov":
         # 🚨 NO LONGER A PUBLISH. public_tiers is police-only (see core.py), and
@@ -941,6 +945,120 @@ def verdict(reviewer: dict, sid: int, call: str, ip: str = "",
         db.audit("review:skip", str(sid), actor=who, ip=ip)
         return {"ok": True, "id": sid, "verdict": "skip"}
     return {"ok": False, "error": "unknown verdict"}
+
+
+# --- others' approvals + reversal feedback (10-17) ---------------------------
+# His ask: two reviewers kept confirming non-police vehicles - "i dont think they are being nefarious.
+# but we need a way to let them know to be more careful". A Cop call publishes at once (his call,
+# no 2-reviewer gate), so the recovery is: he looks over OTHER people's recent approvals, 20 at a
+# time, reverses the wrong ones in one go, and each reversal is shown to whoever made the call the
+# next time they open /rv, with the photo, until they tap "Got it".
+APPROVED_PAGE = 20
+APPROVED_DAYS = 14
+
+
+def is_operator(reviewer: dict) -> bool:
+    """May this reviewer reverse other people's published calls?
+
+    An operator-minted pool token (is_trusted), or a camera key for a camera listed in config
+    `operator_nodes` - he reviews signed in with his own camera's key, which is the self-service
+    door (created_by "self") and so is never trusted on its own.
+    """
+    if is_trusted(reviewer):
+        return True
+    ops = set(CONFIG.get("operator_nodes") or [])
+    return bool(ops & set(reviewer.get("own_nodes") or ()))
+
+
+def _mine(reviewer: dict, call: dict) -> bool:
+    rid = call.get("reviewer_id")
+    if rid:
+        return rid == str(reviewer.get("id") or "")
+    return (call.get("label") or "") == (reviewer.get("label") or "")
+
+
+def approved(reviewer: dict, page: int = 0, size: int = APPROVED_PAGE) -> dict:
+    """Recent police calls by OTHER reviewers that are still on the map, newest first, one page."""
+    if not is_operator(reviewer):
+        return {"ok": False, "error": "not permitted"}
+    calls = [c for c in db.confirmed_calls(time.time() - APPROVED_DAYS * 86400) if not _mine(reviewer, c)]
+    size = max(1, min(int(size), 60))
+    pages = max(1, (len(calls) + size - 1) // size)
+    page = max(0, min(int(page), pages - 1))
+    items = []
+    names = {}
+    for c in calls[page * size:(page + 1) * size]:
+        row = db.sighting(c["sid"]) or {}
+        nid = row.get("node_id") or ""
+        if nid not in names:
+            names[nid] = (db.node(nid) or {}).get("name") or "a camera"
+        items.append({"id": c["sid"], "ts": row.get("ts"), "confirmed_at": c["ts"],
+                      "reviewer": c["label"] or "a reviewer", "node_name": names[nid],
+                      "photo": ("/snap/" + Path(str(row["snap"])).name) if row.get("snap") else None})
+    return {"ok": True, "items": items, "total": len(calls), "page": page, "pages": pages,
+            "size": size, "days": APPROVED_DAYS}
+
+
+def reverse(reviewer: dict, ids: list, ip: str = "") -> dict:
+    """Take other reviewers' police calls back off the map, and queue a notice for each of them."""
+    if not is_operator(reviewer):
+        return {"ok": False, "error": "not permitted"}
+    who = reviewer.get("label") or "reviewer"
+    done, skipped, told = [], 0, 0
+    for raw in (ids or [])[:200]:
+        try:
+            sid = int(raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        row = db.sighting(sid)
+        if not row or row.get("tier") != "public" or row.get("reviewed") != "confirmed":
+            skipped += 1                  # already reversed (another tab) or never published
+            continue
+        call = db.call_for(sid)
+        db.review_sighting(sid, "retracted")
+        try:                              # ground truth for the head; best effort, like the operator route
+            from detect import bank
+            bank.label_by_sighting(sid, "civilian")
+        except Exception:
+            pass
+        if call:
+            db.add_feedback(sid, call.get("reviewer_id"), call.get("label") or "", who)
+            told += 1
+        db.audit("review:reversed", str(sid), actor=who, ip=ip)
+        done.append(sid)
+    return {"ok": True, "reversed": done, "skipped": skipped, "told": told}
+
+
+def feedback(reviewer: dict) -> dict:
+    """This reviewer's Cop calls that someone reversed and they have not acknowledged yet."""
+    rows = db.unseen_feedback(str(reviewer.get("id") or ""), reviewer.get("label") or "")
+    items = []
+    for f in rows:
+        row = db.sighting(f["sid"]) or {}
+        items.append({"fid": f["id"], "id": f["sid"], "ts": row.get("ts"), "reversed_at": f["ts"],
+                      "photo": f"/api/rv/feedback/photo/{f['sid']}" if row.get("snap") else None})
+    return {"items": items, "count": len(items)}
+
+
+def feedback_ack(reviewer: dict, ids: list) -> dict:
+    return {"ok": True, "seen": db.ack_feedback(list(ids or []), str(reviewer.get("id") or ""),
+                                                reviewer.get("label") or "")}
+
+
+def feedback_photo_bytes(reviewer: dict, sid: int) -> Optional[bytes]:
+    """The photo of a reversed call - only to the reviewer who made it, while it is unacknowledged."""
+    if not any(f["sid"] == int(sid) for f in db.unseen_feedback(str(reviewer.get("id") or ""),
+                                                                 reviewer.get("label") or "")):
+        return None
+    row = db.sighting(int(sid))
+    if not row or not row.get("snap"):
+        return None
+    p = SNAPS / Path(str(row["snap"])).name
+    try:
+        return p.read_bytes() if p.exists() else None
+    except Exception:
+        return None
 
 
 # --- token administration (operator-gated in the hub) ----------------------

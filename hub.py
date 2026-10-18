@@ -2571,6 +2571,40 @@ class Handler(BaseHTTPRequestHandler):
             # already see and retract everything anyway.
             if p == "/rv/retracted":
                 return self._file(PUBLIC / "retracted.html")
+
+            # --- others' approvals (operator) + reversal feedback (10-17) -----
+            # See review_api.approved: recent police calls by OTHER reviewers, 20 a
+            # page, reversible in bulk; each reversal waits in /rv for whoever made it.
+            if p == "/rv/approved":
+                return self._file(PUBLIC / "approved.html")
+            if p == "/api/rv/approved":
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                if not review_api.is_operator(r):
+                    return self._err(403, "operator only")
+                try:
+                    page = int((q.get("page") or ["0"])[0])
+                except ValueError:
+                    return self._err(400, "bad page")
+                return self._json(review_api.approved(r, page))
+            if p == "/api/rv/feedback":
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                return self._json(review_api.feedback(r))
+            if p.startswith("/api/rv/feedback/photo/"):
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                try:
+                    sid = int(p.rsplit("/", 1)[-1])
+                except ValueError:
+                    return self._err(400, "bad id")
+                b = review_api.feedback_photo_bytes(r, sid)
+                if not b:
+                    return self._err(404, "no photo")
+                return self._send(200, b, "image/jpeg", {"Cache-Control": "no-store"})
             if p == "/api/rv/retracted":
                 r = review_auth.identify(self.headers)
                 if not r:
@@ -3446,6 +3480,7 @@ class Handler(BaseHTTPRequestHandler):
                        "/api/rv/tokens/new", "/api/rv/tokens/revoke",
                        "/api/rv/my-token", "/api/drive/report", "/api/drive/vote",
                        "/api/rv/retracted/delete", "/api/rv/held/fix",
+                       "/api/rv/reverse", "/api/rv/feedback/ack",
                        "/api/node/span", "/api/node/key",
                        "/api/ov/mint", "/api/ov/link", "/api/ov/unlink",
                        "/api/ov/status", "/api/ov/edit",
@@ -4901,6 +4936,27 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json",
                            {"Set-Cookie": review_auth.cookie_header("", clear=True)})
                 return
+            if p == "/api/rv/reverse":
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                if not review_api.is_operator(r):
+                    return self._err(403, "operator only")
+                b = self._body()
+                ids = b.get("ids")
+                if not isinstance(ids, list) or not ids:
+                    return self._err(400, "no ids")
+                return self._json(review_api.reverse(r, ids, privacy.audit_ip(self.client_ip)))
+            if p == "/api/rv/feedback/ack":
+                r = review_auth.identify(self.headers)
+                if not r:
+                    return self._err(401, "not signed in")
+                b = self._body()
+                ids = b.get("ids")
+                if not isinstance(ids, list):
+                    return self._err(400, "no ids")
+                return self._json(review_api.feedback_ack(r, ids))
+
             if p == "/api/rv/retracted/delete":
                 r = review_auth.identify(self.headers)
                 if not r:

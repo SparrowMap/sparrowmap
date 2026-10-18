@@ -293,6 +293,10 @@
     <!-- Same trap as /aim had: reached from the installed app, which is
          standalone and has no browser back button, so there was no way out of
          the review page at all. -->
+    <!-- Operator only (review_api.is_operator): shown once a token in the wallet is accepted
+         by /api/rv/approved. Everyone else never sees it. -->
+    <a class="iconbtn" id="approved-link" href="/rv/approved" title="Other reviewers' approvals"
+       style="text-decoration:none;font-size:12px;font-weight:600;display:none">Approvals</a>
     <a class="iconbtn" href="/" title="Back to the map"
        style="text-decoration:none;font-size:13px;font-weight:600">Map</a>
   </header>
@@ -1336,8 +1340,87 @@
     }
   }
 
+  /* REVERSAL FEEDBACK (10-17, his ask). A Cop call publishes at once, so a wrong one is
+     fixed after the fact by an operator on /rv/approved - and until now nothing told the
+     reviewer. Each reversal waits here, with its photo, until they tap "Got it". Checked
+     for every token in the wallet: the call was made under whichever one was active.
+     ⚠️ No backdrop-filter anywhere in this sheet (iOS 26+ blur wedges, see send.html). */
+  function checkFeedback(){
+    var got = [], left = wallet.length;
+    if(!left) return;
+    wallet.forEach(function(e){
+      api("/api/rv/feedback", e.token).then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(j){ (j && j.items || []).forEach(function(it){ it._tok = e.token; got.push(it); }); })
+        .catch(function(){})
+        .then(function(){ if(--left === 0 && got.length) showFeedback(got); });
+    });
+  }
+  function showFeedback(items){
+    var seen = {};
+    items = items.filter(function(it){ if(seen[it.fid + it._tok]) return false; seen[it.fid + it._tok] = 1; return true; });
+    var n = items.length;
+    var ov = document.createElement("div");
+    ov.id = "fb-sheet";
+    ov.setAttribute("style", "position:fixed;inset:0;z-index:9800;background:rgba(5,8,12,.94);overflow-y:auto;"
+      + "-webkit-overflow-scrolling:touch;padding:calc(18px + env(safe-area-inset-top)) 16px "
+      + "calc(110px + env(safe-area-inset-bottom))");
+    var box = document.createElement("div");
+    box.setAttribute("style", "max-width:560px;margin:0 auto;background:var(--panel,#141b25);border:1px solid "
+      + "var(--line,#25303f);border-radius:14px;padding:18px 16px");
+    var h = document.createElement("h2");
+    h.setAttribute("style", "margin:0 0 8px;font-size:19px;color:#ffd166");
+    h.textContent = n === 1 ? "1 of your Cop calls was reversed" : n + " of your Cop calls were reversed";
+    var p = document.createElement("p");
+    p.setAttribute("style", "margin:0 0 14px;font-size:14px;line-height:1.55;color:var(--dim,#8a97a8)");
+    p.textContent = "Another reviewer looked again and these were not police vehicles. A Cop tap puts the "
+      + "vehicle on the public map straight away, so please only tap Cop when you can see it is police: "
+      + "markings, a light bar, a push bar, a spotlight. If you are not sure, tap Skip. Thank you for reviewing.";
+    var g = document.createElement("div");
+    g.setAttribute("style", "display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:16px");
+    items.forEach(function(it){
+      var c = document.createElement("div");
+      c.setAttribute("style", "background:#000;border-radius:8px;min-height:90px;display:flex;align-items:center;"
+        + "justify-content:center;overflow:hidden;color:var(--dim,#8a97a8);font:11px ui-monospace,monospace");
+      c.textContent = it.photo ? "loading" : "photo removed";
+      if(it.photo){
+        api(it.photo, it._tok).then(function(r){ if(!r.ok) throw 0; return r.blob(); }).then(function(b){
+          var img = document.createElement("img");
+          img.alt = ""; img.src = URL.createObjectURL(b);
+          img.setAttribute("style", "width:100%;display:block");
+          c.textContent = ""; c.appendChild(img);
+        }).catch(function(){ c.textContent = "photo removed"; });
+      }
+      g.appendChild(c);
+    });
+    var ok = document.createElement("button");
+    ok.className = "primary"; ok.textContent = "Got it";
+    ok.setAttribute("style", "width:100%;min-height:48px;font-size:16px");
+    ok.addEventListener("click", function(){
+      ok.disabled = true; ok.textContent = "…";
+      var byTok = {};
+      items.forEach(function(it){ (byTok[it._tok] = byTok[it._tok] || []).push(it.fid); });
+      var toks = Object.keys(byTok), left = toks.length;
+      toks.forEach(function(t){
+        api("/api/rv/feedback/ack", t, {method:"POST", body:{ids: byTok[t]}}).catch(function(){})
+          .then(function(){ if(--left === 0) ov.remove(); });
+      });
+    });
+    box.appendChild(h); box.appendChild(p); box.appendChild(g); box.appendChild(ok);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+  }
+  function probeApprovals(){
+    var a = $("#approved-link");
+    if(!a) return;
+    wallet.forEach(function(e){
+      api("/api/rv/approved?page=0", e.token).then(function(r){ if(r.ok) a.style.display = ""; }).catch(function(){});
+    });
+  }
+
   function start(){
     show("app");
+    checkFeedback();
+    probeApprovals();
     dressHeader();
     scopeNote();
     // own-scoped reviewers with one camera just see it; multi-token shows All

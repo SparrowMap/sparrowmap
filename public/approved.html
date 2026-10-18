@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SparrowMap · Approvals</title>
+<style>
+  :root{
+    --bg:#0d1219; --panel:#141b25; --panel2:#1b2432; --line:#25303f;
+    --ink:#e8eef6; --dim:#8a97a8; --accent:#3b82f6; --accent2:#2563eb;
+    --cop:#22c55e; --not:#ef4444; --not2:#dc2626;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  }
+  .hidden{display:none!important}
+  header{
+    display:flex; align-items:center; gap:10px; padding:12px 14px;
+    border-bottom:1px solid var(--line); background:var(--panel);
+    position:sticky; top:0; z-index:5;
+  }
+  .brand{display:flex;align-items:center;gap:8px;font-weight:700}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--cop);box-shadow:0 0 10px var(--cop)}
+  .grow{flex:1}
+  .count{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap}
+  a.back{font:11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);text-decoration:none;
+         padding:10px 4px}
+
+  /* room at the bottom for the action bar AND the site nav under it */
+  .wrap{max-width:1100px;margin:0 auto;padding:14px 12px calc(190px + env(safe-area-inset-bottom))}
+  .lede{color:var(--dim);font-size:13.5px;line-height:1.6;margin:0 0 14px}
+  .lede b{color:var(--ink)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+  /* A whole tile is the button: big target, no small checkbox to miss on a phone. */
+  .tile{appearance:none;border:2px solid var(--line);background:var(--panel);border-radius:12px;overflow:hidden;
+        padding:0;margin:0;color:inherit;font:inherit;text-align:left;cursor:pointer;display:flex;
+        flex-direction:column;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+  .tile .shot{background:#000;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;
+              position:relative;overflow:hidden}
+  .tile img{width:100%;height:100%;object-fit:contain;display:block}
+  .tile .ph{color:var(--dim);font:11px var(--mono)}
+  .tile .info{padding:7px 9px;font-size:12px;color:var(--dim);line-height:1.45}
+  .tile .who{color:var(--ink);font-weight:600}
+  .tile .mark{position:absolute;top:6px;right:6px;background:var(--not);color:#fff;font:700 11px var(--sans);
+              padding:4px 7px;border-radius:999px;display:none}
+  .tile.sel{border-color:var(--not)}
+  .tile.sel .shot{outline:3px solid var(--not);outline-offset:-3px}
+  .tile.sel .mark{display:block}
+  .tile.gone{opacity:.35;pointer-events:none}
+
+  .pager{display:flex;align-items:center;justify-content:center;gap:10px;margin:18px 0 0}
+  .pager button{min-height:44px;min-width:96px}
+
+  /* The action bar sits ABOVE sitenav's fixed bottom nav: --sitenav-h is that nav's measured
+     height (it already includes the home-indicator inset), set below. In flow it would scroll away
+     from a 20-tile page. */
+  .bar{position:fixed;left:0;right:0;bottom:var(--sitenav-h,calc(64px + env(safe-area-inset-bottom)));z-index:1100;
+       background:var(--panel);border-top:1px solid var(--line);padding:10px 12px;display:flex;gap:10px;
+       align-items:center}
+  .bar .n{flex:1;font-size:13px;color:var(--dim)}
+  button.btn{appearance:none;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+             font:600 14px var(--sans);border-radius:10px;padding:0 14px;min-height:44px;cursor:pointer;
+             touch-action:manipulation}
+  button.btn.danger{background:var(--not);border-color:var(--not2);color:#fff}
+  button.btn:disabled{opacity:.45;cursor:default}
+  .center{padding:60px 20px;text-align:center;color:var(--dim)}
+  .center h2{color:var(--ink);margin:0 0 8px;font-size:19px}
+  .toast{position:fixed;left:50%;transform:translateX(-50%);top:calc(70px + env(safe-area-inset-top));
+         z-index:1200;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:9px 16px;
+         font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><span class="dot"></span> Approvals</span>
+  <span class="grow"></span>
+  <span class="count" id="count"></span>
+  <a class="back" href="/rv/pool">&larr; review</a>
+</header>
+
+<div class="wrap">
+  <p class="lede">
+    Police calls by <b>other reviewers</b> from the last <span id="days">14</span> days that are still on the
+    map, newest first. Your own calls are not here. <b>Tap every photo that is not police</b>, then
+    <b>Reverse</b>: they come off the map, count as "not police" for training, and each reviewer sees the
+    ones you reversed the next time they open the review page.
+  </p>
+  <div id="body"></div>
+  <div class="pager hidden" id="pager">
+    <button class="btn" id="prev">&larr; Newer</button>
+    <span class="count" id="pageno"></span>
+    <button class="btn" id="next">Older &rarr;</button>
+  </div>
+</div>
+
+<div class="bar hidden" id="bar">
+  <span class="n" id="seln">Tap the ones that are not police</span>
+  <button class="btn" id="clear" disabled>Clear</button>
+  <button class="btn danger" id="reverse" disabled>Reverse</button>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(s){ return document.querySelector(s); };
+  var WKEY = "sparrow_rv_wallet";
+  var token = null, page = 0, pages = 1, sel = {}, busy = false;
+
+  function candidates(){
+    var w = [];
+    try { w = JSON.parse(localStorage.getItem(WKEY) || "[]"); } catch(e) { w = []; }
+    var out = w.map(function(e){ return e.token; }).filter(Boolean);
+    try {
+      var n = JSON.parse(localStorage.getItem("sparrow.node") || "null");
+      if(n && n.id && n.token && out.indexOf(n.id + "." + n.token) < 0) out.push(n.id + "." + n.token);
+    } catch(e) {}
+    return out;
+  }
+  function api(path, opts, tok){
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers);
+    var t = tok || token;
+    if(t) opts.headers["Authorization"] = "Bearer " + t;
+    if(opts.body && typeof opts.body !== "string"){
+      opts.body = JSON.stringify(opts.body);
+      opts.headers["Content-Type"] = "application/json";
+    }
+    return fetch(path, opts);
+  }
+  function toast(msg){
+    var t = document.createElement("div");
+    t.className = "toast"; t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function(){ t.remove(); }, 2600);
+  }
+  function ago(ts){
+    if(!ts) return "";
+    var s = Math.max(0, Date.now()/1000 - ts);
+    if(s < 3600) return Math.max(1, Math.round(s/60)) + "m ago";
+    if(s < 86400) return Math.round(s/3600) + "h ago";
+    return Math.round(s/86400) + "d ago";
+  }
+  function message(title, detail){
+    var d = document.createElement("div"); d.className = "center";
+    var h = document.createElement("h2"); h.textContent = title;
+    var p = document.createElement("p"); p.textContent = detail;
+    d.appendChild(h); d.appendChild(p);
+    $("#body").innerHTML = ""; $("#body").appendChild(d);
+    $("#pager").classList.add("hidden"); $("#bar").classList.add("hidden");
+  }
+  function nsel(){ return Object.keys(sel).length; }
+  function drawBar(){
+    var n = nsel();
+    $("#seln").textContent = n ? n + " marked not police" : "Tap the ones that are not police";
+    $("#reverse").disabled = !n || busy; $("#clear").disabled = !n || busy;
+    $("#reverse").textContent = n ? "Reverse " + n : "Reverse";
+  }
+
+  function tile(it){
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "tile";
+    var shot = document.createElement("div"); shot.className = "shot";
+    var ph = document.createElement("span"); ph.className = "ph"; ph.textContent = it.photo ? "loading" : "no photo";
+    shot.appendChild(ph);
+    if(it.photo){
+      var img = new Image();
+      img.alt = ""; img.decoding = "async";
+      img.onload = function(){ ph.remove(); };
+      img.onerror = function(){ ph.textContent = "photo unavailable"; img.remove(); };
+      img.src = it.photo;
+      shot.appendChild(img);
+    }
+    var mk = document.createElement("span"); mk.className = "mark"; mk.textContent = "NOT POLICE";
+    shot.appendChild(mk);
+    var info = document.createElement("div"); info.className = "info";
+    var who = document.createElement("div"); who.className = "who"; who.textContent = it.reviewer;
+    var meta = document.createElement("div");
+    meta.textContent = (it.node_name || "a camera") + " · " + ago(it.confirmed_at || it.ts);
+    info.appendChild(who); info.appendChild(meta);
+    b.appendChild(shot); b.appendChild(info);
+    b.addEventListener("click", function(){
+      if(busy) return;
+      if(sel[it.id]){ delete sel[it.id]; b.classList.remove("sel"); }
+      else { sel[it.id] = b; b.classList.add("sel"); }
+      drawBar();
+    });
+    return b;
+  }
+
+  function load(){
+    sel = {}; drawBar();
+    api("/api/rv/approved?page=" + page).then(function(r){
+      if(r.status === 401){ message("Not signed in", "Your token was not accepted."); return null; }
+      if(r.status === 403){ message("Operator only", "This page is for the map's operator."); return null; }
+      if(!r.ok) throw 0;
+      return r.json();
+    }).then(function(j){
+      if(!j) return;
+      page = j.page; pages = j.pages;
+      $("#days").textContent = j.days;
+      $("#count").textContent = j.total + (j.total === 1 ? " approval" : " approvals");
+      if(!j.items.length){ message("Nothing to check", "No other reviewer has a police call on the map from the last " + j.days + " days."); return; }
+      var g = document.createElement("div"); g.className = "grid";
+      j.items.forEach(function(it){ g.appendChild(tile(it)); });
+      $("#body").innerHTML = ""; $("#body").appendChild(g);
+      $("#pager").classList.toggle("hidden", pages <= 1);
+      $("#pageno").textContent = "page " + (page + 1) + " of " + pages;
+      $("#prev").disabled = page <= 0; $("#next").disabled = page >= pages - 1;
+      $("#bar").classList.remove("hidden");
+      window.scrollTo(0, 0);
+    }).catch(function(){ message("Could not load", "The server did not answer. Try again in a moment."); });
+  }
+
+  $("#clear").addEventListener("click", function(){
+    Object.keys(sel).forEach(function(k){ sel[k].classList.remove("sel"); });
+    sel = {}; drawBar();
+  });
+  $("#reverse").addEventListener("click", function(){
+    var ids = Object.keys(sel).map(Number);
+    if(!ids.length || busy) return;
+    busy = true; drawBar(); $("#reverse").textContent = "reversing…";
+    api("/api/rv/reverse", {method:"POST", body:{ids: ids}}).then(function(r){ return r.json(); }).then(function(j){
+      busy = false;
+      if(!j || !j.ok){ toast((j && j.error) || "could not reverse"); drawBar(); return; }
+      (j.reversed || []).forEach(function(id){ if(sel[id]){ sel[id].classList.remove("sel"); sel[id].classList.add("gone"); } });
+      toast(j.reversed.length + " reversed" + (j.skipped ? ", " + j.skipped + " already gone" : ""));
+      // the page now has holes: reload it so the next page's photos slide up into view
+      setTimeout(load, 900);
+    }).catch(function(){ busy = false; drawBar(); toast("network error"); });
+  });
+  $("#prev").addEventListener("click", function(){ if(page > 0 && !busy){ page--; load(); } });
+  $("#next").addEventListener("click", function(){ if(page < pages - 1 && !busy){ page++; load(); } });
+
+  function navHeight(){
+    var nav = document.querySelector("nav.sitenav");
+    var h = nav ? Math.round(nav.getBoundingClientRect().height) : 0;
+    if(h > 0) document.documentElement.style.setProperty("--sitenav-h", h + "px");
+  }
+  window.addEventListener("load", navHeight);
+  window.addEventListener("resize", navHeight);
+  setTimeout(navHeight, 600);
+
+  /* The wallet can hold several logins (camera keys, pool tokens); use the first one the
+     server accepts as an operator. */
+  var tries = candidates();
+  if(!tries.length){ message("Not signed in", "Open the review page first so this browser holds your login, then come back."); return; }
+  (function next(i){
+    if(i >= tries.length){ message("Operator only", "None of the logins on this device can reverse approvals."); return; }
+    api("/api/rv/approved?page=0", null, tries[i]).then(function(r){
+      if(r.ok){ token = tries[i]; load(); } else next(i + 1);
+    }).catch(function(){ message("Could not load", "The server did not answer. Try again in a moment."); });
+  })(0);
+})();
+</script>
+<script src="/static/sitenav.js?v=39"></script>
+</body>
+</html>
