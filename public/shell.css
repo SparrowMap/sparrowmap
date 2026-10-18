@@ -435,3 +435,23 @@ nav.sitenav .on,nav.sitenav a.on{color:var(--accent)!important;
   #platemodal .pmodal-card{border-radius:16px!important;max-height:none;
     padding-bottom:16px!important}
 }
+
+/* 🚨 KEEP THIS BLOCK AT THE END OF THE FILE. A media query adds no specificity, so an override
+   written ABOVE the rule it overrides loses on a phone too (send.html, 09-07: two "fixes" that
+   were dead CSS for exactly that reason).
+   10-17, his iPhone 18 Pro (iOS 27): "the buttons after you click on a sighting on the map" do not
+   work. What opens there was three live blur layers stacked over the map - the bubble popup
+   (blur 20), the dimmed backdrop (blur 2) and the card itself (blur 34, a scroller centred with a
+   transform). That is the pattern that wedged taps and focus on iOS 26+ in /send, worst on the
+   biggest screens (blur cost scales with AREA, so the newest phone fails first). On a phone the
+   card covers the screen, so the blur was only smearing a dark backdrop: solid colour costs
+   nothing visible. And the card no longer moves: anchored at the top, no transform. */
+@media(max-width:820px){
+  .detailbg{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(2,4,8,.8)}
+  #detail:not(.hidden){top:calc(var(--headh) + env(safe-area-inset-top) + 8px);left:10px;right:10px;
+    width:auto;transform:none;
+    max-height:calc(100dvh - var(--headh) - var(--barh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+    background:rgba(13,18,27,.985);-webkit-backdrop-filter:none;backdrop-filter:none}
+  .sight-bubble .leaflet-popup-content-wrapper{-webkit-backdrop-filter:none;backdrop-filter:none;
+    background:rgba(13,18,27,.97)!important}
+}
