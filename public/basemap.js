@@ -39,6 +39,20 @@
 
   var STYLE_URL = '/basemap/style.json?v=5';
 
+  // 🚨 THE STYLE NAMES THE CLEARNET HOST, AND THE ONION CANNOT REACH IT (10-17).
+  // style.json lists its tiles and glyphs as https://map.sparrowmap.com/basemap/..., and the
+  // hub's CSP is connect-src 'self'. Opened from the .onion (or beta) the page may only fetch
+  // from its OWN origin, so every tile and glyph was refused, the vector map never came up,
+  // and the watchdog below dropped to the Carto raster - which now serves "API KEY REQUIRED"
+  // placeholders. His report: "the onion mirror has the old map with the api key watermark".
+  // Every request for the canonical /basemap/ goes to this page's own origin instead, which
+  // serves the same files (Caddy fronts the onion too). On map.sparrowmap.com nothing changes.
+  var CANON = 'https://map.sparrowmap.com';
+  var rehost = location.origin === CANON ? undefined : function (url) {
+    if (url.indexOf(CANON + '/basemap/') === 0) return { url: location.origin + url.slice(CANON.length) };
+    return undefined;
+  };
+
   function startFramePump() {
     var rAF = window.requestAnimationFrame.bind(window);
     var cAF = window.cancelAnimationFrame.bind(window);
@@ -87,6 +101,7 @@
 
       var glLayer = L.maplibreGL({
         style: STYLE_URL,
+        transformRequest: rehost,
         attribution: '&copy; OpenStreetMap contributors &middot; SparrowMap',
       }).addTo(map);
 
