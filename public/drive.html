@@ -1412,9 +1412,9 @@
    * same yolo11s.onnx over onnxruntime-web/wasm, same letterbox pre-process,
    * same output decode + NMS, same track association, same crop routine that
    * shrinks the vehicle box to SEND_EDGE=200 (plate destroyed on the device).
-   * Difference: a MOVING camera must not flood, so instead of one submit per
-   * vehicle it sends at most ONE crop every 5s - the largest stable vehicle in
-   * that window - geotagged with the current GPS fix. The home head decides
+   * Difference: a MOVING camera must not flood, so each vehicle is sent once
+   * (RESEND_WIDTH) from a queue drained one crop a second under an hourly
+   * budget (SEND_GAP_MS, HOUR_BUDGET) - geotagged with the current GPS fix. The home head decides
    * cop-or-not; the phone asserts nothing. Video never leaves the device.      */
   var SIZE=320, CONF=0.45, SEND_EDGE=200, MIN_FRAMES=3, GONE_MS=1400;
   /* 🚨 STABILITY IS AN ELAPSED TIME, NOT A FRAME COUNT.
@@ -1459,9 +1459,23 @@
    * wider is roughly half the distance away, which is the difference between
    * unreadable and readable livery). */
   var RESEND_WIDTH=1.8;
-  var SEND_EVERY_MS=5000, VEHICLE={2:'car',3:'motorcycle',5:'bus',7:'truck'};
+  /* 🚨 EVERY VEHICLE, NOT THE BIGGEST ONE PER FIVE SECONDS (2026-10-20).
+   *
+   * Sending was one crop per 5 s window, the largest stable vehicle in it. His
+   * 10-20 drive past a patrol car sent 6 crops in 25 s: three of one glare-
+   * washed white car, one of his own dashboard, and the patrol car never got
+   * a crop of its own. Whatever is biggest wins every window, so the smaller
+   * car beside it or behind it - very often the one being passed - never goes.
+   *
+   * So every vehicle that qualifies (stable, >= MIN_SEND_PX, unsent at this
+   * size) joins a queue and the queue drains one crop every SEND_GAP_MS. Still
+   * once per vehicle (RESEND_WIDTH), never once per frame. HOUR_BUDGET keeps
+   * a phone under the hub's 900 / hour per camera (hub.py RATE), so a busy road
+   * slows the queue instead of being refused outright. */
+  var SEND_GAP_MS=1000, HOUR_BUDGET=800, QUEUE_MAX=24;
+  var VEHICLE={2:'car',3:'motorcycle',5:'bus',7:'truck'};
   var camOn=false, camStream=null, session=null, ortLoading=null;
-  var dtracks=[], dnextId=1, winBest=null, lastSend=0, dsent=0, driveNode=null, driveNodePending=false;
+  var dtracks=[], dnextId=1, sendQ=[], sendTimes=[], lastSend=0, dsent=0, driveNode=null, driveNodePending=false;
   var pre=document.createElement('canvas'); pre.width=pre.height=SIZE;
   var pctx=pre.getContext('2d',{willReadFrequently:true});
   var cropCv=document.createElement('canvas');
@@ -1609,7 +1623,7 @@
   }
   /* 🚨 TWO SIZES, AND THE BIG ONE NEVER LEAVES THE PHONE UNTIL A HUMAN SAYS YES.
    *
-   * SEND_EDGE (200px) is what gets POSTED every 5 seconds. That is not a
+   * SEND_EDGE (200px) is what gets POSTED for each vehicle. That is not a
    * thumbnail setting - 200px is the size that destroys a plate, which is the
    * right thing to upload about a car that nobody has looked at yet, on a
    * moving camera that sees mostly ordinary traffic and is on cellular data.
@@ -1879,6 +1893,11 @@ function redactPlateBand(cv, geom) {
          * vehicle. Conservative on purpose (only the whole-box-low case) so a low
          * close car keeps its box top well above the line and is not dropped. */
         if(h.box[1] > v.videoHeight*0.66) continue;
+        // ...and the dash seen WHOLE: his 10-20 drive sent his own dashboard as
+        // a car, a box over most of the frame's width sitting on its bottom edge
+        // with its top above the line. A car ahead is cut by the hood, not by
+        // the frame's edge, and is not that wide unless we are inside it.
+        if(h.box[3] > v.videoHeight*0.97 && (h.box[2]-h.box[0]) > v.videoWidth*0.6) continue;
         /* 🚨 MATCH THE BEST TRACK, AND PREDICT WHERE IT WENT.
          * This took the FIRST track over IoU 0.3, so with several vehicles in
          * frame a car could be absorbed by whichever track happened to sit
@@ -1927,17 +1946,23 @@ function redactPlateBand(cv, geom) {
         // improvement, and there may not be another. Take one the first frame
         // it qualifies instead of publishing the smudge.
         else if(dstable(tr,now) && !tr.full) tr.full=fullCropOf(v,h.box);
-        // Track the largest STABLE vehicle since the last send (the window
-        // best), IGNORING any track already sent at this size - see RESEND_WIDTH.
-        // `tr` rides along so the sender can mark the vehicle rather than the
-        // window; marking the window is what let one car win every window.
+        // Queue every STABLE vehicle big enough to judge, IGNORING any track
+        // already sent at this size - see RESEND_WIDTH. The TRACK is queued,
+        // not a copy, so a vehicle that keeps growing while it waits is sent
+        // at its best frame, not at the frame it joined.
         var trW = tr.bestBox ? (tr.bestBox[2]-tr.bestBox[0]) : 0;
         var unsent = !tr.sentW || trW >= tr.sentW*RESEND_WIDTH;
-        if(dstable(tr,now) && tr.best && unsent && (!winBest||area>winBest.area))
-          winBest={crop:tr.best,full:tr.full,cls:tr.cls,score:tr.score,area:area,
-                   box:tr.bestBox,vw:v.videoWidth,tr:tr,motion:dmotion(tr,now)};
+        if(dstable(tr,now) && tr.best && unsent && trW >= MIN_SEND_PX && !tr.queued){
+          tr.queued=true; tr.vw=v.videoWidth; sendQ.push(tr);
+        }
       }
       dtracks=dtracks.filter(function(t){return now-t.last<GONE_MS;});
+      // Too many waiting (a car park, a jam): keep the biggest, the rest can
+      // queue again while still in view.
+      if(sendQ.length>QUEUE_MAX){
+        sendQ.sort(function(a,b){return b.bestArea-a.bestArea;});
+        sendQ.splice(QUEUE_MAX).forEach(function(t){t.queued=false;});
+      }
       /* 🚨 DO NOT MINT A CAMERA BECAUSE SOMEBODY OPENED THIS PAGE.
        *
        * This used to enrol as soon as there was a GPS fix, so merely opening
@@ -1961,8 +1986,7 @@ function redactPlateBand(cv, geom) {
        * async and takes a moment, which is why this fires on a qualifying
        * candidate rather than waiting for the window to close - the node is
        * then ready by the time the send happens. */
-      var wCand = winBest ? (winBest.box[2]-winBest.box[0]) : 0;
-      if(!driveNode && !driveNodePending && me && wCand >= MIN_SEND_PX){
+      if(!driveNode && !driveNodePending && me && sendQ.length){
         driveNodePending=true; getDriveNode(function(nn){driveNode=nn; driveNodePending=false;});
       }
       /* 🚨 ONLY SEND A VEHICLE BIG ENOUGH TO BE JUDGED.
@@ -1977,17 +2001,19 @@ function redactPlateBand(cv, geom) {
        * Same bar the public-camera survey used, and the same reasoning: a
        * picture nobody could rule on is not evidence. A vehicle that is too
        * small now is often the same vehicle that is big enough two seconds
-       * later, so this delays rather than drops. */
-      var wBest = winBest ? (winBest.box[2]-winBest.box[0]) : 0;
-      if(now-lastSend>=SEND_EVERY_MS && winBest && me && driveNode){
-        if(wBest >= MIN_SEND_PX){
-          // Mark the VEHICLE, not the window, and mark it before the POST so a
-          // slow network cannot let the same car win the next window too.
-          if(winBest.tr) winBest.tr.sentW=wBest;
-          submitCrop(winBest); lastSend=now; winBest=null;
-        } else {
-          winBest=null;          // let a closer pass replace it
-        }
+       * later, so this delays rather than drops. (The bar is applied where
+       * a track joins sendQ above.) */
+      while(sendTimes.length && now-sendTimes[0]>3600000) sendTimes.shift();
+      if(sendQ.length && me && driveNode && now-lastSend>=SEND_GAP_MS &&
+         sendTimes.length<HOUR_BUDGET){
+        var st=sendQ.shift(); st.queued=false;
+        var sw=st.bestBox[2]-st.bestBox[0];
+        // Mark the VEHICLE before the POST so a slow network cannot let the
+        // same car queue again behind itself.
+        st.sentW=sw;
+        submitCrop({crop:st.best,full:st.full,cls:st.cls,score:st.score,
+                    box:st.bestBox,vw:st.vw,tr:st,motion:dmotion(st,now)});
+        lastSend=now; sendTimes.push(now);
       }
       requestAnimationFrame(dloop);
     }).catch(function(){ requestAnimationFrame(dloop); });
