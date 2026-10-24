@@ -46,21 +46,57 @@ DATA = REPO / "data" / "reid"
 OUT = DATA / "ocr.json"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--mobile", action="store_true")
-    ap.add_argument("--scale", type=float, default=2.0)
-    args = ap.parse_args()
+SCALE = 2.0
 
+
+def make_reader(mobile: bool = False):
+    """The PaddleOCR instance every read goes through (ocr.py and fast.py)."""
     from paddleocr import PaddleOCR
     kw = dict(lang="en", use_doc_orientation_classify=False,
               use_doc_unwarping=False, use_textline_orientation=True,
               device="cpu", enable_mkldnn=False)
-    if args.mobile:
+    if mobile:
         kw.update(text_detection_model_name="PP-OCRv5_mobile_det",
                   text_recognition_model_name="PP-OCRv5_mobile_rec")
-    ocr = PaddleOCR(**kw)
+    return PaddleOCR(**kw)
+
+
+def crop_path(r: dict):
+    """The best picture of a row that is on disk, or None."""
+    for fn in (r.get("snap_full"), r["snap"]):
+        if fn and (DATA / "snaps" / fn).exists():
+            return DATA / "snaps" / fn
+    return None
+
+
+def read_crop(ocr, p, scale: float = SCALE, rid=None) -> list:
+    """[[text, score, [x0, y0, x1, y1]], ...] in the crop's own pixels."""
+    im = Image.open(p).convert("RGB")
+    if scale != 1:
+        im = im.resize((int(im.width * scale), int(im.height * scale)), Image.LANCZOS)
+    items = []
+    try:
+        for res in ocr.predict(np.asarray(im)[:, :, ::-1].copy()):
+            for txt, sc, poly in zip(res["rec_texts"], res["rec_scores"], res["rec_polys"]):
+                if not txt:
+                    continue
+                pts = np.asarray(poly).reshape(-1, 2) / scale
+                x0, y0 = pts.min(axis=0); x1, y1 = pts.max(axis=0)
+                items.append([txt, round(float(sc), 3),
+                              [int(x0), int(y0), int(x1), int(y1)]])
+    except Exception as exc:          # one bad crop must not end the run
+        print(f"  {rid}: {exc.__class__.__name__}: {exc}", flush=True)
+    return items
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--mobile", action="store_true")
+    ap.add_argument("--scale", type=float, default=SCALE)
+    args = ap.parse_args()
+
+    ocr = make_reader(args.mobile)
 
     rows = json.load(open(DATA / "reid_rows.json"))
     done = json.load(open(OUT)) if OUT.exists() else {}
@@ -94,29 +130,8 @@ def main() -> None:
 
     t0 = time.time()
     for i, r in enumerate(todo):
-        fn = r.get("snap_full") or r["snap"]
-        p = DATA / "snaps" / fn
-        if not p.exists():
-            p = DATA / "snaps" / r["snap"]
-            if not p.exists():
-                done[str(r["id"])] = []
-                continue
-        im = Image.open(p).convert("RGB")
-        if args.scale != 1:
-            im = im.resize((int(im.width * args.scale), int(im.height * args.scale)), Image.LANCZOS)
-        items = []
-        try:
-            for res in ocr.predict(np.asarray(im)[:, :, ::-1].copy()):
-                for txt, sc, poly in zip(res["rec_texts"], res["rec_scores"], res["rec_polys"]):
-                    if not txt:
-                        continue
-                    pts = np.asarray(poly).reshape(-1, 2) / args.scale
-                    x0, y0 = pts.min(axis=0); x1, y1 = pts.max(axis=0)
-                    items.append([txt, round(float(sc), 3),
-                                  [int(x0), int(y0), int(x1), int(y1)]])
-        except Exception as exc:          # one bad crop must not end the run
-            print(f"  {r['id']}: {exc.__class__.__name__}: {exc}", flush=True)
-        done[str(r["id"])] = items
+        p = crop_path(r)
+        done[str(r["id"])] = read_crop(ocr, p, args.scale, r["id"]) if p else []
         if (i + 1) % 25 == 0:
             json.dump({**done, "_model": model}, open(OUT, "w"))
             print(f"  {i + 1}/{len(todo)}  {time.time() - t0:.0f}s  "

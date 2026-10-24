@@ -55,6 +55,21 @@ def main() -> None:
         sys.exit("set SPARROW_BOX and SPARROW_KEY")
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / "snaps").mkdir(exist_ok=True)
+    # ONE WRITER: fast.py (the daytime lane) writes reid_rows.json and ocr.json
+    # too. Wait for its pass to finish; it skips its passes while we hold this.
+    _held = open(DATA / "reid.lock", "a+b")
+    _held.seek(0)
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(_held.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(_held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(2)
     t0 = time.time()
 
     # 1. export - only rows newer than what we already hold, then merge.

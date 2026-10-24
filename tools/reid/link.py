@@ -370,6 +370,61 @@ class DSU:
     def union(self, a, b): self.p[self.find(a)] = self.find(b)
 
 
+def marking_of(f: dict, items: list) -> dict:
+    """What one crop's OCR read says about the vehicle, as the markings row prints it.
+
+    One function for both callers - the full nightly link and the fast lane
+    (fast.py), which marks a sighting the minute it is confirmed - so the two can
+    never disagree about what a read means. `f` needs place, lat, lon and size.
+    """
+    agency, asc, agency_word = agency_of(items)
+    city = city_of(items, f.get("place"), f.get("lat"), f.get("lon"))
+    units = units_of(items, f.get("size"))
+    unit = max(units, key=lambda u: u[1]) if units else None
+    parts = []
+    # The WORD that was read, not the fleet it implies: a crop whose only
+    # evidence is "911" must not print "POLICE" as though the word were on
+    # the car. The markings row exists to be checked against the photo.
+    if agency: parts.append((agency_word or agency).upper())
+    # 🚨 "STATE POLICE" WITHOUT THE STATE IS HALF AN ANSWER. Michigan State
+    # Police and Illinois State Police are different forces, and the row is
+    # supposed to identify a vehicle. The state comes from where the
+    # sighting HAPPENED, which is corroboration rather than a guess - and
+    # if that is unknown the row simply says STATE POLICE, as before.
+    if agency in ("state police", "trooper", "highway patrol") and not city:
+        st = (places.known(f.get("lat"), f.get("lon")) or (None, None))[1]
+        if st:
+            parts.append(st)
+    if city: parts.append(city)
+    # 🚨 A NUMBER READ OFF A CAR IS KEPT WHETHER OR NOT THE AGENCY WORD WAS
+    # READ TOO (his call, 2026-09-23: "numbers on cars even not plates
+    # should be searchable").
+    #
+    # This used to throw the number away unless the same crop also read
+    # POLICE or SHERIFF, on the reasoning that "4228" alone might be the
+    # road sign behind the car. But the sign case is already handled where
+    # it belongs - by WHERE the text sits in the frame (CAPTION, the
+    # top/bottom edge test in units_of), which is the actual discriminator.
+    # Requiring the agency word on top of that was a second, blunter filter
+    # that mostly deleted true readings: 25 numbers discarded against 13
+    # kept, and four of the discards had POLIISI in the crop all along.
+    #
+    # What changes is the WORDING, not the confidence. With an agency word
+    # it is a "unit"; without one it is a "number", because that is exactly
+    # what is known - a number painted on a published government vehicle.
+    # The photograph is on the row either way, so a reader can check it.
+    if unit: parts.append(f"unit {unit[0]}" if agency else f"number {unit[0]}")
+    # Colours only ride along with something READ. On their own they are a
+    # k-means guess on a night crop ("black/brown" for a white Explorer) and
+    # a markings row that says only that would teach readers to ignore it.
+    # No colours: measured 2026-09-12, k-means called a black-and-white
+    # Austin unit "green/silver" (windshield sunshade) - a wrong colour in
+    # the panel teaches readers to ignore the row that carries the number.
+    return {"agency": agency, "agency_sc": asc, "city": city,
+            "agency_word": agency_word,
+            "unit": unit, "text": " · ".join(parts) if parts else None}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--show", type=int, default=10)
@@ -381,55 +436,8 @@ def main() -> None:
     by_id = {f["id"]: f for f in feats}
 
     # ---- per-sighting markings -------------------------------------------
-    marks = {}
-    for f in feats:
-        items = ocr.get(str(f["id"]), [])
-        agency, asc, agency_word = agency_of(items)
-        city = city_of(items, f.get("place"), f.get("lat"), f.get("lon"))
-        units = units_of(items, f.get("size"))
-        unit = max(units, key=lambda u: u[1]) if units else None
-        parts = []
-        # The WORD that was read, not the fleet it implies: a crop whose only
-        # evidence is "911" must not print "POLICE" as though the word were on
-        # the car. The markings row exists to be checked against the photo.
-        if agency: parts.append((agency_word or agency).upper())
-        # 🚨 "STATE POLICE" WITHOUT THE STATE IS HALF AN ANSWER. Michigan State
-        # Police and Illinois State Police are different forces, and the row is
-        # supposed to identify a vehicle. The state comes from where the
-        # sighting HAPPENED, which is corroboration rather than a guess - and
-        # if that is unknown the row simply says STATE POLICE, as before.
-        if agency in ("state police", "trooper", "highway patrol") and not city:
-            st = (places.known(f.get("lat"), f.get("lon")) or (None, None))[1]
-            if st:
-                parts.append(st)
-        if city: parts.append(city)
-        # 🚨 A NUMBER READ OFF A CAR IS KEPT WHETHER OR NOT THE AGENCY WORD WAS
-        # READ TOO (his call, 2026-09-23: "numbers on cars even not plates
-        # should be searchable").
-        #
-        # This used to throw the number away unless the same crop also read
-        # POLICE or SHERIFF, on the reasoning that "4228" alone might be the
-        # road sign behind the car. But the sign case is already handled where
-        # it belongs - by WHERE the text sits in the frame (CAPTION, the
-        # top/bottom edge test in units_of), which is the actual discriminator.
-        # Requiring the agency word on top of that was a second, blunter filter
-        # that mostly deleted true readings: 25 numbers discarded against 13
-        # kept, and four of the discards had POLIISI in the crop all along.
-        #
-        # What changes is the WORDING, not the confidence. With an agency word
-        # it is a "unit"; without one it is a "number", because that is exactly
-        # what is known - a number painted on a published government vehicle.
-        # The photograph is on the row either way, so a reader can check it.
-        if unit: parts.append(f"unit {unit[0]}" if agency else f"number {unit[0]}")
-        # Colours only ride along with something READ. On their own they are a
-        # k-means guess on a night crop ("black/brown" for a white Explorer) and
-        # a markings row that says only that would teach readers to ignore it.
-        # No colours: measured 2026-09-12, k-means called a black-and-white
-        # Austin unit "green/silver" (windshield sunshade) - a wrong colour in
-        # the panel teaches readers to ignore the row that carries the number.
-        marks[f["id"]] = {"agency": agency, "agency_sc": asc, "city": city,
-                          "agency_word": agency_word,
-                          "unit": unit, "text": " · ".join(parts) if parts else None}
+    marks = {f["id"]: marking_of(f, ocr.get(str(f["id"]), [])) for f in feats}
+
 
     dsu = DSU()
     why = defaultdict(list)          # id -> reasons
@@ -495,7 +503,9 @@ def main() -> None:
         unit_keys = [(region_of(f), marks[f["id"]]["agency"], marks[f["id"]]["unit"][0])
                      for f in members if marks[f["id"]]["unit"] and marks[f["id"]]["agency"]]
         if unit_keys:
-            r, a, n = max(set(unit_keys), key=unit_keys.count)
+            # sorted(): max() over a bare set breaks ties in hash order, which
+            # changes every process, so a tie renamed the group on each run.
+            r, a, n = max(sorted(set(unit_keys)), key=unit_keys.count)
             name = f"u:{r}:{a.replace(' ', '-')}:{n}"
         else:
             name = f"s:{members[0]['node_id']}:{members[0]['id']}"
