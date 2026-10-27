@@ -1222,17 +1222,37 @@ if (navigator.geolocation) {
 // 🚨 NOT ADDED TO THE MAP ANY MORE. Three floating round buttons collided
 // with the Sign in pill on a phone. The behaviour is kept and moved into the
 // Layers menu, which is already in normal flow - see [[sparrow-no-floating-controls]].
+// 🐞 Bug reports 018 + 019 (Sept): "it takes me to a different part of the state" and "on iPhone it
+// doesn't take me to my location". Two causes, both in here:
+//  - It reused the page-load fix, which is asked for with enableHighAccuracy:false and a 10-minute
+//    maximumAge - a network fix that can be kilometres off - and never asked for a precise one.
+//    Now it jumps to whatever we have at once, then always asks for a fresh precise fix.
+//  - Failure was `() => {}`: with location blocked (iPhone: off for Safari Websites) the button
+//    did nothing and said nothing. The button's own label now says what happened - in the menu,
+//    not a floating toast ([[sparrow-no-floating-controls]]).
 function goMyArea() {
-  if (_geoLoc) { map.setView(_geoLoc, 13, { animate: false }); return; }
-  if (!navigator.geolocation) return;
+  const btn = document.getElementById('gomine');
+  const say = (text, ms) => {
+    if (!btn) return;
+    btn.textContent = text;
+    clearTimeout(btn._reset);
+    if (ms) btn._reset = setTimeout(() => { btn.textContent = 'go to my area'; }, ms);
+  };
+  _userMovedMap = true; // a deliberate move; the automatic choice must not pull them back
+  if (_geoLoc) map.setView(_geoLoc, 13, { animate: false });
+  if (!navigator.geolocation) { say('location is not available in this browser', 8000); return; }
+  say('finding you…');
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       _geoLoc = [pos.coords.latitude, pos.coords.longitude];
       _geoDone = true;
       map.setView(_geoLoc, 13, { animate: false });
+      say('go to my area');
     },
-    () => {},
-    { enableHighAccuracy: true, timeout: 10000 });
+    (err) => say(err && err.code === 1
+      ? 'location is blocked for this site (iPhone: Settings › Privacy › Location Services › Safari Websites)'
+      : 'could not get your location - try again', 12000),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }); // 0: a cached coarse fix is the bug
 }
 
 /* 🎯 SHOW THE WHOLE NETWORK.
