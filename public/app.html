@@ -343,6 +343,18 @@ a{color:var(--blue)}
         <br><br>Rotating mints a new key and kills every copy of the old one,
         including any you printed or shared.
       </div>
+      <!-- 🧹 Owner self-removal (bug report 015: "I can't remove this camera on my
+           property"). The key above is the proof of ownership; nothing is
+           deleted, so the same key can put it back. -->
+      <div class="box" id="rmBox">
+        <p><b>Take this camera off the map</b></p>
+        <p class="note" id="rmNote">It disappears from the public map and stops
+          sending. Nothing is deleted: its past sightings of police vehicles stay,
+          and you can put it back here with this key.</p>
+        <button class="big warn" id="kRemove">Remove this camera from the map</button>
+        <button class="big alt hidden" id="kRestore">Put it back on the map</button>
+        <div class="msg" id="rmMsg"></div>
+      </div>
       <p class="note">The secret sits after a <code>#</code> in the link, and
         <b>browsers never send that part to a server</b>. Scanning a key
         transmits nothing to us. We cannot recover it for you, because we do
@@ -375,7 +387,7 @@ a{color:var(--blue)}
      banner - the one shown the moment a camera is enrolled, which is exactly
      when someone needs to move their token - no copy buttons at all. -->
 <script src="/static/copy.js?v=1"></script>
-<script src="/static/sparrow-app.js?v=38"></script>
+<script src="/static/sparrow-app.js?v=39"></script>
 <!-- The camera app is where owners live, so this is where an 'owner' update
      actually reaches someone who can act on it. -->
 <script src="/static/updates.js?v=2"></script>

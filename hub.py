@@ -3953,6 +3953,51 @@ class Handler(BaseHTTPRequestHandler):
                     "last_seen": nd.get("last_seen"),
                 })
 
+            if p in ("/api/node/remove", "/api/node/restore"):
+                # 🧹 AN OWNER TAKING THEIR OWN CAMERA OFF THE MAP, AND PUTTING IT BACK.
+                #
+                # Bug report 015 (09-27): "I can't remove this camera on my property.
+                # Please show me how." There was no way to: a camera, once added,
+                # stayed on the map until the operator did something by hand.
+                #
+                # 🚨 OWNERSHIP IS THE CAMERA'S OWN TOKEN, AND ONLY THAT. Node ids
+                # are printed on the public map, so an id proves nothing. The
+                # token is the same secret that lets this camera post sightings
+                # and move itself (/api/node/me, /whoami, /label), so this grants
+                # nothing its holder could not already do - except take it down.
+                # Unlike _token_ok, a node with NO token is refused rather than
+                # waved through: "anyone may remove a tokenless camera" would be
+                # the exact stranger-removes-my-camera hole this must not have.
+                # The operator may do either, for the cases a token cannot reach.
+                #
+                # NOTHING IS DELETED. status='removed' hides it from every public
+                # listing (they read status='active'), _ingest refuses its posts,
+                # and node_removals keeps what restore needs. Its past sightings
+                # stay: they are of police vehicles, placed on the public road the
+                # camera watched, not at the camera.
+                b = self._body()
+                nid = str(b.get("node_id") or "")
+                nd = db.node(nid) if nid else None
+                if not nd:
+                    return self._err(404, "no camera with that id")
+                operator = self._is_local()
+                if not operator:
+                    if not nd.get("token"):
+                        return self._err(401, "this camera has no key; ask for it to be removed instead")
+                    if not self._token_ok(nd):
+                        return self._err(401, "that key does not match this camera")
+                by = "operator" if operator else "owner"
+                if p == "/api/node/remove":
+                    rec = db.remove_node(nid, by, self.client_ip)
+                    db.audit("node_remove", nid, by, self.client_ip)
+                    return self._json({"ok": True, "node_id": nid, "status": "removed",
+                                       "removed_at": (rec or {}).get("removed_at")})
+                back = db.restore_node(nid, by)
+                if back is None:
+                    return self._err(409, "this camera is not removed")
+                db.audit("node_restore", nid, by, self.client_ip)
+                return self._json({"ok": True, "node_id": nid, "status": back})
+
             if p == "/api/node/parked":
                 # 🚨 THE DRIVE CLIENT CANNOT LEARN THIS ANY OTHER WAY.
                 #

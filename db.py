@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     fov           REAL DEFAULT 60,    -- horizontal field of view, degrees
     reach_m       REAL DEFAULT 45,    -- usable plate-read distance, metres
     kind          TEXT DEFAULT 'fixed',   -- fixed | mobile | phone
-    status        TEXT DEFAULT 'active',  -- active | paused | revoked
+    status        TEXT DEFAULT 'active',  -- active | paused | revoked | removed (owner took it off the map; see node_removals)
     contact       TEXT,               -- operator-only, never served publicly
     created       REAL,
     last_seen     REAL,               -- last SIGHTING. Traffic, not liveness.
@@ -230,6 +230,23 @@ CREATE TABLE IF NOT EXISTS rv_feedback (
     seen_at      REAL
 );
 CREATE INDEX IF NOT EXISTS ix_rvfb_label ON rv_feedback(label, seen_at);
+
+-- AN OWNER TAKING THEIR OWN CAMERA OFF THE MAP (10-27, bug report 015: "I can't
+-- remove this camera on my property"). Nothing is deleted: the node row, its
+-- history and its sightings stay, and status='removed' is what hides it, since
+-- every public listing reads status='active' only. This table is the record that
+-- makes it undoable: who, when, and the status to put back.
+CREATE TABLE IF NOT EXISTS node_removals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id      TEXT NOT NULL,
+    removed_at   REAL NOT NULL,
+    removed_by   TEXT NOT NULL,     -- owner | operator
+    prev_status  TEXT NOT NULL,     -- what restore puts back
+    ip           TEXT,
+    restored_at  REAL,
+    restored_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_noderm_node ON node_removals(node_id, removed_at DESC);
 """
 
 
@@ -671,7 +688,13 @@ def upsert_node(n: dict) -> None:
             lat=excluded.lat, lon=excluded.lon,
             pub_lat=excluded.pub_lat, pub_lon=excluded.pub_lon,
             heading=excluded.heading, fov=excluded.fov, reach_m=excluded.reach_m,
-            kind=excluded.kind, status=excluded.status, contact=excluded.contact,
+            -- 🚨 A RE-ENROL MUST NOT UNDO AN OWNER'S REMOVAL. The camera app and
+            -- /aim re-save placements through here with status 'active', which
+            -- would quietly put a camera its owner took down back on the map.
+            -- Only restore_node() brings a removed camera back.
+            kind=excluded.kind,
+            status=CASE WHEN nodes.status='removed' THEN nodes.status ELSE excluded.status END,
+            contact=excluded.contact,
             span_lat1=excluded.span_lat1, span_lon1=excluded.span_lon1,
             span_lat2=excluded.span_lat2, span_lon2=excluded.span_lon2,
             -- A re-enrol that says nothing about the road keeps what was
@@ -915,6 +938,53 @@ def heartbeat_many(node_ids: list, ts: Optional[float] = None) -> int:
                      [(t, nid) for nid in node_ids])
     conn.commit()
     return len(node_ids)
+
+
+def remove_node(nid: str, by: str, ip: str = "") -> Optional[dict]:
+    """Take a camera off the public map, recording how to put it back.
+
+    Returns the removal record, or None if there is no such node. Removing a
+    camera that is already removed returns the open record and changes nothing.
+    The caller has already proved ownership; this only does the bookkeeping.
+    """
+    conn = connect()
+    row = conn.execute("SELECT status FROM nodes WHERE id=?", (nid,)).fetchone()
+    if not row:
+        return None
+    prev = row["status"] or "active"
+    if prev == "removed":
+        return node_removal(nid)
+    # Compare-and-swap on the status just read, so two removals racing record once.
+    cur = conn.execute("UPDATE nodes SET status='removed' WHERE id=? AND status=?", (nid, prev))
+    if cur.rowcount:
+        conn.execute("INSERT INTO node_removals (node_id, removed_at, removed_by, prev_status, ip) "
+                     "VALUES (?,?,?,?,?)", (nid, now(), by, prev, ip))
+    conn.commit()
+    _NODES_CACHE.clear()   # db cache only; /api/nodes still has its own 30 s response cache (and the CDN)
+    return node_removal(nid)
+
+
+def restore_node(nid: str, by: str) -> Optional[str]:
+    """Undo the latest open removal. Returns the status put back, or None."""
+    conn = connect()
+    rec = conn.execute("SELECT r.id, r.prev_status FROM node_removals r JOIN nodes n ON n.id=r.node_id "
+                       "WHERE r.node_id=? AND r.restored_at IS NULL AND n.status='removed' "
+                       "ORDER BY r.removed_at DESC LIMIT 1", (nid,)).fetchone()
+    if not rec:
+        return None
+    cur = conn.execute("UPDATE nodes SET status=? WHERE id=? AND status='removed'", (rec["prev_status"], nid))
+    if cur.rowcount:
+        conn.execute("UPDATE node_removals SET restored_at=?, restored_by=? WHERE id=?", (now(), by, rec["id"]))
+    conn.commit()
+    _NODES_CACHE.clear()
+    return rec["prev_status"] if cur.rowcount else None
+
+
+def node_removal(nid: str) -> Optional[dict]:
+    """The latest removal record for a camera, open or undone."""
+    r = connect().execute("SELECT * FROM node_removals WHERE node_id=? ORDER BY removed_at DESC LIMIT 1",
+                          (nid,)).fetchone()
+    return dict(r) if r else None
 
 
 def audit(action: str, target: str = "", actor: str = "anon", ip: str = "") -> None:

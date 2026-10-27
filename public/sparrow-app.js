@@ -84,7 +84,7 @@ function go(m) {
     b.classList.toggle('on', b.dataset.m === m));
   // Leaving a mode must release its camera, or the next mode cannot open one.
   if (m !== 'watch' && running) stop();
-  if (m === 'key') loadQR();
+  if (m === 'key') { loadQR(); removalState(); }
   if (m === 'setup' || m === 'watch') listCameras();
 }
 document.querySelectorAll('nav.modes button').forEach((b) => {
@@ -1083,6 +1083,9 @@ function stage(name) {
 }
 
 async function start() {
+  // A camera its owner took off the map: the hub refuses its posts ("node is
+  // removed"), so watching would only fail over and over. Point them at the way back.
+  if (node && node.removed) { go('key'); return say($('#rmMsg'), 'This camera is off the map. Put it back first to watch again.', false); }
   stage('starting');
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(), audio: false });
@@ -1224,18 +1227,70 @@ $('#kRotate').onclick = async () => {
   say($('#kMsg'), 'Rotated. The old key is dead — save this new one.', true);
 };
 
+/* ---- take this camera off the map (and back) -------------------------
+ * Bug report 015: an owner could not remove their own camera. The key is the
+ * proof (Authorization header, as /api/node/whoami); the hub keeps a record,
+ * so "Put it back" is the same key and one tap. */
+function showRemoved(removed) {
+  node.removed = !!removed;
+  localStorage.setItem(KEY, JSON.stringify(node));
+  $('#kRemove').classList.toggle('hidden', removed);
+  $('#kRestore').classList.toggle('hidden', !removed);
+  $('#rmNote').textContent = removed
+    ? 'This camera is off the public map and is not sending. Its past sightings stay. Put it back any time with this key.'
+    : 'It disappears from the public map and stops sending. Nothing is deleted: its past sightings of police vehicles stay, and you can put it back here with this key.';
+}
+async function nodeCall(path) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + node.token },
+    body: JSON.stringify({ node_id: node.id }),
+  });
+  let d = {};
+  try { d = await r.json(); } catch (e) { /* the status says enough */ }
+  return { ok: r.ok, d };
+}
+async function removalState() {
+  if (!(node && node.token)) return;
+  try {
+    const { ok, d } = await nodeCall('/api/node/whoami');
+    if (ok) {
+      showRemoved(d.status === 'removed');
+      // Removed from another device: open where the way back is, not on a Watch that cannot send.
+      if (d.status === 'removed' && mode === 'watch' && !running) go('key');
+    }
+  } catch (e) { /* offline: keep what we knew */ }
+}
+$('#kRemove').onclick = async () => {
+  if (!confirm('Remove this camera from the map?\n\nIt disappears from the public map '
+             + 'and stops sending. Nothing is deleted, and you can put it back '
+             + 'from this page with the same key.')) return;
+  if (running) stop();
+  const { ok, d } = await nodeCall('/api/node/remove');
+  if (!ok) return say($('#rmMsg'), d.error || 'Could not remove it. Try again.', false);
+  showRemoved(true);
+  say($('#rmMsg'), 'Removed. It leaves the public map within a minute.', true);
+};
+$('#kRestore').onclick = async () => {
+  const { ok, d } = await nodeCall('/api/node/restore');
+  if (!ok) return say($('#rmMsg'), d.error || 'Could not put it back. Try again.', false);
+  showRemoved(false);
+  say($('#rmMsg'), 'Put back. It returns to the map within a minute; open Watch to start sending again.', true);
+};
+
 /* ---- boot ------------------------------------------------------------ */
 refreshChrome();
 batteryWatch();
 ensureReviewToken();
 listCameras();
+removalState();   // removed from another device? this one should know before it tries to watch
 /* Offer the way back BEFORE offering a second camera. See #already-have in
    app.html for why this is the sentence that matters most on that screen. */
 if (!(node && node.token)) {
   const back = document.getElementById('already-have');
   if (back) back.classList.remove('hidden');
 }
-go(node && node.token ? 'watch' : 'setup');
+go(node && node.token ? (node.removed ? 'key' : 'watch') : 'setup');
 // Back from a self-update (maybeUpdate): carry on watching, as before the reload.
 try {
   if (sessionStorage.getItem('sparrow.resume') === '1') {
