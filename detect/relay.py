@@ -132,13 +132,48 @@ VEHICLE = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
 OPEN_TIMEOUT_MS = 8000
 READ_TIMEOUT_MS = 8000
+HLS_READ_TIMEOUT_MS = 30000   # longer than any HLS segment; see open_stream
 UA = "SparrowMap-relay/0.1"
 
 
 # --------------------------------------------------------------------------
 # stream
 # --------------------------------------------------------------------------
+# 📺 A PUBLIC WEBCAM THAT ONLY EXISTS AS LIVE VIDEO (10-27, bug report 013).
+# WGXA's Dublin GA camera is a WetMet widget: no still image anywhere, just an
+# HLS playlist whose link carries a signed token (wmsAuthSign) that expires
+# after 30 minutes. His call: run it like any camera with a video feed. So
+# `--source wetmet:<uid>` asks the widget page for a fresh link EVERY time the
+# stream is opened (and main() reopens it before the token runs out). The
+# video stays on this machine; only crops leave, exactly as for an IP camera.
+WETMET_FRAME = "https://api.wetmet.net/widgets/stream/frame.php?uid={uid}"
+WETMET_REOPEN_S = 25 * 60   # the signed link lasts 30 minutes
+
+
+def resolve_source(src: str) -> str:
+    """The URL to open for a --source. Only wetmet: needs work; the rest pass through."""
+    if not src.startswith("wetmet:"):
+        return src
+    import re
+    uid = src.split(":", 1)[1].strip()
+    if not re.fullmatch(r"[0-9a-f]{16,64}", uid):
+        raise ValueError("wetmet: needs the widget uid (hex), e.g. wetmet:527c72bf...")
+    req = urllib.request.Request(WETMET_FRAME.format(uid=uid),
+                                 headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "replace")
+    m = re.search(r"https://[^\"' ]+?\.m3u8\?wmsAuthSign=[A-Za-z0-9=%]+", html)
+    if not m:
+        raise ValueError("the WetMet widget page has no stream link (camera offline?)")
+    return m.group(0)
+
+
 def open_stream(url: str):
+    if url.startswith("wetmet:"):
+        try:
+            url = resolve_source(url)
+        except (ValueError, OSError) as exc:
+            print(f"  could not get a stream link: {exc}")
+            return None
     # A camera plugged into THIS machine: a USB webcam (`0`, `/dev/video0`) or a
     # Pi camera module bridged to V4L2. No ffmpeg, no timeouts to bind - the
     # kernel either hands frames over or it does not.
@@ -153,9 +188,14 @@ def open_stream(url: str):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         return cap
     cap = cv2.VideoCapture()
+    # ⚠️ HLS arrives a SEGMENT at a time (WGXA's are 8.3 s), so at the live edge a
+    # read waits up to one segment for the next. The 8 s read timeout fired first:
+    # measured, a "drop" and a reopen every ~8 s. Give a playlist a timeout longer
+    # than any segment; an RTSP camera keeps the short one.
+    read_ms = HLS_READ_TIMEOUT_MS if ".m3u8" in url else READ_TIMEOUT_MS
     cap.open(url, cv2.CAP_FFMPEG,
              [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
-              cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS])
+              cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms])
     if not cap.isOpened():
         return None
     # A camera streams whether or not anyone is reading, so a slow consumer
@@ -171,6 +211,8 @@ def open_stream(url: str):
 
 def redact(url: str) -> str:
     """Never print camera credentials: this output ends up in logs and pastes."""
+    if "wmsAuthSign=" in url:
+        url = url.split("wmsAuthSign=", 1)[0] + "wmsAuthSign=***"
     if "@" not in url:
         return url
     head, _, tail = url.partition("://")
@@ -633,6 +675,16 @@ def main() -> int:
                          "open-image-models). Changes what leaves this machine: see /carpi.")
     ap.add_argument("--every", type=float, default=SEND_EVERY_S,
                     help="minimum seconds between uploads")
+    ap.add_argument("--max-fps", type=float, default=0,
+                    help="run the detector on at most this many frames per second of "
+                         "VIDEO (0 = every frame). Paced by stream time, not the wall "
+                         "clock: an HLS source arrives in multi-second bursts.")
+    ap.add_argument("--reopen-every", type=float, default=None,
+                    help="reopen the stream this often, in seconds (default: 25 min "
+                         "for wetmet: sources, whose link expires at 30; else never)")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="CPU threads for the detector (0 = onnxruntime's default: all "
+                         "cores, spinning). 1 is plenty for one low-res camera.")
     ap.add_argument("--dry-run", action="store_true",
                     help="detect and report, but send nothing")
     a = ap.parse_args()
@@ -676,7 +728,14 @@ def main() -> int:
 
     mp = model_path(a.hub)
     import onnxruntime as ort
-    sess = ort.InferenceSession(str(mp), providers=["CPUExecutionProvider"])
+    so = ort.SessionOptions()
+    if a.threads:
+        # onnxruntime's default pool takes every core and spins between runs: a
+        # 640x360 webcam at 4 detections/s measured 65% of a core that way.
+        so.intra_op_num_threads = a.threads
+        so.inter_op_num_threads = 1
+        so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    sess = ort.InferenceSession(str(mp), so, providers=["CPUExecutionProvider"])
     iname = sess.get_inputs()[0].name
     global SIZE
     shape = sess.get_inputs()[0].shape          # [1, 3, H, W]
@@ -711,9 +770,31 @@ def main() -> int:
     nid = 0
     last_send = last_nofix = 0.0
     sent = seen = 0
+    reopen_every = (a.reopen_every if a.reopen_every is not None
+                    else (WETMET_REOPEN_S if a.source.startswith("wetmet:") else 0))
+    opened_at = time.time()
+    # Stream clock for --max-fps: frames counted against the stream's own fps.
+    # A wall clock is wrong for HLS, which hands over ~8 s of frames in a burst and
+    # then waits; tracks would die in the gaps and live forever inside a burst.
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    step = max(1, round(fps / a.max_fps)) if (a.max_fps and fps > 0) else 1
+    clock_base, fi = time.time(), 0
     try:
         while True:
+            if reopen_every and time.time() - opened_at > reopen_every:
+                # Before the signed link expires, not after: a fresh link, no gap.
+                fresh = open_stream(a.source)
+                if fresh is not None:
+                    cap.release()
+                    cap = fresh
+                    print("  fresh stream link", flush=True)
+                    clock_base, fi = max(time.time(), clock_base + fi / (fps or 1)), 0
+                opened_at = time.time()
             ok, frame = cap.read()
+            if ok and step > 1:
+                fi += 1
+                if fi % step:
+                    continue        # read to stay at the live edge; detect on every step-th
             if not ok:
                 # A camera that drops out must not take the relay with it: an
                 # outdoor camera reboots, loses PoE, or the wifi dips, and the
@@ -724,12 +805,15 @@ def main() -> int:
                 cap = open_stream(a.source)
                 if cap is None:
                     time.sleep(7)
+                else:
+                    opened_at = time.time()
+                    clock_base, fi = max(time.time(), clock_base + fi / (fps or 1)), 0
                 continue
 
             blob, s, ox, oy = letterbox(frame)
             out = sess.run(None, {iname: blob})[0]
             hits = decode(out, s, ox, oy)
-            now = time.time()
+            now = clock_base + fi / fps if (step > 1 and fps > 0) else time.time()
 
             for h in hits:
                 match = None
