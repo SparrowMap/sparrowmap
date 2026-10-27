@@ -1230,13 +1230,38 @@ if (navigator.geolocation) {
 //  - Failure was `() => {}`: with location blocked (iPhone: off for Safari Websites) the button
 //    did nothing and said nothing. The button's own label now says what happened - in the menu,
 //    not a floating toast ([[sparrow-no-floating-controls]]).
+const MYAREA_LABEL = '📍 My area';
+
+/* 📍 "GO TO MY AREA" IS A BUTTON ON THE MAP NOW, NOT A LINE IN THE LAYERS MENU.
+ * Bug report 012 (Sept): "I can't find how to see vehicles seen in my area".
+ * The action existed, at the foot of a menu named Layers. His call 10-27: a
+ * visible button on the map.
+ * ⚠️ A LEAFLET CONTROL, NOT A FLOATING SITE BUTTON ([[sparrow-no-floating-controls]]):
+ * a map control belongs to the map, and Leaflet stacks its own corner controls,
+ * so it cannot land on the header, the Sign in pill or another control. Its
+ * status ("finding you…", or why location is blocked) is written in the button
+ * itself, which grows in its corner rather than floating a toast over the map. */
+const MyAreaControl = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const b = L.DomUtil.create('button', 'myarea-btn');
+    b.type = 'button';
+    b.id = 'gomine';
+    b.textContent = MYAREA_LABEL;
+    b.setAttribute('aria-label', 'go to my area');
+    L.DomEvent.disableClickPropagation(b);
+    L.DomEvent.on(b, 'click', goMyArea);
+    return b;
+  },
+});
+
 function goMyArea() {
   const btn = document.getElementById('gomine');
   const say = (text, ms) => {
     if (!btn) return;
     btn.textContent = text;
     clearTimeout(btn._reset);
-    if (ms) btn._reset = setTimeout(() => { btn.textContent = 'go to my area'; }, ms);
+    if (ms) btn._reset = setTimeout(() => { btn.textContent = MYAREA_LABEL; }, ms);
   };
   _userMovedMap = true; // a deliberate move; the automatic choice must not pull them back
   if (_geoLoc) map.setView(_geoLoc, 13, { animate: false });
@@ -1247,7 +1272,7 @@ function goMyArea() {
       _geoLoc = [pos.coords.latitude, pos.coords.longitude];
       _geoDone = true;
       map.setView(_geoLoc, 13, { animate: false });
-      say('go to my area');
+      say(MYAREA_LABEL);
     },
     (err) => say(err && err.code === 1
       ? 'location is blocked for this site (iPhone: Settings › Privacy › Location Services › Safari Websites)'
@@ -2811,8 +2836,7 @@ function toggleHeat() {
 (function wireMenuControls() {
   const heat = document.getElementById('showheat');
   if (heat) heat.addEventListener('change', () => toggleHeat());
-  const mine = document.getElementById('gomine');
-  if (mine) mine.addEventListener('click', goMyArea);
+  new MyAreaControl().addTo(map);   // was a menu line; now on the map (bug 012)
   const all = document.getElementById('goall');
   if (all) all.addEventListener('click', goEverything);
 })();

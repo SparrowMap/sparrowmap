@@ -15,7 +15,7 @@
 <link rel="stylesheet" href="/vendor/leaflet.css">
 <link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <!-- From-scratch Sparrow-Send-language shell (replaces style.css entirely). -->
-<link rel="stylesheet" href="/static/shell.css?v=18">
+<link rel="stylesheet" href="/static/shell.css?v=19">
 </head>
 <body>
 
@@ -279,9 +279,7 @@
                buttons, and deleting a working control to fix an overlap loses
                something for nothing. Kept as actions at the foot of the menu. -->
           <div style="border-top:1px solid var(--line2);margin:5px 0 3px"></div>
-          <button type="button" class="cams" id="gomine"
-                  style="background:none;border:0;text-align:left;color:inherit;font:inherit;cursor:pointer">
-            go to my area</button>
+          <!-- "go to my area" moved onto the map as a button (bug 012, 10-27). -->
           <button type="button" class="cams" id="goall"
                   style="background:none;border:0;text-align:left;color:inherit;font:inherit;cursor:pointer">
             zoom out to everything</button>
@@ -334,7 +332,7 @@
 <script>window.SPARROW_NAV_PANES = true;</script>
 <script src="/static/sitenav.js?v=39"></script>
 <script src="/static/basemap.js?v=2"></script>
-<script src="/static/app.js?v=153"></script>
+<script src="/static/app.js?v=154"></script>
 <!-- What changed, once, only to the people it applies to. Most entries are
      audience:'owner', so a visitor reading the map is never interrupted. -->
 <script src="/static/updates.js?v=2"></script>
