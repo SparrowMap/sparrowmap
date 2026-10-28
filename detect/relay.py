@@ -763,8 +763,11 @@ def main() -> int:
 
     cap = open_stream(a.source)
     if cap is None:
-        print("could not open the stream. Run tools/test_stream.py on this URL.")
-        return 1
+        # Keep trying rather than exit: a camera that is off when the relay starts
+        # (a reboot, a power cut, a webcam host down for the night) must be picked
+        # up when it comes back, and the main loop below already retries.
+        print("could not open the stream; retrying every 10 s. "
+              "If it never opens, run tools/test_stream.py on this URL.", flush=True)
 
     tracks: list = []
     nid = 0
@@ -776,11 +779,26 @@ def main() -> int:
     # Stream clock for --max-fps: frames counted against the stream's own fps.
     # A wall clock is wrong for HLS, which hands over ~8 s of frames in a burst and
     # then waits; tracks would die in the gaps and live forever inside a burst.
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    fps = (cap.get(cv2.CAP_PROP_FPS) or 0.0) if cap is not None else 0.0
     step = max(1, round(fps / a.max_fps)) if (a.max_fps and fps > 0) else 1
     clock_base, fi = time.time(), 0
     try:
         while True:
+            if cap is None:
+                # 🐞 10-27: this path used to fall through to cap.read() on None and
+                # crash ("'NoneType' object has no attribute 'read'") the first time
+                # a reopen failed - so a camera down for more than one retry killed
+                # the relay instead of being waited out.
+                cap = open_stream(a.source)
+                if cap is None:
+                    time.sleep(10)
+                    continue
+                opened_at = time.time()
+                if not fps:
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+                    step = max(1, round(fps / a.max_fps)) if (a.max_fps and fps > 0) else 1
+                clock_base, fi = max(time.time(), clock_base + fi / (fps or 1)), 0
+                print("  stream back", flush=True)
             if reopen_every and time.time() - opened_at > reopen_every:
                 # Before the signed link expires, not after: a fresh link, no gap.
                 fresh = open_stream(a.source)
