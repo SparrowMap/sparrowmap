@@ -23,6 +23,7 @@ Exit code is 1 if anything is stale, so it can gate a deploy step.
 from __future__ import annotations
 
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -63,6 +64,8 @@ WATCH = {
 # "restart hub.py" by killing all three. A service with a port is identified by
 # the port it listens on.
 PORTS = {"hub.py": 8150}
+# A component whose process may be invisible (elevated) but whose log proves it is alive.
+LOGS = {"box_puller": "logs/box_puller.log"}
 
 
 def _port_owner(port: int) -> str:
@@ -123,6 +126,7 @@ def main() -> int:
 
     stale = 0
     missing: list = []
+    unknown: list = []   # alive, but its code age cannot be read (elevated)
     seen = set()
     for name, sources in WATCH.items():
         # A launcher spawns a stub plus a child with the same command line;
@@ -132,6 +136,20 @@ def main() -> int:
         if name in PORTS:
             owner = _port_owner(PORTS[name])
             mine = [p for p in mine if p["pid"] == owner]   # not listening = not running
+        if not mine and name in LOGS:
+            # 🚨 HIDDEN IS NOT DEAD (10-27). The box_puller task runs ELEVATED, and
+            # a non-elevated query reads its command line as empty, so it matched
+            # nothing and was reported NOT RUNNING while its log was being written
+            # every few seconds. Its log is honest evidence of life. Its CODE AGE
+            # cannot be read from here, so say that rather than "current".
+            lp = ROOT / LOGS[name]
+            age = (time.time() - lp.stat().st_mtime) if lp.exists() else None
+            if age is not None and age < 600:
+                print(f"  {name:<14} RUNNING (process hidden: elevated) - log written "
+                      f"{round(age)}s ago; its code age cannot be checked from here, "
+                      f"restart it as admin after changing its sources")
+                unknown.append(name)
+                continue
         if not mine:
             # 🚨 NOT RUNNING IS A FAILURE, AND THE SUMMARY USED TO SAY OTHERWISE.
             # `stale` counted only components running OLD code, so a component
@@ -181,6 +199,10 @@ def main() -> int:
               + ", ".join(missing) + ".")
     if stale or missing:
         return 1
+    if unknown:
+        print("\nall visible components are up to date; "
+              + ", ".join(unknown) + " is running but its code age could not be checked")
+        return 0
     print("\nall components are running and up to date with the source on disk")
     return 0
 
