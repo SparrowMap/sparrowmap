@@ -287,12 +287,14 @@ def check_drift() -> None:
         p = ROOT / f
         if not p.exists() or f not in theirs:
             continue
-        # RAW bytes, not newline-normalised. Deployment is scp of this exact
-        # file, so the box holds these bytes including any CRLF. Normalising one
-        # side and not the other reported 7 files as drifted that had been
-        # deployed an hour earlier and verified identical by md5 at the time -
-        # a drift check that cries wolf is one nobody reads.
-        mine = hashlib.md5(p.read_bytes()).hexdigest()
+        # 🔁 REVISED 10-27. This used to hash RAW bytes because deployment WAS an
+        # scp of this exact file. It is not any more: deploy.py runs `git pull`
+        # on the box, so the box holds git's stored bytes (LF), while a Windows
+        # checkout (core.autocrlf) holds CRLF. Raw bytes then reported 16 files
+        # as drifted on a box that was clean at the same commit, with box md5 ==
+        # local LF md5. So hash the local file the way git stores it.
+        # A drift check that cries wolf is one nobody reads - true both times.
+        mine = hashlib.md5(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         if mine != theirs[f]:
             drifted.append(f)
     if drifted:

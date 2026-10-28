@@ -55,6 +55,27 @@ WATCH = {
 }
 
 
+# 🚨 "hub.py" IS NOT A UNIQUE NAME ON THIS MACHINE (10-27). Three processes have
+# it in their command line: this hub (`pythonw hub.py`, :8150), the staging
+# mirror (`python hub.py --port 8250`, D:\LLM\sparrow_box) and the Workshop
+# (`D:\LLM\workshop\hub.py`, :7800). Matching the name and taking the OLDEST
+# could judge THIS hub by another program's start time, and deploy.py would then
+# "restart hub.py" by killing all three. A service with a port is identified by
+# the port it listens on.
+PORTS = {"hub.py": 8150}
+
+
+def _port_owner(port: int) -> str:
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
+             f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:                              # pragma: no cover
+        return ""
+
+
 def _procs() -> list[dict]:
     """Running python processes, with start time, via PowerShell/CIM."""
     # ⚠️ Uses a literal separator, NOT PowerShell's backtick-t escape. The
@@ -108,6 +129,9 @@ def main() -> int:
         # both are real, so report the OLDEST, which is the one that would be
         # holding onto old code.
         mine = [p for p in procs if name in p["cmd"]]
+        if name in PORTS:
+            owner = _port_owner(PORTS[name])
+            mine = [p for p in mine if p["pid"] == owner]   # not listening = not running
         if not mine:
             # 🚨 NOT RUNNING IS A FAILURE, AND THE SUMMARY USED TO SAY OTHERWISE.
             # `stale` counted only components running OLD code, so a component

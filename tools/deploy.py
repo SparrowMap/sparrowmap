@@ -188,6 +188,27 @@ LOCAL = {
 }
 
 
+def _select(spec: dict) -> str:
+    """PowerShell for "the processes that ARE this service", as a pipeline.
+
+    🚨 10-27: matching `*hub.py*` alone also matched the staging mirror
+    (`hub.py --port 8250`) and the Workshop (`D:/LLM/workshop/hub.py`, which
+    runs every Workshop agent), so "restarted hub.py" killed all three - the
+    mirror was seen dead right after a deploy. A service with a port is ALSO
+    required to be the process listening on that port; one without a port
+    keeps the command-line match it always had.
+    """
+    where = (f"$_.CommandLine -like '{spec['match']}' -and "
+             f"$_.CommandLine -notlike '*Get-CimInstance*'")
+    pre = ""
+    if spec.get("port"):
+        pre = (f"$own = @(Get-NetTCPConnection -LocalPort {spec['port']} -State Listen "
+               f"-ErrorAction SilentlyContinue | ForEach-Object {{ $_.OwningProcess }}); ")
+        where += " -and $own -contains $_.ProcessId"
+    return (pre + "Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
+            f"Where-Object {{ {where} }}")
+
+
 def _ps(cmd: str) -> str:
     return subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
                           capture_output=True, encoding="utf-8",
@@ -228,10 +249,7 @@ def _came_up(name: str, spec: dict, wait_s: int = 12) -> bool:
     deadline = time.time() + wait_s
     seen_proc = False
     while time.time() < deadline:
-        got = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
-                  f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
-                  f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
-                  f"Measure-Object).Count")
+        got = _ps(f"({_select(spec)} | Measure-Object).Count")
         if (got or "0").strip() not in ("", "0"):
             seen_proc = True
             if not port:
@@ -281,10 +299,7 @@ def sync_local(a) -> None:
         if spec.get("bat"):
             # Stop it, then let its own launcher start it again. The launcher
             # holds the credentials and the flags; this only decides WHEN.
-            _ps(f"Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
-                f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
-                f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
-                f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
+            _ps(f"{_select(spec)} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
             _ps(f"Start-Sleep -Seconds 2; Start-Process -FilePath 'cmd.exe' "
                 f"-ArgumentList '/c','{spec['bat']}' -WindowStyle Minimized")
             if not _came_up(name, spec):
@@ -306,10 +321,7 @@ def sync_local(a) -> None:
         # The running process already knows the right answer, so ask it before
         # stopping it. sys.executable stays only as the fallback for a service
         # that was not running to begin with.
-        cmd = _ps(f"(Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
-                  f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
-                  f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
-                  f"Select-Object -First 1).CommandLine")
+        cmd = _ps(f"({_select(spec)} | Select-Object -First 1).CommandLine")
         exe = sys.executable
         if cmd:
             head = cmd.split(".exe", 1)[0] + ".exe"
@@ -321,10 +333,7 @@ def sync_local(a) -> None:
             args = cmd.split(".exe", 1)[1].strip()
         # STOP FIRST. The launcher refuses a second detector for the same node,
         # so start-then-stop leaves the OLD one running and looks like success.
-        _ps(f"Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
-            f"Where-Object {{ $_.CommandLine -like '{spec['match']}' -and "
-            f"$_.CommandLine -notlike '*Get-CimInstance*' }} | "
-            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
+        _ps(f"{_select(spec)} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
         _ps("Start-Sleep -Seconds 3; Start-Process -FilePath "
             f"'{exe}' -ArgumentList '{args}' "
             f"-WorkingDirectory '{ROOT}' -WindowStyle Minimized")
