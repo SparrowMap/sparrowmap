@@ -1,4 +1,4 @@
-"""SparrowMap4Biz: the LIGHT node for a business, with a window instead of a terminal.
+"""SparrowMap: the LIGHT node, now for one camera or many, with a live wall.
 
     python desktop\\sparrowmap_app.py          # run it
     python desktop\\build.py                   # build SparrowMap.exe
@@ -6,20 +6,26 @@
 🚨 THIS IS THE LIGHT NODE. NO CLIP, NO HEAD, NO TORCH.
 It finds vehicles and posts a crop too small to carry a plate; the classifier
 that decides "is this a patrol car" runs at home on the project's GPU. That is
-the whole reason this can be a 60 MB download that runs on a shop PC instead of
+the whole reason this can be a small download that runs on a shop PC instead of
 a machine-learning install. Anything that wants to add the head here should
-build a second app rather than grow this one - the moment torch is a dependency,
-the audience for it disappears.
+build a second app rather than grow this one.
 
-WHY A WINDOW AT ALL. The relay already worked from a command line, and that is
-the wrong ask for the people this is aimed at: a business with a camera on the
-street and no interest in terminals. Everything here exists because it is the
-part somebody would otherwise get wrong - the stream URL, keeping the process
-alive, and finding the pages that go with the camera.
+WHY A WINDOW. The relay already worked from a command line, and that is the
+wrong ask for the people this is aimed at: a business with cameras on the
+street and no interest in terminals. The window exists so they can SEE it
+working - the live wall shows every camera at once with a box drawn on each car
+as it is tracked, and a click opens one full size. No video ever leaves this
+computer; only a plate-less crop of a detected vehicle is ever sent, and only
+for a camera that has been given an id and placed on the map.
+
+🚨 ONE DETECTOR, SHARED. The ONNX session is loaded once and every camera runs
+against it. Loading one per camera would multiply the memory on a shop PC for
+no gain - the session is safe to call from several threads.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -27,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -34,27 +41,54 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-# The BUSINESS build. Named apart from the phone/webcam node so the two
-# downloads on the release page cannot be confused for each other - one
-# is for a shop with an IP camera, the other is not.
-APP = "SparrowMap4Biz"
+# Pillow makes the preview cheap: hand the UI thread a resized array and let it
+# build the image directly, instead of PNG-encoding + base64 every frame. If it
+# is missing we fall back to the slower PNG path so the app still runs.
+try:
+    from PIL import Image as PILImage, ImageTk
+    HAVE_PIL = True
+except Exception:
+    HAVE_PIL = False
+
+APP = "SparrowMap"
 HUB_DEFAULT = "https://map.sparrowmap.com"
 CFG = Path.home() / ".sparrowmap" / "desktop.json"
 BG, PANEL, INK, DIM, LINE = "#0a0d12", "#111621", "#e6ecf5", "#8794a8", "#2a3547"
-RED, GREEN = "#ff3b47", "#3ddc97"
+RED, GREEN, AMBER = "#ff3b47", "#3ddc97", "#f5b73d"
+BOX_BGR = (97, 220, 61)                 # the green used for tracking boxes
 
 # 🚨 IMPORTED, NOT SHELLED OUT TO. Bundled by PyInstaller into one exe, there is
-# no `python -m detect.relay` to run: the interpreter IS this program. Keeping
-# the relay as a module the app imports means the exe and the command line share
-# one implementation rather than drifting into two.
+# no `python -m detect.relay` to run: the interpreter IS this program.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+# --------------------------------------------------------------------------
+# config
+# --------------------------------------------------------------------------
 def load_cfg() -> dict:
     try:
-        return json.loads(CFG.read_text(encoding="utf-8"))
+        d = json.loads(CFG.read_text(encoding="utf-8"))
     except Exception:
-        return {}
+        d = {}
+    return _migrate(d)
+
+
+def _migrate(d: dict) -> dict:
+    """Old single-camera config -> the cameras list, so an existing install
+    keeps its camera instead of starting blank."""
+    if "cameras" not in d:
+        cams = []
+        if d.get("source") or d.get("node"):
+            cams.append({
+                "id": "cam1", "name": "Camera 1",
+                "source": d.get("source", ""), "node": d.get("node", ""),
+                "token": d.get("token", ""),
+                "lat": d.get("lat", 0.0), "lon": d.get("lon", 0.0),
+            })
+        d["cameras"] = cams
+    d.setdefault("autostart", False)
+    d.setdefault("hub", HUB_DEFAULT)
+    return d
 
 
 def save_cfg(d: dict) -> None:
@@ -65,146 +99,213 @@ def save_cfg(d: dict) -> None:
         pass
 
 
-class RelayThread(threading.Thread):
-    """Runs the relay loop and reports back through a queue.
+def _new_id(existing) -> str:
+    n = 1
+    have = {c["id"] for c in existing}
+    while f"cam{n}" in have:
+        n += 1
+    return f"cam{n}"
 
-    A THREAD, not a subprocess, so the window can show what it is doing without
-    parsing text out of a pipe - and so closing the window actually stops it.
+
+# --------------------------------------------------------------------------
+# one camera
+# --------------------------------------------------------------------------
+class CameraWorker(threading.Thread):
+    """Reads one stream, detects vehicles, draws boxes for the preview, and
+    (when the camera has an id + token + location) posts a crop when a vehicle
+    leaves frame. Communicates only through the queue - never touches tkinter.
     """
 
-    def __init__(self, args, out: "queue.Queue"):
+    def __init__(self, cam: dict, shared: dict, out: "queue.Queue"):
         super().__init__(daemon=True)
-        self.args, self.out, self.stop = args, out, threading.Event()
+        self.cam, self.shared, self.out = cam, shared, out
+        self.cid = cam["id"]
+        self.stop = threading.Event()
         self.sent = 0
+        self.preview_w = 300            # the UI updates this on view change
 
-    def log(self, msg):
-        self.out.put(("log", msg))
+    def emit(self, kind, val):
+        self.out.put((kind, self.cid, val))
+
+    def _preview(self, frame, hits):
+        try:
+            import cv2
+            img = frame
+            if hits:
+                img = frame.copy()
+                for h in hits:
+                    x1, y1, x2, y2 = (int(v) for v in h["box"])
+                    cv2.rectangle(img, (x1, y1), (x2, y2), BOX_BGR, 3)
+            ht, wd = img.shape[:2]
+            w = max(120, int(self.preview_w))
+            img = cv2.resize(img, (w, max(1, int(ht * w / wd))))
+            if HAVE_PIL:
+                # hand the UI thread the RGB array; it builds the image (cheap)
+                self.emit("frame", cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            else:
+                ok, buf = cv2.imencode(".png", img)
+                if ok:
+                    self.emit("frame", base64.b64encode(buf).decode())
+        except Exception:
+            pass
 
     def run(self):
-        try:
-            from detect import relay
-        except Exception as exc:
-            self.log(f"could not load the detector: {exc}")
-            self.out.put(("state", "stopped"))
-            return
-        try:
-            import onnxruntime as ort
-            self.log("loading the detector…")
-            mp = relay.model_path(self.args["hub"])
-            sess = ort.InferenceSession(str(mp), providers=["CPUExecutionProvider"])
-            iname = sess.get_inputs()[0].name
-            relay.SIZE = int(sess.get_inputs()[0].shape[-1])
-            self.log(f"detector ready ({relay.SIZE}x{relay.SIZE})")
-        except Exception as exc:
-            self.log(f"detector failed to start: {exc}")
-            self.out.put(("state", "stopped"))
-            return
+        from detect import relay
+        sess, iname = self.shared["sess"], self.shared["iname"]
+        hub = self.shared["hub"]
+        src = self.cam["source"]
+        if isinstance(src, str) and src.strip().isdigit():
+            src = int(src.strip())
 
-        src = self.args["source"]
         cap = relay.open_stream(src)
         if cap is None:
-            self.log("could not open the camera. Check the address.")
-            self.out.put(("state", "stopped"))
+            self.emit("log", "could not open the camera - check the address")
+            self.emit("state", "error")
             return
-        self.log("watching")
-        self.out.put(("state", "running"))
+        self.emit("state", "running")
+        self.emit("log", "watching")
 
-        tracks, nid, last_send = [], 0, 0.0
+        can_post = bool(self.cam.get("node") and self.cam.get("token"))
+        # 🚨 A FIXED CAMERA SENDS NO GPS. The hub plots a fixed camera's sightings
+        # on the span it was given in Aim and uses any event GPS only to REJECT a
+        # moving phone reusing a fixed id - so posting 0,0 (the old default) made
+        # the hub think the camera was 11,000 km away and refuse every sighting
+        # with a 409. Send None and let the Aim placement rule; only pass a real
+        # value if the owner deliberately set one.
+        lat = float(self.cam["lat"]) if self.cam.get("lat") else None
+        lon = float(self.cam["lon"]) if self.cam.get("lon") else None
+        tracks, nid, last_send, last_det, last_prev = [], 0, 0.0, 0.0, 0.0
+        hits = []
         while not self.stop.is_set():
             ok, frame = cap.read()
             if not ok:
-                self.log("camera dropped; reconnecting…")
+                self.emit("log", "camera dropped; reconnecting…")
                 cap.release()
                 time.sleep(3)
                 cap = relay.open_stream(src)
                 if cap is None:
                     time.sleep(7)
                 continue
-            blob, s, ox, oy = relay.letterbox(frame)
-            hits = relay.decode(sess.run(None, {iname: blob})[0], s, ox, oy)
             now = time.time()
-            for h in hits:
-                m = next((t for t in tracks if relay.iou(t["box"], h["box"]) > 0.3), None)
-                if m is None:
-                    nid += 1
-                    m = {"id": nid, "seen": 0, "best": 0.0, "crop": None, "sent": False}
-                    tracks.append(m)
-                m.update(box=h["box"], last=now, cls=h["cls"])
-                m["seen"] += 1
-                area = (h["box"][2] - h["box"][0]) * (h["box"][3] - h["box"][1])
-                if area > m["best"]:
-                    m["best"], m["crop"] = area, relay.crop_of(frame, h["box"])
-            for t in list(tracks):
-                if now - t.get("last", 0) < relay.GONE_S:
-                    continue
-                tracks.remove(t)
-                if (t["seen"] < relay.MIN_FRAMES or not t["crop"] or t["sent"]
-                        or now - last_send < self.args["every"]):
-                    continue
-                try:
-                    r = relay.post(self.args["hub"], self.args["node"],
-                                   self.args["token"], self.args["lat"],
-                                   self.args["lon"], t["crop"], t["cls"], 0.9)
-                    last_send, t["sent"] = now, True
-                    if r.get("error"):
-                        self.log(f"hub refused: {r['error']}")
-                    else:
-                        self.sent += 1
-                        self.out.put(("sent", self.sent))
-                        self.log(f"sent a {t['cls']}")
-                except Exception as exc:
-                    self.log(f"could not send ({exc.__class__.__name__}); still watching")
+            # Detect ~10x/sec (the CPU-heavy part), reuse the last boxes for the
+            # frames in between so the video stays smooth without 10 cameras
+            # pinning the CPU.
+            if now - last_det > 0.1:
+                last_det = now
+                blob, s, ox, oy = relay.letterbox(frame)
+                hits = relay.decode(sess.run(None, {iname: blob})[0], s, ox, oy)
+                for h in hits:
+                    m = next((t for t in tracks if relay.iou(t["box"], h["box"]) > 0.3), None)
+                    if m is None:
+                        nid += 1
+                        m = {"id": nid, "seen": 0, "best": 0.0, "crop": None, "sent": False}
+                        tracks.append(m)
+                    m.update(box=h["box"], last=now, cls=h["cls"])
+                    m["seen"] += 1
+                    area = (h["box"][2] - h["box"][0]) * (h["box"][3] - h["box"][1])
+                    if area > m["best"]:
+                        m["best"], m["crop"] = area, relay.crop_of(frame, h["box"])
+                for t in list(tracks):
+                    if now - t.get("last", 0) < relay.GONE_S:
+                        continue
+                    tracks.remove(t)
+                    if not can_post or t["seen"] < relay.MIN_FRAMES or not t["crop"] \
+                            or t["sent"] or now - last_send < 5.0:
+                        continue
+                    try:
+                        r = relay.post(hub, self.cam["node"], self.cam["token"],
+                                       lat, lon, t["crop"], t["cls"], 0.9)
+                        last_send, t["sent"] = now, True
+                        if r.get("error"):
+                            self.emit("log", f"hub refused: {r['error']}")
+                        else:
+                            self.sent += 1
+                            self.emit("sent", self.sent)
+                            self.emit("log", f"sent a {t['cls']}")
+                    except urllib.error.HTTPError as e:
+                        last_send, t["sent"] = now, True
+                        detail = ""
+                        try:
+                            detail = json.loads(e.read() or b"{}").get("error", "")
+                        except Exception:
+                            pass
+                        hint = "  — no location set; open Aim to place it." if not (lat or lon) else ""
+                        self.emit("log", f"hub refused ({e.code}): {detail or e.reason}{hint}")
+                    except Exception as exc:
+                        self.emit("log", f"could not send ({exc.__class__.__name__})")
+            # Preview up to ~30 fps (the UI coalesces to the newest, and the
+            # camera's own rate is usually the real ceiling).
+            if now - last_prev > 0.033:
+                last_prev = now
+                self._preview(frame, hits)
+            time.sleep(0.005)
         cap.release()
-        self.log("stopped")
-        self.out.put(("state", "stopped"))
+        self.emit("state", "stopped")
 
 
+# --------------------------------------------------------------------------
+# the window
+# --------------------------------------------------------------------------
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP)
         self.configure(bg=BG)
-        self.geometry("560x600")
-        self.minsize(520, 560)
+        self.geometry("1000x720")
+        self.minsize(760, 520)
         self.cfg = load_cfg()
+        self.cameras = self.cfg["cameras"]
         self.q: "queue.Queue" = queue.Queue()
-        self.thread = None
-        self._build()
+        self.workers: dict = {}
+        self.shared = {"sess": None, "iname": None, "hub": self.cfg.get("hub", HUB_DEFAULT)}
+        self.tiles: dict = {}
+        self.imgs: dict = {}          # keep PhotoImage refs alive
+        self.view = ("grid", None)
+        self.model_ready = False
+        self._build_chrome()
+        self._show_grid()
         self.after(150, self._pump)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        threading.Thread(target=self._load_model, daemon=True).start()
 
-    # -- layout ----------------------------------------------------------
-    def _label(self, parent, text, size=10, color=DIM, **kw):
-        return tk.Label(parent, text=text, bg=kw.pop("bg", BG), fg=color,
-                        font=("Segoe UI", size), anchor="w", justify="left", **kw)
+    # -- model -----------------------------------------------------------
+    def _load_model(self):
+        try:
+            from detect import relay
+            import onnxruntime as ort
+            self.q.put(("banner", None, "loading the detector…"))
+            mp = relay.model_path(self.shared["hub"])
+            sess = ort.InferenceSession(str(mp), providers=["CPUExecutionProvider"])
+            relay.SIZE = int(sess.get_inputs()[0].shape[-1])
+            self.shared["sess"] = sess
+            self.shared["iname"] = sess.get_inputs()[0].name
+            self.model_ready = True
+            self.q.put(("banner", None, ""))
+            self.q.put(("ready", None, None))
+        except Exception as exc:
+            self.q.put(("banner", None, f"detector failed to load: {exc}"))
 
-    def _entry(self, parent, value=""):
-        e = tk.Entry(parent, bg="#0a0e15", fg=INK, insertbackground=INK,
-                     relief="flat", font=("Consolas", 10),
-                     highlightthickness=1, highlightbackground=LINE,
-                     highlightcolor="#3d8cff")
-        e.insert(0, value)
-        return e
-
-    def _build(self):
-        head = tk.Frame(self, bg=PANEL, height=58)
+    # -- chrome ----------------------------------------------------------
+    def _build_chrome(self):
+        head = tk.Frame(self, bg=PANEL, height=56)
         head.pack(fill="x")
         tk.Label(head, text="SPARROWMAP", bg=PANEL, fg=INK,
-                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=14, pady=(12, 0))
-        self.dot = tk.Label(head, text="●", bg=PANEL, fg=DIM, font=("Segoe UI", 13))
-        self.dot.pack(side="right", padx=(0, 6), pady=12)
-        self.state = tk.Label(head, text="stopped", bg=PANEL, fg=DIM,
-                              font=("Segoe UI", 10))
-        self.state.pack(side="right", pady=12)
-        tk.Label(self, text="This computer watches your camera. No video leaves it.",
-                 bg=PANEL, fg=DIM, font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=14, pady=(0, 10))
+                 font=("Segoe UI", 13, "bold")).pack(side="left", padx=14, pady=14)
+        self.btn_all = tk.Button(head, text="Start all", command=self._toggle_all,
+                                 bg=GREEN, fg="#0b0e13", relief="flat", cursor="hand2",
+                                 font=("Segoe UI", 10, "bold"), activebackground="#5fe8ae")
+        self.btn_all.pack(side="right", padx=(6, 14), pady=11, ipadx=6)
+        tk.Button(head, text="+ Add camera", command=self._add_dialog, bg="#141c28",
+                  fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 10),
+                  activebackground="#1b2432", activeforeground=INK
+                  ).pack(side="right", padx=6, pady=11, ipadx=4)
+        self.banner = tk.Label(self, text="", bg=PANEL, fg=AMBER,
+                               font=("Segoe UI", 9), anchor="w")
+        self.banner.pack(fill="x")
+        tk.Label(self, text="This computer watches your cameras. No video leaves it.",
+                 bg=PANEL, fg=DIM, font=("Segoe UI", 9), anchor="w"
+                 ).pack(fill="x", padx=14, pady=(0, 8))
 
-        # 🚨 THE NAV IS PACKED BEFORE THE BODY, AND THAT IS NOT COSMETIC.
-        # tkinter gives space to widgets in pack order, so a body packed with
-        # expand=True first takes everything and a later side="bottom" strip is
-        # pushed off the window entirely. That is exactly what happened: the row
-        # of links to every mode - the reason this is an app and not just a
-        # relay - was invisible in the built exe.
         nav = tk.Frame(self, bg=PANEL)
         nav.pack(fill="x", side="bottom")
         for label, path in (("Map", "/"), ("Driving", "/drive"), ("Review", "/rv"),
@@ -212,172 +313,269 @@ class App(tk.Tk):
             tk.Button(nav, text=label, command=lambda p=path: self._open(p),
                       bg=PANEL, fg=GREEN, relief="flat", cursor="hand2",
                       font=("Segoe UI", 9, "bold"), activebackground="#1b2432",
-                      activeforeground=INK).pack(side="left", expand=True,
-                                                 fill="x", pady=8)
+                      activeforeground=INK).pack(side="left", expand=True, fill="x", pady=8)
 
-        body = tk.Frame(self, bg=BG)
-        body.pack(fill="both", expand=True, padx=14)
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(fill="both", expand=True)
 
-        self._label(body, "Camera stream address  (rtsp://… or 0 for a USB webcam)").pack(fill="x", pady=(8, 3))
-        self.e_src = self._entry(body, self.cfg.get("source", ""))
-        self.e_src.pack(fill="x", ipady=5)
+    def _clear_body(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+        self.tiles.clear()
 
-        row = tk.Frame(body, bg=BG); row.pack(fill="x", pady=(10, 0))
-        left = tk.Frame(row, bg=BG); left.pack(side="left", fill="x", expand=True)
-        right = tk.Frame(row, bg=BG); right.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        self._label(left, "Camera id").pack(fill="x", pady=(0, 3))
-        self.e_node = self._entry(left, self.cfg.get("node", "")); self.e_node.pack(fill="x", ipady=5)
-        self._label(right, "Token").pack(fill="x", pady=(0, 3))
-        self.e_tok = self._entry(right, self.cfg.get("token", "")); self.e_tok.pack(fill="x", ipady=5)
+    # -- grid (the wall) -------------------------------------------------
+    def _show_grid(self):
+        self.view = ("grid", None)
+        self._clear_body()
+        if not self.cameras:
+            tk.Label(self.body, text="No cameras yet.", bg=BG, fg=DIM,
+                     font=("Segoe UI", 12)).pack(pady=(40, 6))
+            tk.Button(self.body, text="Set one up  →", command=lambda: self._open("/IPCamera"),
+                      bg="#141c28", fg=INK, relief="flat", cursor="hand2",
+                      font=("Segoe UI", 10), activebackground="#1b2432",
+                      activeforeground=INK).pack()
+            return
+        n = len(self.cameras)
+        cols = 1 if n == 1 else (2 if n <= 4 else 3)
+        grid = tk.Frame(self.body, bg=BG)
+        grid.pack(fill="both", expand=True, padx=10, pady=10)
+        for i in range(cols):
+            grid.columnconfigure(i, weight=1, uniform="cam")
+        for idx, cam in enumerate(self.cameras):
+            self._make_tile(grid, cam, idx // cols, idx % cols)
 
-        row2 = tk.Frame(body, bg=BG); row2.pack(fill="x", pady=(10, 0))
-        l2 = tk.Frame(row2, bg=BG); l2.pack(side="left", fill="x", expand=True)
-        r2 = tk.Frame(row2, bg=BG); r2.pack(side="left", fill="x", expand=True, padx=(10, 0))
-        self._label(l2, "Latitude").pack(fill="x", pady=(0, 3))
-        self.e_lat = self._entry(l2, str(self.cfg.get("lat", ""))); self.e_lat.pack(fill="x", ipady=5)
-        self._label(r2, "Longitude").pack(fill="x", pady=(0, 3))
-        self.e_lon = self._entry(r2, str(self.cfg.get("lon", ""))); self.e_lon.pack(fill="x", ipady=5)
+    def _make_tile(self, parent, cam, r, c):
+        cid = cam["id"]
+        tile = tk.Frame(parent, bg=PANEL, highlightthickness=1,
+                        highlightbackground=LINE)
+        tile.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
+        parent.rowconfigure(r, weight=1)
+        img = tk.Label(tile, bg="#000000", fg=DIM, cursor="hand2",
+                       text="● connecting…", font=("Segoe UI", 9))
+        img.pack(fill="both", expand=True, padx=1, pady=1)
+        img.bind("<Button-1>", lambda e, i=cid: self._show_single(i))
+        img.bind("<Configure>", lambda e, i=cid: self._fit(i, e.width, e.height))
+        bar = tk.Frame(tile, bg=PANEL)
+        bar.pack(fill="x")
+        name = tk.Label(bar, text=cam.get("name", cid), bg=PANEL, fg=INK,
+                        font=("Segoe UI", 9, "bold"), anchor="w")
+        name.pack(side="left", padx=8, pady=5)
+        status = tk.Label(bar, text="stopped", bg=PANEL, fg=DIM,
+                          font=("Segoe UI", 9), anchor="e")
+        status.pack(side="right", padx=8)
+        self.tiles[cid] = {"img": img, "status": status, "w": 300}
+        if cid in self.workers and self.workers[cid].is_alive():
+            self.workers[cid].preview_w = 300
 
-        tk.Button(body, text="I don't have a camera id yet  —  set one up",
-                  command=lambda: self._open("/IPCamera"), bg="#141c28", fg=INK,
-                  relief="flat", font=("Segoe UI", 9), cursor="hand2",
-                  activebackground="#1b2432", activeforeground=INK
-                  ).pack(fill="x", pady=(10, 0), ipady=6)
+    # -- single view -----------------------------------------------------
+    def _show_single(self, cid):
+        cam = next((c for c in self.cameras if c["id"] == cid), None)
+        if not cam:
+            return
+        self.view = ("single", cid)
+        self._clear_body()
+        top = tk.Frame(self.body, bg=BG)
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Button(top, text="← All cameras", command=self._show_grid, bg="#141c28",
+                  fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 10),
+                  activebackground="#1b2432", activeforeground=INK).pack(side="left")
+        tk.Label(top, text=cam.get("name", cid), bg=BG, fg=INK,
+                 font=("Segoe UI", 12, "bold")).pack(side="left", padx=12)
+        running = cid in self.workers and self.workers[cid].is_alive()
+        self.single_btn = tk.Button(
+            top, text="Stop" if running else "Watch", command=lambda: self._toggle_one(cid),
+            bg=("#141c28" if running else GREEN), fg=(INK if running else "#0b0e13"),
+            relief="flat", cursor="hand2", font=("Segoe UI", 10, "bold"))
+        self.single_btn.pack(side="right")
+        tk.Button(top, text="Remove", command=lambda: self._remove(cid), bg="#141c28",
+                  fg=RED, relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                  activebackground="#1b2432").pack(side="right", padx=8)
 
-        btns = tk.Frame(body, bg=BG); btns.pack(fill="x", pady=(14, 0))
-        self.b_start = tk.Button(btns, text="Start watching", command=self._toggle,
-                                 bg=RED, fg="#0b0e13", relief="flat", cursor="hand2",
-                                 font=("Segoe UI", 11, "bold"), activebackground="#ff6b74")
-        self.b_start.pack(side="left", fill="x", expand=True, ipady=9)
-        tk.Button(btns, text="Test camera", command=self._test, bg="#141c28", fg=INK,
-                  relief="flat", font=("Segoe UI", 10), cursor="hand2",
-                  activebackground="#1b2432", activeforeground=INK
-                  ).pack(side="left", padx=(8, 0), ipady=9, ipadx=12)
+        img = tk.Label(self.body, bg="#000000", fg=DIM, text="● connecting…",
+                       font=("Segoe UI", 10))
+        img.pack(fill="both", expand=True, padx=12, pady=6)
+        img.bind("<Configure>", lambda e, i=cid: self._fit(i, e.width, e.height))
+        status = tk.Label(self.body, text="", bg=BG, fg=DIM, font=("Segoe UI", 9), anchor="w")
+        status.pack(fill="x", padx=12)
+        logw = tk.Text(self.body, height=6, bg="#080b10", fg="#b9c6d8", relief="flat",
+                       font=("Consolas", 9), highlightthickness=1,
+                       highlightbackground=LINE, wrap="word")
+        logw.pack(fill="x", padx=12, pady=(4, 10))
+        logw.configure(state="disabled")
+        self.tiles[cid] = {"img": img, "status": status, "log": logw, "w": 760}
+        if running:
+            self.workers[cid].preview_w = 760
 
-        self.autostart = tk.BooleanVar(value=bool(self.cfg.get("autostart")))
-        tk.Checkbutton(body, text="Start automatically when this computer starts",
-                       variable=self.autostart, command=self._autostart,
-                       bg=BG, fg=DIM, selectcolor=PANEL, activebackground=BG,
-                       activeforeground=INK, font=("Segoe UI", 9), anchor="w"
-                       ).pack(fill="x", pady=(10, 0))
+    def _fit(self, cid, w, h):
+        """Size the preview to fill its tile (width, capped so a ~16:9 frame
+        still fits the height), and rescale live as the window resizes."""
+        w = max(160, min(int(w), int(h * 16 / 9)))
+        t = self.tiles.get(cid)
+        if t:
+            t["w"] = w
+        wk = self.workers.get(cid)
+        if wk and wk.is_alive():
+            wk.preview_w = w
 
-        self._label(body, "Sent nothing yet", color=DIM).pack(fill="x", pady=(12, 2))
-        self.lbl_sent = body.winfo_children()[-1]
+    # -- start / stop ----------------------------------------------------
+    def _start_one(self, cam):
+        if not self.model_ready:
+            self.banner.configure(text="still loading the detector…")
+            return
+        cid = cam["id"]
+        if cid in self.workers and self.workers[cid].is_alive():
+            return
+        w = CameraWorker(cam, self.shared, self.q)
+        if cid in self.tiles:
+            w.preview_w = self.tiles[cid]["w"]
+        self.workers[cid] = w
+        w.start()
 
-        self.log = tk.Text(body, height=9, bg="#080b10", fg="#b9c6d8", relief="flat",
-                           font=("Consolas", 9), highlightthickness=1,
-                           highlightbackground=LINE, wrap="word")
-        self.log.pack(fill="both", expand=True, pady=(4, 10))
-        self.log.configure(state="disabled")
+    def _stop_one(self, cid):
+        w = self.workers.get(cid)
+        if w and w.is_alive():
+            w.stop.set()
 
+    def _toggle_one(self, cid):
+        cam = next((c for c in self.cameras if c["id"] == cid), None)
+        if not cam:
+            return
+        if cid in self.workers and self.workers[cid].is_alive():
+            self._stop_one(cid)
+        else:
+            self._start_one(cam)
 
-    # -- actions ---------------------------------------------------------
+    def _toggle_all(self):
+        any_running = any(w.is_alive() for w in self.workers.values())
+        if any_running:
+            for cid in list(self.workers):
+                self._stop_one(cid)
+            self.btn_all.configure(text="Start all", bg=GREEN)
+        else:
+            for cam in self.cameras:
+                self._start_one(cam)
+            self.btn_all.configure(text="Stop all", bg="#141c28", fg=INK)
+
+    # -- add / remove ----------------------------------------------------
+    def _add_dialog(self):
+        d = tk.Toplevel(self)
+        d.title("Add a camera")
+        d.configure(bg=BG)
+        d.geometry("440x400")
+        d.transient(self)
+        fields = {}
+        rows = [("name", "Name (e.g. Front door)"),
+                ("source", "Stream address  (rtsp://…  or  0 for a USB webcam)"),
+                ("node", "Camera id   (optional - needed only to post to the map)"),
+                ("token", "Token   (optional)"),
+                ("lat", "Latitude   (optional)"),
+                ("lon", "Longitude  (optional)")]
+        for key, label in rows:
+            tk.Label(d, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9),
+                     anchor="w").pack(fill="x", padx=16, pady=(10, 2))
+            e = tk.Entry(d, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+                         font=("Consolas", 10), highlightthickness=1,
+                         highlightbackground=LINE, highlightcolor="#3d8cff")
+            e.pack(fill="x", padx=16, ipady=4)
+            fields[key] = e
+
+        def save():
+            cam = {
+                "id": _new_id(self.cameras),
+                "name": fields["name"].get().strip() or f"Camera {len(self.cameras)+1}",
+                "source": fields["source"].get().strip(),
+                "node": fields["node"].get().strip(),
+                "token": fields["token"].get().strip(),
+                "lat": float(fields["lat"].get() or 0) if fields["lat"].get().strip() else 0.0,
+                "lon": float(fields["lon"].get() or 0) if fields["lon"].get().strip() else 0.0,
+            }
+            if not cam["source"]:
+                return messagebox.showerror(APP, "Enter the camera's stream address.")
+            self.cameras.append(cam)
+            self._persist()
+            d.destroy()
+            self._show_grid()
+            self._start_one(cam)
+
+        tk.Button(d, text="Add", command=save, bg=GREEN, fg="#0b0e13", relief="flat",
+                  cursor="hand2", font=("Segoe UI", 10, "bold")
+                  ).pack(fill="x", padx=16, pady=16, ipady=6)
+
+    def _remove(self, cid):
+        cam = next((c for c in self.cameras if c["id"] == cid), None)
+        if not cam:
+            return
+        if not messagebox.askyesno(APP, f"Remove {cam.get('name', cid)}?"):
+            return
+        self._stop_one(cid)
+        self.cameras = [c for c in self.cameras if c["id"] != cid]
+        self._persist()
+        self._show_grid()
+
+    def _persist(self):
+        self.cfg["cameras"] = self.cameras
+        save_cfg(self.cfg)
+
+    # -- plumbing --------------------------------------------------------
     def _hub(self):
         return self.cfg.get("hub", HUB_DEFAULT)
 
     def _open(self, path):
         webbrowser.open(self._hub().rstrip("/") + path)
 
-    def _say(self, msg):
-        self.log.configure(state="normal")
-        self.log.insert("end", time.strftime("%H:%M:%S ") + msg + "\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+    def _say(self, cid, msg):
+        t = self.tiles.get(cid)
+        if t and "log" in t:
+            t["log"].configure(state="normal")
+            t["log"].insert("end", time.strftime("%H:%M:%S ") + msg + "\n")
+            t["log"].see("end")
+            t["log"].configure(state="disabled")
 
-    def _values(self):
-        src = self.e_src.get().strip()
-        # A bare number means a USB webcam, which cv2 wants as an int.
-        if src.isdigit():
-            src = int(src)
-        return {"source": src, "node": self.e_node.get().strip(),
-                "token": self.e_tok.get().strip(), "hub": self._hub(),
-                "every": 5.0,
-                "lat": float(self.e_lat.get() or 0), "lon": float(self.e_lon.get() or 0)}
-
-    def _test(self):
-        try:
-            v = self._values()
-        except ValueError:
-            return messagebox.showerror(APP, "Latitude and longitude must be numbers.")
-        if not v["source"] and v["source"] != 0:
-            return messagebox.showerror(APP, "Enter the camera address first.")
-        self._say("testing the camera…")
-
-        def work():
-            try:
-                from detect import relay
-                cap = relay.open_stream(v["source"])
-                if cap is None:
-                    self.q.put(("log", "could not open it. Check the address, the "
-                                       "username and password, and that RTSP is on."))
-                    return
-                ok, frame = cap.read()
-                cap.release()
-                if not ok:
-                    self.q.put(("log", "it opened but sent no pictures. Try the "
-                                       "camera's SUB stream."))
-                    return
-                self.q.put(("log", f"camera works: {frame.shape[1]}x{frame.shape[0]}"))
-            except Exception as exc:
-                self.q.put(("log", f"test failed: {exc}"))
-        threading.Thread(target=work, daemon=True).start()
-
-    def _toggle(self):
-        if self.thread and self.thread.is_alive():
-            self.thread.stop.set()
-            self.b_start.configure(text="Stopping…", state="disabled")
+    def _render(self, cid, val):
+        t = self.tiles.get(cid)
+        if not t:
             return
         try:
-            v = self._values()
-        except ValueError:
-            return messagebox.showerror(APP, "Latitude and longitude must be numbers.")
-        if not v["node"] or not v["token"]:
-            return messagebox.showerror(
-                APP, "This camera needs an id and a token.\n\n"
-                     "Use the button below the boxes to create one.")
-        self.cfg.update({k: v[k] for k in ("node", "token", "lat", "lon")})
-        self.cfg["source"] = self.e_src.get().strip()
-        save_cfg(self.cfg)
-        self.thread = RelayThread(v, self.q)
-        self.thread.start()
-        self.b_start.configure(text="Stop", bg="#141c28", fg=INK)
-
-    def _autostart(self):
-        on = self.autostart.get()
-        self.cfg["autostart"] = on
-        save_cfg(self.cfg)
-        try:
-            msg = set_autostart(on)
-            self._say(msg)
-        except Exception as exc:
-            self._say(f"could not change startup: {exc}")
-            self.autostart.set(not on)
+            if HAVE_PIL and not isinstance(val, str):
+                self.imgs[cid] = ImageTk.PhotoImage(PILImage.fromarray(val))
+            else:
+                self.imgs[cid] = tk.PhotoImage(data=val)
+            t["img"].configure(image=self.imgs[cid], text="")
+        except Exception:
+            pass
 
     def _pump(self):
+        frames = {}                       # keep only the newest frame per camera
         try:
             while True:
-                kind, val = self.q.get_nowait()
-                if kind == "log":
-                    self._say(val)
-                elif kind == "sent":
-                    self.lbl_sent.configure(
-                        text=f"Sent {val} vehicle{'s' if val != 1 else ''} to the map",
-                        fg=GREEN)
-                elif kind == "state":
-                    running = val == "running"
-                    self.state.configure(text="watching" if running else "stopped",
-                                         fg=GREEN if running else DIM)
-                    self.dot.configure(fg=GREEN if running else DIM)
-                    if not running:
-                        self.b_start.configure(text="Start watching", bg=RED,
-                                               fg="#0b0e13", state="normal")
+                kind, cid, val = self.q.get_nowait()
+                if kind == "frame":
+                    frames[cid] = val
+                    continue
+                if kind == "banner":
+                    self.banner.configure(text=val or "")
+                elif kind == "ready":
+                    if self.cfg.get("autostart"):
+                        self._toggle_all()
+                elif cid in self.tiles:
+                    t = self.tiles[cid]
+                    if kind == "state":
+                        col = {"running": GREEN, "error": RED}.get(val, DIM)
+                        t["status"].configure(text=val, fg=col)
+                        self._say(cid, val)
+                    elif kind == "sent":
+                        t["status"].configure(text=f"sent {val}", fg=GREEN)
+                    elif kind == "log":
+                        self._say(cid, val)
         except queue.Empty:
             pass
-        self.after(150, self._pump)
+        for cid, val in frames.items():
+            self._render(cid, val)
+        self.after(33, self._pump)      # ~30 fps UI repaint
 
     def _close(self):
-        if self.thread and self.thread.is_alive():
-            self.thread.stop.set()
+        for w in self.workers.values():
+            w.stop.set()
         self.destroy()
 
 
@@ -385,14 +583,6 @@ class App(tk.Tk):
 # start with the computer
 # --------------------------------------------------------------------------
 def set_autostart(on: bool) -> str:
-    """Run at login, using whatever the platform actually honours.
-
-    ⚠️ THE REGISTRY Run KEY, NOT A SERVICE. A Windows service runs as SYSTEM in
-    session 0, which has no desktop and frequently no route to a camera on the
-    user's network - and this app has a window. Run-at-login is what matches
-    what the thing actually is: a program the owner started, that comes back
-    after a reboot without them thinking about it.
-    """
     target = sys.executable
     args = "" if getattr(sys, "frozen", False) else f' "{Path(__file__).resolve()}"'
     cmd = f'"{target}"{args}'
@@ -412,7 +602,6 @@ def set_autostart(on: bool) -> str:
             return "will no longer start with Windows"
         finally:
             winreg.CloseKey(key)
-    # Linux: a user unit, so it needs no root and stops when the user logs out.
     unit = Path.home() / ".config" / "systemd" / "user" / "sparrowmap.service"
     if on:
         unit.parent.mkdir(parents=True, exist_ok=True)
