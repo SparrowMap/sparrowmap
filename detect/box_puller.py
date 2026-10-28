@@ -50,6 +50,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -186,7 +187,6 @@ def pull(args) -> tuple[Path, bool]:
     """
     if args.inbox:
         return Path(args.inbox), True
-    tmp = Path(tempfile.mkdtemp(prefix="box_inbox_"))
     # 🚨 "COULD NOT REACH THE BOX" AND "THE BOX HAS NOTHING" LOOKED IDENTICAL.
     #
     # The exit code was never checked and the remote command ends `|| true`, so
@@ -221,11 +221,17 @@ def pull(args) -> tuple[Path, bool]:
         raise BoxUnreachable(
             f"could not read the inbox from {args.box} "
             f"(ssh exit {proc.returncode}): {err or 'no output'}")
+    # 🐞 10-27: the temp dir is made only NOW, after the read succeeded. It used
+    # to be made first, and every BoxUnreachable raised above left it behind -
+    # run_once's finally never ran because pull() never returned. ~10 a day,
+    # one per network blip: 1,519 orphaned box_inbox_* dirs by 10-27.
+    tmp = Path(tempfile.mkdtemp(prefix="box_inbox_"))
     try:
         subprocess.run(["tar", "-C", str(tmp), "-xf", "-"],
                        input=proc.stdout, capture_output=True, timeout=60,
                        check=True, creationflags=_NO_WINDOW)
     except Exception as exc:                                  # noqa: BLE001
+        shutil.rmtree(tmp, ignore_errors=True)
         # An unreadable archive is also not an empty inbox.
         raise BoxUnreachable(f"inbox transferred but could not be extracted: {exc}")
     return tmp, False
