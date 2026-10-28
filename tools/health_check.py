@@ -190,10 +190,20 @@ def check() -> dict:
         # A camera that heartbeats while its pipeline is wedged is the failure
         # that hid for 18 hours once. The beat now depends on real work, so a
         # fresh beat with a long-dead last_seen is worth surfacing anyway.
+        #
+        # 🚨 NOT FOR PUBLIC TRAFFIC CAMERAS (10-27). A polled snapshot camera going
+        # hours without a vehicle above the 120 px bar is its normal state, and
+        # with ~13,000 of them online this line fired ~6,300 times EVERY run: the
+        # check was permanently red (so a real stall could never stand out) and
+        # each run wrote 2 MB to health.log (16.8 GB by 10-27). They are counted
+        # once instead, as information.
         if rec["online"] and seen and (now - seen) > 3 * 3600 and rec["sightings"]:
-            out["problems"].append(
-                f"{name}: online but no sighting for "
-                f"{round((now - seen) / 3600, 1)}h")
+            if n.get("kind") == "public_cam":
+                out["quiet_public"] = out.get("quiet_public", 0) + 1
+            else:
+                out["problems"].append(
+                    f"{name}: online but no sighting for "
+                    f"{round((now - seen) / 3600, 1)}h")
 
         # --- enrolled and never used --------------------------------------
         if beat is None and not rec["sightings"]:
@@ -262,7 +272,11 @@ def main() -> None:
         print(f"  {mark['event']} {e}")
     for p in r["problems"]:
         print(f"  {mark['problem']} {p}")
-    for n in r["nodes"]:
+    if r.get("quiet_public"):
+        print(f"  {r['quiet_public']} public traffic cameras online with no sighting for 3h+ (normal for snapshots)")
+    # The roll-call is for a person running this by hand. The scheduled run
+    # (--quiet, every 10 minutes) printed all ~20,000 cameras each time.
+    for n in ([] if args.quiet else r["nodes"]):
         dot = mark["on"] if n["online"] else mark["off"]
         age = f"{n['beat_age']}s" if n["beat_age"] is not None else "never"
         print(f"  {dot} {n['name'][:26]:26} {n['kind'] or '?':6} "
