@@ -157,15 +157,36 @@ def delete(bid: str) -> bool:
 
 
 def sweep(now_ts: Optional[float] = None) -> int:
-    """Destroy reports nobody dealt with in time. Runs on FILES, not records."""
+    """Destroy reports nobody dealt with in time. Returns how many REPORTS went.
+
+    Runs on FILES, not records, so a damaged .json cannot keep its picture alive.
+    A report is its .json plus its .jpg, aged together by the report's own `ts`
+    (the file's mtime only when the .json is unreadable or missing). mtime alone
+    was the wrong clock: closing a report rewrites its .json, so the picture went
+    at 30 days and the record lingered another 30. Called by hub._janitor.
+    """
     if not core.BUGS.exists():
         return 0
     cut = (now_ts if now_ts is not None else time.time()) - core.BUGS_TTL_S
-    gone = 0
+    groups: dict = {}
     for p in core.BUGS.iterdir():
+        if p.is_file():
+            groups.setdefault(p.stem, []).append(p)
+    gone = 0
+    for stem, files in groups.items():
         try:
-            if p.is_file() and p.stat().st_mtime < cut:
-                p.unlink(missing_ok=True)
+            born = None
+            j = core.BUGS / f"{stem}.json"
+            if j.exists():
+                try:
+                    born = float(json.loads(j.read_text(encoding="utf-8"))["ts"])
+                except Exception:
+                    born = None
+            if born is None:
+                born = min(f.stat().st_mtime for f in files)
+            if born < cut:
+                for f in files:
+                    f.unlink(missing_ok=True)
                 gone += 1
         except Exception:
             continue

@@ -183,8 +183,10 @@ The application is now the harder half. The usual way in is the machine.
 
 * automated scanners within hours of DNS resolving - they are looking for
   `/wp-admin`, `/.env`, `/.git`. Make sure `.git` is not served;
-* people trying `/api/enroll` to plant fake cameras - rate limited, and
-  `auto_approve_nodes: false` means a new node posts nothing until approved;
+* people trying `/api/enroll` to plant fake cameras - rate limited. The live
+  box runs `auto_approve_nodes: true` (Matthew's call 2026-10-28), so a new node
+  posts at once and a fake one is removed by revoking it; `false` would hold
+  every new node until approved;
 * attempts to POST false police sightings - every submission is attributed to
   a node token, so the fix is revoking one node, not rebuilding the map;
 * someone framing the site to trick a click - blocked;

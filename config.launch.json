@@ -43,12 +43,15 @@
   "public_mirror": true,
 
   "_auto_approve_nodes": [
-    "Off. Anyone who finds /api/enroll can register a camera; on the LAN that",
-    "is the owner, on the internet it is anyone. New nodes arrive 'paused' and",
-    "post nothing until approved by hand. A volunteer network still needs a",
-    "front door, but it should not be unlocked."
+    "ON, matching the live box (Matthew's decision 2026-10-28: intended). A new",
+    "camera posts the moment it enrols, so a volunteer is on the map without",
+    "waiting for the operator. The cost: anyone who finds /api/enroll can add a",
+    "camera, so a bad one is dealt with after the fact (revoke_node.py, owner",
+    "/api/node/remove). This file is the deploy default (DEPLOY.md copies it to",
+    "config.json), so a rebuilt box keeps the behaviour it has today. Set false",
+    "to make new cameras arrive 'paused' (tools/approve_node.py lets one in)."
   ],
-  "auto_approve_nodes": false,
+  "auto_approve_nodes": true,
 
   "_publish_public_tier": [
     "Start OFF on the public box. Turn it on once the head has run there for a",

@@ -124,8 +124,9 @@ makes a public claim.
    would retract, it is not ready - `data/models/vehicle_head.npz` is the only
    file that has to move to change its mind.
 4. **`publish_public_tier: true`.** Now the map asserts.
-5. **Invite people.** `auto_approve_nodes: false` means a new camera posts
-   nothing until you approve it, so growth stays deliberate.
+5. **Invite people.** config.launch.json ships `auto_approve_nodes: true` (the
+   live box's setting since 2026-10-28), so a new camera posts at once; set it
+   false if every new camera should wait for your approval.
 
 ---
 

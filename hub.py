@@ -5976,6 +5976,15 @@ def _janitor() -> None:
                 print(f"[janitor] purged {rep}")
         except Exception:
             traceback.print_exc()
+        try:
+            # Bug reports (and their screenshots, which can hold the reporter's
+            # own camera key) live 30 days. bugs.sweep() existed since 08-15 but
+            # nothing called it, so none ever left; Matthew turned it on 10-28.
+            n = bugs.sweep()
+            if n:
+                print(f"[janitor] {n} bug report(s) older than 30 days deleted", flush=True)
+        except Exception:
+            traceback.print_exc()
         time.sleep(600)
 
 

@@ -5,9 +5,10 @@
 
 WHY THIS EXISTS
 
-The live box runs with `auto_approve_nodes: false` (config.launch.json): anyone
-can reach /api/enroll, so a new camera arrives `paused` and posts nothing until
-the operator lets it in. Until 10-27 the only ways to do that were a bulk tool
+With `auto_approve_nodes: false` anyone can reach /api/enroll, so a new camera
+arrives `paused` and posts nothing until the operator lets it in. (The live box
+runs with it TRUE since Matthew's 10-28 decision, so there this tool is only for a
+camera that was paused some other way.) Until 10-27 the only ways to do that were a bulk tool
 built for thousands of traffic cameras (bulk_enrol_cams.py) or hand-typed SQL on
 the box. Written for the WGXA Dublin GA webcam (bug report 013), the first
 single public webcam added since; the opposite of revoke_node.py.
