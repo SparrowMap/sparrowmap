@@ -168,6 +168,16 @@ def enroll(name: str, lat: float, lon: float, pubkey: Optional[str] = None,
     moved_from = None
     if node_id:
         _prior = db.node(nid)
+        # 🚨 A REVOKED CAMERA STAYS REVOKED (10-27). revoke_node.py sets
+        # token=NULL so the seized key dies - and the token check just below
+        # only runs when a token EXISTS. So anyone holding nothing but the
+        # node id, which the public map prints, could re-enrol it: a fresh
+        # token, a new name, status flipped from 'revoked' back to live
+        # (auto-approve on). Reproduced on the mirror before this line. The
+        # holder of the seized phone is exactly who that let back in.
+        if _prior and _prior.get("status") == "revoked":
+            raise NodeAuthError("this camera was revoked; it cannot be re-enrolled. "
+                                "Add a new camera instead.")
         if _prior and _prior.get("token"):
             if not token or not secrets.compare_digest(str(_prior["token"]),
                                                        str(token)):

@@ -691,9 +691,10 @@ def upsert_node(n: dict) -> None:
             -- 🚨 A RE-ENROL MUST NOT UNDO AN OWNER'S REMOVAL. The camera app and
             -- /aim re-save placements through here with status 'active', which
             -- would quietly put a camera its owner took down back on the map.
-            -- Only restore_node() brings a removed camera back.
+            -- Only restore_node() brings a removed camera back. A REVOKED one
+            -- never comes back this way either (nodes.enroll refuses it first).
             kind=excluded.kind,
-            status=CASE WHEN nodes.status='removed' THEN nodes.status ELSE excluded.status END,
+            status=CASE WHEN nodes.status IN ('removed','revoked') THEN nodes.status ELSE excluded.status END,
             contact=excluded.contact,
             span_lat1=excluded.span_lat1, span_lon1=excluded.span_lon1,
             span_lat2=excluded.span_lat2, span_lon2=excluded.span_lon2,
