@@ -205,6 +205,11 @@ def _select(spec: dict) -> str:
         pre = (f"$own = @(Get-NetTCPConnection -LocalPort {spec['port']} -State Listen "
                f"-ErrorAction SilentlyContinue | ForEach-Object {{ $_.OwningProcess }}); ")
         where += " -and $own -contains $_.ProcessId"
+    # ⚠️ Callers that need a property wrap this in $( ), NEVER ( ): with a port
+    # it is two statements ($own = ...; Get-CimInstance ...), which plain
+    # parentheses cannot hold. That returned nothing on 10-27, so the restart
+    # fell back to python.exe (a console window) and "did NOT come back" was
+    # reported over a hub that had come back.
     return (pre + "Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" | "
             f"Where-Object {{ {where} }}")
 
@@ -249,7 +254,7 @@ def _came_up(name: str, spec: dict, wait_s: int = 12) -> bool:
     deadline = time.time() + wait_s
     seen_proc = False
     while time.time() < deadline:
-        got = _ps(f"({_select(spec)} | Measure-Object).Count")
+        got = _ps(f"$({_select(spec)} | Measure-Object).Count")
         if (got or "0").strip() not in ("", "0"):
             seen_proc = True
             if not port:
@@ -321,7 +326,7 @@ def sync_local(a) -> None:
         # The running process already knows the right answer, so ask it before
         # stopping it. sys.executable stays only as the fallback for a service
         # that was not running to begin with.
-        cmd = _ps(f"({_select(spec)} | Select-Object -First 1).CommandLine")
+        cmd = _ps(f"$({_select(spec)} | Select-Object -First 1).CommandLine")
         exe = sys.executable
         if cmd:
             head = cmd.split(".exe", 1)[0] + ".exe"
