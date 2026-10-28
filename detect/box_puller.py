@@ -543,12 +543,19 @@ def main() -> None:
                          "untouched. Set equal to --interval to disable.")
     ap.add_argument("--limit", type=int, default=0,
                     help="process at most N crops this run (0 = all)")
+    ap.add_argument("--log", metavar="PATH",
+                    help="write to this file, rotated by size (rotlog.py), instead of "
+                         "stdout. A shell redirect grew box_puller.log to 1.4 GB.")
     ap.add_argument("--dry-run", action="store_true",
                     help="score and print, but neither publish nor delete")
     ap.add_argument("--singleton", action="store_true",
                     help="exit quietly if another copy is already running, so a "
                          "scheduled task can double as a supervisor")
     args = ap.parse_args()
+    if args.log:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from rotlog import redirect
+        redirect(args.log)
 
     # 🚨 THE LOCK IS WHAT LETS THE 5-MINUTE TASK BECOME A WATCHDOG.
     #

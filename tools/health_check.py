@@ -245,9 +245,16 @@ def check() -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--log", metavar="PATH",
+                    help="write to this file, rotated by size (rotlog.py), instead of "
+                         "stdout. The scheduled task uses it: a shell redirect grew "
+                         "health.log to 16.8 GB.")
     ap.add_argument("--quiet", action="store_true",
                     help="print only when something changed or broke")
     args = ap.parse_args()
+    if args.log:
+        from rotlog import redirect
+        redirect(args.log)
 
     mark = setup_output()
     r = check()

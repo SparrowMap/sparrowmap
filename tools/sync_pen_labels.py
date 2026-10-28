@@ -47,7 +47,8 @@ from core import DATA  # noqa: E402
 import labelbank       # noqa: E402
 
 BANK = DATA / "training"
-LOG = DATA.parent / "logs" / "box_puller.log"
+LOG = DATA.parent / "logs" / "box_puller.log"          # the old shell-redirect log (kept, not rotated)
+ROT_LOG = DATA.parent / "logs" / "box_puller.out.log"  # rotated by size since 10-27 (rotlog.py)
 # sid -> "remote_<day>/<stem>" for every crop already found. The runner kills
 # this step whenever BeamNG starts and re-runs it later; without this file every
 # re-run repeated the whole search (10-07 night: 8 h re-finding crops already
@@ -106,7 +107,10 @@ def ts_of(sid: int, anchors: list) -> float | None:
 def parse_log(want: set) -> dict:
     """sid -> (cycle_end_hms, prev_end_hms, k, n_printed) for wanted sids."""
     found, cur, prev = {}, [], None
-    with open(LOG, "r", encoding="utf-8", errors="replace") as f:
+    from rotlog import chain
+    # Oldest first: the old single log, then the rotated files, then the live one.
+    for path in ([LOG] if LOG.exists() else []) + chain(ROT_LOG):
+      with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             m = CROP.match(line)
             if m:

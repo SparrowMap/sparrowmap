@@ -65,7 +65,7 @@ WATCH = {
 # the port it listens on.
 PORTS = {"hub.py": 8150}
 # A component whose process may be invisible (elevated) but whose log proves it is alive.
-LOGS = {"box_puller": "logs/box_puller.log"}
+LOGS = {"box_puller": ["logs/box_puller.out.log", "logs/box_puller.log"]}   # rotated (10-27), then the old one
 
 
 def _port_owner(port: int) -> str:
@@ -142,8 +142,8 @@ def main() -> int:
             # nothing and was reported NOT RUNNING while its log was being written
             # every few seconds. Its log is honest evidence of life. Its CODE AGE
             # cannot be read from here, so say that rather than "current".
-            lp = ROOT / LOGS[name]
-            age = (time.time() - lp.stat().st_mtime) if lp.exists() else None
+            ages = [time.time() - (ROOT / f).stat().st_mtime for f in LOGS[name] if (ROOT / f).exists()]
+            age = min(ages) if ages else None
             if age is not None and age < 600:
                 print(f"  {name:<14} RUNNING (process hidden: elevated) - log written "
                       f"{round(age)}s ago; its code age cannot be checked from here, "
