@@ -1559,9 +1559,14 @@ function drawSpans(spans) {
     // because online was inferred from traffic. A camera can now say it is
     // watching an empty street.
     const seenAgo = c.last_seen ? ago(c.last_seen) + ' ago' : 'never';
-    const status = live
-      ? `<b style="color:${G}">online</b> · last vehicle ${seenAgo}`
-      : `<b style="color:#8794a8">offline</b> · last vehicle ${seenAgo}`;
+    // 🔕 Online but nothing for a day (10-27): the same "online" as a busy camera
+    // hid a phone that beat for 219 h with nothing arriving. Say it plainly.
+    const quiet = live && c.last_seen && (Date.now() / 1000 - c.last_seen) > 24 * 3600;
+    const status = !live
+      ? `<b style="color:#8794a8">offline</b> · last vehicle ${seenAgo}`
+      : quiet
+        ? `<b style="color:#e0b84d">online, but quiet</b> · no vehicle for ${ago(c.last_seen)}`
+        : `<b style="color:${G}">online</b> · last vehicle ${seenAgo}`;
 
     // The road being watched, drawn on the road. This is the whole camera
     // layer now. The tooltip hangs off the span because there is no longer a

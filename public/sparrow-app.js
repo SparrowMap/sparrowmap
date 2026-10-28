@@ -424,6 +424,8 @@ const STALL_AFTER_MS = 120000;
  * device for a minute. That is unusable feedback. The phone knows the answer
  * the instant the request returns, so it says so here: LIVE on a 200, and the
  * actual reason on anything else, rather than swallowing the failure. */
+const QUIET_AFTER_S = 24 * 3600;   // a whole day with no vehicle at all
+let lastBeatReply = null;
 async function sendBeat() {
   if (!(node && node.id && node.token)) return;
   if (!lastWork || Date.now() - lastWork > STALL_AFTER_MS) {
@@ -442,10 +444,22 @@ async function sendBeat() {
       // The hub only asks for pictures of vehicles it has already published.
       try {
         const d = await r.json();
+        lastBeatReply = d;
         if (d && d.want_full && d.want_full.length) sendHeldFull(d.want_full);
         if (d) maybeUpdate(d.app_v);
       } catch (e) { /* an older hub answers without want_full */ }
       say($('#watchMsg'), 'Watching — this camera is LIVE on the map.', true);
+      // 🔕 Live, but nothing reaching the map for a day: the phone is working and
+      // seeing no vehicles at all (every vehicle counts, not just police), which
+      // is almost always the lens - turned off the road, fogged, or blocked.
+      const ls = lastBeatReply && lastBeatReply.last_seen;
+      if (ls && Date.now() / 1000 - ls > QUIET_AFTER_S) {
+        const days = Math.round((Date.now() / 1000 - ls) / 86400 * 10) / 10;
+        net('warn', 'LIVE, but quiet');
+        say($('#watchMsg'), `Live on the map, but no vehicle has reached it for ${days} days. `
+          + 'Check the camera still sees the road (not fogged or turned away): open Aim, '
+          + 'or reload this page.', false);
+      }
     } else if (r.status === 401) {
       net('warn', 'not signed in');
       say($('#watchMsg'), 'The hub rejected this camera’s key (401). '

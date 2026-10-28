@@ -4279,8 +4279,14 @@ class Handler(BaseHTTPRequestHandler):
                     want = db.wants_fullres(nd["id"])
                 except Exception as exc:
                     print(f"[beat] wants_fullres failed for {nd['id']}: {exc}")
+                # `last_seen` (10-27): a phone that beats but has not got a vehicle
+                # onto the map for days is a stall its owner can usually fix (a lens
+                # turned off the road, a fogged window), and the beat is the one
+                # message that reaches them. "Ridgecrest Drive" beat for 219 h with
+                # nothing arriving; the camera app now says so on its own screen.
                 return self._json({"ok": True, "posting": True, "ts": now(),
-                                   "want_full": want, "app_v": _app_version()})
+                                   "want_full": want, "app_v": _app_version(),
+                                   "last_seen": nd.get("last_seen")})
 
             if p == "/api/signals":
                 # 🚨 AN OUTSIDE SENSOR NETWORK REPORTING WHAT A VEHICLE
