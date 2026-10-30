@@ -232,4 +232,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # The timer runs this under pythonw, where stdout/stderr are None: a crash
+    # showed only as task result 1 with no reason (10-30). Keep a short log.
+    if sys.stdout is None:
+        _log = Path(__file__).with_name(".road_fill.log")
+        if _log.exists() and _log.stat().st_size > 200_000:
+            _log.write_text("", encoding="utf-8")
+        sys.stdout = sys.stderr = open(_log, "a", encoding="utf-8", buffering=1)
+        print("--- %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
     main()
