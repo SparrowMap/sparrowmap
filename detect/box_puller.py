@@ -303,8 +303,6 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
     import numpy as np
 
     metas = sorted(src.glob("*.json"))
-    if args.limit:
-        metas = metas[:args.limit]
 
     # 🚨 A PERSON'S CROP FIRST, AND ITS VERDICT SENT BEFORE THE FLEET'S.
     # A cycle scores ~6,000-7,000 traffic-camera crops (~11 min) and only then
@@ -314,14 +312,31 @@ def _run_once(vid: VehicleIdentifier, args, src: Path, is_local: bool) -> dict:
     # and after he had stopped driving - the popup never appeared. The mirror
     # marks contributor crops (mirror.quarantine_write); they are scored first
     # and their verdict is applied the moment they are done.
-    def _contrib(jm):
+    #
+    # 🚨 AND THE FLEET IN CHUNKS, BECAUSE "FIRST" ONLY HELPS A CROP THAT WAS
+    # ALREADY PULLED. One that lands a second after the pull waits for the
+    # whole fleet pass plus the next pull. Measured 2026-10-31 on the live box:
+    # drive-mode crops got their verdict a median 15-35 min after posting (up
+    # to 140 min on 10-30), against the page's 12-min window - his four patrol
+    # cars of 10-30 22:09 UTC were parked 34 min later, the drive long over, and
+    # he approved them in the pen the next day. A cycle now scores at most
+    # --fleet-chunk fleet crops (the rest stay on the box for the next pull), so
+    # a driver's crop waits ~2-3 min. Throughput is unchanged; the extra cost
+    # is one ~0.1 s tar and one ssh per cycle.
+    # Order: "live" (a mobile camera, a driver waiting on the popup), then the
+    # other contributors, then the fleet.
+    def _rank(jm):
         try:
-            return bool(json.loads(jm.read_text(encoding="utf-8")).get("contributor"))
+            m = json.loads(jm.read_text(encoding="utf-8"))
         except Exception:
-            return False
-    flags = {jm: _contrib(jm) for jm in metas}
-    metas.sort(key=lambda jm: not flags[jm])          # stable: sid order kept
-    n_contrib = sum(flags.values())
+            return 2
+        return 0 if m.get("live") else (1 if m.get("contributor") else 2)
+    ranks = {jm: _rank(jm) for jm in metas}
+    metas.sort(key=lambda jm: ranks[jm])              # stable: sid order kept
+    n_contrib = sum(1 for r in ranks.values() if r < 2)
+    fleet_cap = args.limit or getattr(args, "fleet_chunk", 0)
+    if fleet_cap:
+        metas = metas[:n_contrib + fleet_cap]
     early = None
     early_counts = (0, 0, 0)
 
@@ -542,7 +557,12 @@ def main() -> None:
                          "a crop arrives). Cuts idle ssh churn; a live drive is "
                          "untouched. Set equal to --interval to disable.")
     ap.add_argument("--limit", type=int, default=0,
-                    help="process at most N crops this run (0 = all)")
+                    help="process at most N fleet crops this run, after every "
+                         "contributor crop (0 = --fleet-chunk)")
+    ap.add_argument("--fleet-chunk", type=int, default=1200,
+                    help="fleet crops scored per cycle (~2 min); the rest wait "
+                         "for the next pull so a driver's crop is never stuck "
+                         "behind a whole fleet pass. 0 = all")
     ap.add_argument("--log", metavar="PATH",
                     help="write to this file, rotated by size (rotlog.py), instead of "
                          "stdout. A shell redirect grew box_puller.log to 1.4 GB.")

@@ -5882,7 +5882,11 @@ class Handler(BaseHTTPRequestHandler):
             mirror.quarantine_write(rec["id"], relay_crop, {
                 "ts": ts, "pub_lat": s_lat, "pub_lon": s_lon,
                 "node_name": nd.get("name") or "",
-                "det_conf": ev.get("det_conf"), "body": ev.get("body")},
+                "det_conf": ev.get("det_conf"), "body": ev.get("body"),
+                # A driver is holding this phone and drive.html asks them
+                # "was that a cop?" only for ~12 min: box_puller scores these
+                # before everything else.
+                "live": nd.get("kind") == "mobile"},
                 contributor=(nd.get("kind") != "public_cam"))
         # A camera's government candidate parks in the review pen for a human.
         if review_crop is not None:

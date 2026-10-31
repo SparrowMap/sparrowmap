@@ -151,6 +151,34 @@ try:
     check("fleet verdict sent after", len(calls) == 2 and sorted(calls[1]) == [951, 952, 954], str(calls))
     check("cycle totals still count everything", out.get("discarded") == 4, str(out))
 
+    # ---- 2c. a driver's crop jumps the line; the fleet goes in chunks -------
+    # 10-31: drive-mode verdicts came 15-35 min late, past the 12-min popup.
+    inbox3 = SCRATCH / "fake_inbox3"
+    inbox3.mkdir()
+    for s, contrib, live in ((961, False, False), (962, True, False), (963, False, False),
+                             (964, True, True), (965, False, False)):
+        cv2.imwrite(str(inbox3 / f"{s}.jpg"), img)
+        (inbox3 / f"{s}.json").write_text(json.dumps(
+            {"sighting_id": s, "node_name": "t", "contributor": contrib, "live": live}))
+    order = []
+
+    class SeeVid(OrderVid):
+        def classify(self, im):
+            return super().classify(im)
+
+    calls.clear()
+    box_puller._seen.clear()
+    VehicleIdentifier.gov_call = staticmethod(lambda r: {
+        "source": "head", "gov": False, "conf": r["_s"], "threshold": 0.97915})
+    try:
+        out = box_puller._run_once(SeeVid(), SimpleNamespace(limit=0, fleet_chunk=2, dry_run=False),
+                                   inbox3, True)
+    finally:
+        VehicleIdentifier.gov_call = real
+    check("live crop before other contributors", calls[:1] == [[964, 962]], str(calls))
+    check("fleet capped at the chunk", len(calls) == 2 and sorted(calls[1]) == [961, 963], str(calls))
+    check("unscored fleet crop left for next pull", (inbox3 / "965.json").exists())
+
     # ---- 3. a contributor is not crowded out by the fleet ------------------
     mirror._last_prune = 1e18          # keep the prune from recounting
     mirror._inbox_count = mirror._INBOX_MAX_FILES
