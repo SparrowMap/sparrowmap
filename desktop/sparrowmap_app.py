@@ -385,7 +385,8 @@ class App(tk.Tk):
         nav.pack(fill="x", side="bottom")
         for label, path in (("Map", "/"), ("Driving", "/drive"), ("Review", "/rv"),
                             ("Aim", "/aim"), ("Status", "/status")):
-            tk.Button(nav, text=label, command=lambda p=path: self._open(p),
+            cmd = self._aim_nav if path == "/aim" else (lambda p=path: self._open(p))
+            tk.Button(nav, text=label, command=cmd,
                       bg=PANEL, fg=GREEN, relief="flat", cursor="hand2",
                       font=("Segoe UI", 9, "bold"), activebackground="#1b2432",
                       activeforeground=INK).pack(side="left", expand=True, fill="x", pady=8)
@@ -468,6 +469,10 @@ class App(tk.Tk):
         tk.Button(top, text="Remove", command=lambda: self._remove(cid), bg="#141c28",
                   fg=RED, relief="flat", cursor="hand2", font=("Segoe UI", 9),
                   activebackground="#1b2432").pack(side="right", padx=8)
+        tk.Button(top, text="⚙  Aim & settings", command=lambda: self._settings_dialog(cid),
+                  bg="#141c28", fg=INK, relief="flat", cursor="hand2",
+                  font=("Segoe UI", 9), activebackground="#1b2432",
+                  activeforeground=INK).pack(side="right", padx=8)
 
         img = tk.Label(self.body, bg="#000000", fg=DIM, text="● connecting…",
                        font=("Segoe UI", 10))
@@ -1031,22 +1036,60 @@ class App(tk.Tk):
                           "label": "%s  %s  (at %s)" % (icon, text, ip)})
         return hints
 
-    def _enroll_node(self, name, lat, lon, cb):
-        """Register the camera with the hub from inside the app and hand back its
-        id + token. The token never appears in the UI - it goes straight into the
-        saved config and is used only to post this camera's own sightings."""
+    def _enroll_node(self, name, lat, lon, cb, node=None, token=None,
+                     heading=None, fov=None, reach_m=None):
+        """Register (or re-place) a camera with the hub from inside the app and
+        hand back its id + token. The token never appears in the UI - it goes
+        straight into the saved config. Passing node + token re-saves the SAME
+        camera (rename, move, or a new aim) instead of minting a new one; that is
+        exactly the loop the website's /aim page runs, done here instead."""
         def work():
             res, err = None, None
             try:
-                payload = json.dumps({"name": name, "lat": lat, "lng": lon, "lon": lon,
-                                      "kind": "fixed"}).encode()
+                body = {"name": name, "lat": lat, "lng": lon, "lon": lon,
+                        "kind": "fixed"}
+                if node:
+                    body["node_id"] = node
+                if token:
+                    body["token"] = token
+                if heading is not None:
+                    body["heading"] = heading
+                if fov is not None:
+                    body["fov"] = fov
+                if reach_m is not None:
+                    body["reach_m"] = reach_m
                 req = urllib.request.Request(
-                    self._hub().rstrip("/") + "/api/enroll", data=payload,
+                    self._hub().rstrip("/") + "/api/enroll", data=json.dumps(body).encode(),
                     headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req, timeout=20) as r:
                     res = json.loads(r.read().decode())
                 if isinstance(res, dict) and res.get("error"):
                     err, res = res["error"], None
+            except urllib.error.HTTPError as e:
+                try:
+                    err = json.loads(e.read() or b"{}").get("error", "")
+                except Exception:
+                    err = ""
+                err = err or ("the server said %d" % e.code)
+            except Exception as ex:
+                err = "could not reach SparrowMap (%s)" % ex.__class__.__name__
+            self.after(0, lambda: cb(res, err))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _node_span(self, node, token, publish, cb):
+        """Turn the camera's watched stretch of road on or off on the public map
+        (the privacy switch the website's aim page carries). POSTs /api/node/span
+        with the camera's own token; nothing is shown for copying."""
+        def work():
+            res, err = None, None
+            try:
+                body = json.dumps({"node_id": node, "token": token,
+                                   "publish": bool(publish)}).encode()
+                req = urllib.request.Request(
+                    self._hub().rstrip("/") + "/api/node/span", data=body,
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    res = json.loads(r.read().decode())
             except urllib.error.HTTPError as e:
                 try:
                     err = json.loads(e.read() or b"{}").get("error", "")
@@ -1069,6 +1112,366 @@ class App(tk.Tk):
         self._persist()
         self._show_grid()
 
+    def _geocode(self, q, cb):
+        """Address/place -> lat/lon via the hub's own proxied geocoder (keeps the
+        search private, same one the add dialog and the website use)."""
+        def work():
+            hit, err = None, None
+            try:
+                url = (self._hub().rstrip("/") + "/api/geocode?q="
+                       + urllib.parse.quote(q))
+                with urllib.request.urlopen(url, timeout=15) as r:
+                    data = json.loads(r.read().decode())
+                res = (data.get("results") or []) if isinstance(data, dict) else []
+                if res:
+                    hit = res[0]
+                else:
+                    err = "no place matched that"
+            except Exception as ex:
+                err = "could not look that up (%s)" % ex.__class__.__name__
+            self.after(0, lambda: cb(hit, err))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _settings_dialog(self, cid):
+        """Aim the camera and change its every setting IN THE APP - no browser.
+        Re-saves the SAME node (rename, move, re-aim) through /api/enroll with the
+        camera's own token, and flips the public-map share through /api/node/span.
+        The aim needs no web map: a compass heading + field of view + reach is what
+        the server resolves a watched road from, which is all the website's /aim
+        page ever posted."""
+        import math
+        cam = next((c for c in self.cameras if c["id"] == cid), None)
+        if not cam:
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("Aim & settings - " + cam.get("name", cid))
+        dlg.configure(bg=BG)
+        dlg.geometry("500x760")
+        dlg.transient(self)
+
+        def close():
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        # Bottom action bar first, so Save never gets clipped by a tall body.
+        bar = tk.Frame(dlg, bg=PANEL)
+        bar.pack(side="bottom", fill="x")
+        savebtn = tk.Button(bar, text="Save", bg=GREEN, fg="#0b0e13", relief="flat",
+                            cursor="hand2", font=("Segoe UI", 11, "bold"),
+                            activebackground="#5fe8ae")
+        savebtn.pack(side="top", fill="x", padx=12, pady=(10, 2), ipady=5)
+        setstat = tk.Label(bar, text="", bg=PANEL, fg=DIM, font=("Segoe UI", 9),
+                           anchor="w", wraplength=470, justify="left")
+        setstat.pack(side="top", fill="x", padx=12)
+        tk.Button(bar, text="Cancel", command=close, bg=PANEL, fg=DIM, relief="flat",
+                  cursor="hand2", font=("Segoe UI", 9), activebackground=PANEL
+                  ).pack(side="top", pady=(2, 8))
+
+        body = tk.Frame(dlg, bg=BG)
+        body.pack(side="top", fill="both", expand=True, padx=14, pady=12)
+
+        # --- Name -------------------------------------------------------
+        tk.Label(body, text="Name", bg=BG, fg=INK, font=("Segoe UI", 10, "bold"),
+                 anchor="w").pack(fill="x")
+        namee = tk.Entry(body, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+                         font=("Segoe UI", 10), highlightthickness=1,
+                         highlightbackground=LINE, highlightcolor="#3d8cff")
+        namee.pack(fill="x", ipady=4, pady=(2, 10))
+        namee.insert(0, cam.get("name", ""))
+
+        # --- Where it is ------------------------------------------------
+        tk.Label(body, text="Where it is", bg=BG, fg=INK,
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
+        loc = tk.Frame(body, bg=BG)
+        loc.pack(fill="x")
+        plq = tk.Entry(loc, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+                       font=("Segoe UI", 10), highlightthickness=1,
+                       highlightbackground=LINE, highlightcolor="#3d8cff")
+        plq.pack(side="left", fill="x", expand=True, ipady=4)
+        plq.insert(0, "")
+
+        llf = tk.Frame(body, bg=BG)
+        llf.pack(fill="x", pady=(4, 2))
+        tk.Label(llf, text="lat", bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(side="left")
+        late = tk.Entry(llf, width=12, bg="#0a0e15", fg=INK, insertbackground=INK,
+                        relief="flat", font=("Consolas", 10), highlightthickness=1,
+                        highlightbackground=LINE)
+        late.pack(side="left", padx=(2, 8), ipady=3)
+        tk.Label(llf, text="lon", bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(side="left")
+        lone = tk.Entry(llf, width=12, bg="#0a0e15", fg=INK, insertbackground=INK,
+                        relief="flat", font=("Consolas", 10), highlightthickness=1,
+                        highlightbackground=LINE)
+        lone.pack(side="left", padx=2, ipady=3)
+        if cam.get("lat") is not None:
+            late.insert(0, "%.6f" % cam["lat"])
+        if cam.get("lon") is not None:
+            lone.insert(0, "%.6f" % cam["lon"])
+
+        def findloc():
+            q = plq.get().strip()
+            if not q:
+                setstat.configure(text="Type an address or place, then Find.", fg=AMBER)
+                return
+            setstat.configure(text="Looking up “" + q + "”…", fg=AMBER)
+
+            def got(hit, err):
+                if not hit:
+                    setstat.configure(text=err or "no match", fg=RED)
+                    return
+                late.delete(0, "end"), late.insert(0, "%.6f" % hit["lat"])
+                lone.delete(0, "end"), lone.insert(0, "%.6f" % hit["lon"])
+                setstat.configure(text="Found: " + hit.get("name", q), fg=GREEN)
+            self._geocode(q, got)
+        tk.Button(loc, text="Find", command=findloc, bg="#141c28", fg=INK, relief="flat",
+                  cursor="hand2", font=("Segoe UI", 9), activebackground="#1b2432",
+                  activeforeground=INK).pack(side="left", padx=(6, 0), ipadx=6, ipady=2)
+        tk.Label(body, text="A small nudge stays the same camera. A big move makes a new "
+                 "one on the map.", bg=BG, fg=DIM, font=("Segoe UI", 8),
+                 anchor="w", wraplength=460, justify="left").pack(fill="x", pady=(0, 10))
+
+        # --- Aim --------------------------------------------------------
+        tk.Label(body, text="Aim your camera", bg=BG, fg=INK,
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
+        tk.Label(body, text="Which way it looks, how wide, and how far. The server finds "
+                 "the stretch of road under that.", bg=BG, fg=DIM, font=("Segoe UI", 8),
+                 anchor="w", wraplength=460, justify="left").pack(fill="x", pady=(0, 4))
+
+        aim = tk.Frame(body, bg=BG)
+        aim.pack(fill="x")
+        comp = tk.Canvas(aim, width=120, height=120, bg="#0a0e15", highlightthickness=1,
+                         highlightbackground=LINE)
+        comp.pack(side="left", padx=(0, 10))
+        prev = tk.Label(aim, bg="#000000", fg=DIM, text="● preview…",
+                        font=("Segoe UI", 9), width=28, height=7)
+        prev.pack(side="left", fill="both", expand=True)
+
+        state = {"heading": float(cam.get("heading", 0) or 0),
+                 "fov": float(cam.get("fov", 60) or 60),
+                 "reach": float(cam.get("reach_m", 45) or 45),
+                 "prevkeep": None}
+
+        def draw_compass():
+            comp.delete("all")
+            cx, cy, R = 60, 60, 48
+            comp.create_oval(cx - R, cy - R, cx + R, cy + R, outline=LINE)
+            for lab, ang in (("N", 0), ("E", 90), ("S", 180), ("W", 270)):
+                ax = cx + (R - 9) * math.sin(math.radians(ang))
+                ay = cy - (R - 9) * math.cos(math.radians(ang))
+                comp.create_text(ax, ay, text=lab, fill=DIM, font=("Segoe UI", 8))
+            h = state["heading"]
+            # Field-of-view wedge, then the facing arrow on top.
+            half = state["fov"] / 2.0
+            pts = [cx, cy]
+            a = h - half
+            while a <= h + half + 0.01:
+                pts += [cx + R * math.sin(math.radians(a)),
+                        cy - R * math.cos(math.radians(a))]
+                a += 6
+            if len(pts) >= 6:
+                comp.create_polygon(pts, fill="#14314a", outline="")
+            comp.create_line(cx, cy, cx + R * math.sin(math.radians(h)),
+                             cy - R * math.cos(math.radians(h)), fill=GREEN, width=3,
+                             arrow="last")
+            comp.create_text(cx, cy + R + 8, text="%d°" % round(h), fill=INK,
+                             font=("Segoe UI", 9, "bold"))
+
+        def set_heading_from(ev):
+            dx, dy = ev.x - 60, ev.y - 60
+            if dx == 0 and dy == 0:
+                return
+            state["heading"] = (math.degrees(math.atan2(dx, -dy))) % 360
+            draw_compass()
+        comp.bind("<Button-1>", set_heading_from)
+        comp.bind("<B1-Motion>", set_heading_from)
+
+        sld = tk.Frame(body, bg=BG)
+        sld.pack(fill="x", pady=(8, 2))
+
+        def mkscale(row, label, lo, hi, key, unit):
+            tk.Label(row, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9), width=12,
+                     anchor="w").pack(side="left")
+            var = tk.DoubleVar(value=state[key])
+
+            def on(_v):
+                state[key] = float(var.get())
+                draw_compass()
+            s = tk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=var,
+                         command=on, bg=BG, fg=INK, troughcolor="#0a0e15",
+                         highlightthickness=0, relief="flat", showvalue=True)
+            s.pack(side="left", fill="x", expand=True)
+
+        r1 = tk.Frame(body, bg=BG)
+        r1.pack(fill="x")
+        mkscale(r1, "Facing °", 0, 359, "heading", "°")
+        r2 = tk.Frame(body, bg=BG)
+        r2.pack(fill="x")
+        mkscale(r2, "How wide °", 10, 120, "fov", "°")
+        r3 = tk.Frame(body, bg=BG)
+        r3.pack(fill="x")
+        mkscale(r3, "How far m", 15, 200, "reach", "m")
+
+        # "Point it down the road": a place at the far end of the view -> a bearing
+        # from the camera to there, so aiming needs no compass guesswork.
+        dr = tk.Frame(body, bg=BG)
+        dr.pack(fill="x", pady=(6, 0))
+        drq = tk.Entry(dr, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+                       font=("Segoe UI", 9), highlightthickness=1, highlightbackground=LINE)
+        drq.pack(side="left", fill="x", expand=True, ipady=3)
+
+        def point_down():
+            q = drq.get().strip()
+            if not q:
+                setstat.configure(text="Type what is at the far end of the view, then "
+                                  "Point.", fg=AMBER)
+                return
+            try:
+                la, lo = float(late.get()), float(lone.get())
+            except ValueError:
+                setstat.configure(text="Set the camera's own lat/lon first.", fg=AMBER)
+                return
+
+            def got(hit, err):
+                if not hit:
+                    setstat.configure(text=err or "no match", fg=RED)
+                    return
+                dla = math.radians(hit["lat"] - la)
+                dlo = math.radians(hit["lon"] - lo)
+                y = math.sin(dlo) * math.cos(math.radians(hit["lat"]))
+                x = (math.cos(math.radians(la)) * math.sin(math.radians(hit["lat"]))
+                     - math.sin(math.radians(la)) * math.cos(math.radians(hit["lat"]))
+                     * math.cos(dlo))
+                state["heading"] = (math.degrees(math.atan2(y, x))) % 360
+                draw_compass()
+                setstat.configure(text="Aimed toward " + hit.get("name", q), fg=GREEN)
+            self._geocode(q, got)
+        tk.Button(dr, text="Point", command=point_down, bg="#141c28", fg=INK,
+                  relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                  activebackground="#1b2432", activeforeground=INK
+                  ).pack(side="left", padx=(6, 0), ipadx=6, ipady=2)
+        tk.Label(body, text="e.g. the shop or cross street the camera looks toward",
+                 bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w").pack(fill="x",
+                                                                       pady=(1, 10))
+
+        # --- Share on the public map -----------------------------------
+        shvar = tk.BooleanVar(value=bool(cam.get("publish_span")))
+        tk.Checkbutton(body, text="Show the watched road on the public SparrowMap",
+                       variable=shvar, bg=BG, fg=INK, selectcolor="#0a0e15",
+                       activebackground=BG, activeforeground=INK, anchor="w",
+                       font=("Segoe UI", 9)).pack(fill="x")
+        tk.Label(body, text="Off by default. The picture and the exact spot are never "
+                 "published either way.", bg=BG, fg=DIM, font=("Segoe UI", 8),
+                 anchor="w", wraplength=460, justify="left").pack(fill="x")
+
+        draw_compass()
+
+        # Live preview of what the camera sees right now, so aiming is not blind.
+        def grab_prev():
+            src = cam.get("source")
+            if not src:
+                return
+            b64 = [None]
+
+            def work():
+                try:
+                    import cv2
+                    import detect.relay as relay
+                    s = int(src) if str(src).strip().isdigit() else src
+                    cap = relay.open_stream(s)
+                    if cap is not None:
+                        ok, frame = False, None
+                        for _ in range(4):
+                            ok, frame = cap.read()
+                            if ok:
+                                break
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        if ok and frame is not None:
+                            h, w = frame.shape[:2]
+                            tw = 240
+                            th = max(1, int(h * tw / w))
+                            frame = cv2.resize(frame, (tw, th))
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            good, buf = cv2.imencode(".png", rgb)
+                            if good:
+                                b64[0] = base64.b64encode(buf).decode()
+                except Exception:
+                    b64[0] = None
+
+                def show():
+                    if b64[0]:
+                        try:
+                            state["prevkeep"] = tk.PhotoImage(data=b64[0])
+                            prev.configure(image=state["prevkeep"], text="")
+                        except Exception:
+                            pass
+                    else:
+                        prev.configure(text="(no preview)")
+                self.after(0, show)
+            threading.Thread(target=work, daemon=True).start()
+        grab_prev()
+
+        def do_save():
+            name = namee.get().strip() or cam.get("name") or "Camera"
+            try:
+                lat, lon = float(late.get()), float(lone.get())
+            except ValueError:
+                setstat.configure(text="Latitude and longitude must be numbers - use Find.",
+                                  fg=AMBER)
+                return
+            savebtn.configure(state="disabled", text="Saving…")
+            setstat.configure(text="Saving the aim and settings…", fg=AMBER)
+
+            def after_enroll(res, err):
+                if err or not res:
+                    savebtn.configure(state="normal", text="Save")
+                    setstat.configure(text="Could not save: " + (err or "no reply")
+                                      + ". Try again.", fg=RED)
+                    return
+                cam["name"] = name
+                cam["lat"], cam["lon"] = lat, lon
+                cam["heading"] = round(state["heading"], 1)
+                cam["fov"] = round(state["fov"])
+                cam["reach_m"] = round(state["reach"])
+                # A big move mints a new node; adopt its id + token or we post as a
+                # camera that no longer exists where it claims to.
+                if res.get("moved_from") and res.get("id"):
+                    cam["node"] = res["id"]
+                if res.get("token"):
+                    cam["token"] = res["token"]
+                self._persist()
+
+                def finish(msg):
+                    savebtn.configure(state="normal", text="Save")
+                    close()
+                    if self.view == ("single", cid):
+                        self._show_single(cid)
+                    road = res.get("road_name")
+                    where = ("\n\nIt watches: " + road) if road else ""
+                    messagebox.showinfo(APP, 'Saved "' + name + '".' + where + msg)
+
+                # Then the public-map share, if it changed.
+                if bool(shvar.get()) != bool(cam.get("publish_span")):
+                    def after_span(sres, serr):
+                        cam["publish_span"] = bool(shvar.get())
+                        self._persist()
+                        extra = ""
+                        if sres and not sres.get("has_span"):
+                            extra = ("\n\nShare is on, but there is no road resolved yet "
+                                     "- nudge the aim until it finds one.")
+                        finish(extra)
+                    self._node_span(cam.get("node"), cam.get("token"),
+                                    bool(shvar.get()), after_span)
+                else:
+                    finish("")
+            self._enroll_node(name, lat, lon, after_enroll, node=cam.get("node"),
+                              token=cam.get("token"), heading=round(state["heading"], 1),
+                              fov=round(state["fov"]), reach_m=round(state["reach"]))
+        savebtn.configure(command=do_save)
+
     def _persist(self):
         self.cfg["cameras"] = self.cameras
         save_cfg(self.cfg)
@@ -1076,6 +1479,20 @@ class App(tk.Tk):
     # -- plumbing --------------------------------------------------------
     def _hub(self):
         return self.cfg.get("hub", HUB_DEFAULT)
+
+    def _aim_nav(self):
+        """The Aim tab now aims IN THE APP, never a browser. One camera -> straight
+        to its aim; several -> open the one being viewed, else say to pick one."""
+        if not self.cameras:
+            messagebox.showinfo(APP, "Add a camera first, then you can aim it here.")
+            return
+        if len(self.cameras) == 1:
+            self._settings_dialog(self.cameras[0]["id"])
+            return
+        if self.view and self.view[0] == "single" and self.view[1]:
+            self._settings_dialog(self.view[1])
+            return
+        messagebox.showinfo(APP, "Click a camera, then “Aim & settings” to aim it.")
 
     def _open(self, path):
         webbrowser.open(self._hub().rstrip("/") + path)
