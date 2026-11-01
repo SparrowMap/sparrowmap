@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import queue
 import subprocess
@@ -305,6 +306,287 @@ class CameraWorker(threading.Thread):
 
 
 # --------------------------------------------------------------------------
+# the aim map: a slippy OpenStreetMap on a plain Tk canvas
+# --------------------------------------------------------------------------
+TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_UA = "SparrowMap-desktop/1.0 (+https://map.sparrowmap.com)"
+
+
+class AimMap(tk.Frame):
+    """A small slippy map (OpenStreetMap tiles drawn on a Tk canvas) for placing
+    AND aiming a camera the way the website does - with no browser engine and no
+    image library, because Tk 8.6 decodes the PNG tiles itself. Drag the dot to
+    MOVE the camera, drag the arrow's tip to REPOINT it; How-wide / How-far are
+    extras. Only map tiles are ever fetched (and a tile names an area, not a
+    point) - the camera's own position is never sent anywhere."""
+
+    def __init__(self, parent, app, lat, lon, heading=0.0, fov=60.0, reach=45.0,
+                 on_change=None, width=452, height=264):
+        super().__init__(parent, bg=BG)
+        self.app = app
+        self.on_change = on_change
+        self._has_fix = lat is not None and lon is not None
+        self.lat = float(lat) if lat is not None else 39.5
+        self.lon = float(lon) if lon is not None else -98.35
+        self.heading = float(heading or 0.0)
+        self.fov = float(fov or 60.0)
+        self.reach = float(reach or 45.0)
+        self.zoom = 17 if self._has_fix else 4
+        self.clat, self.clon = self.lat, self.lon
+        self.cw, self.ch = width, height
+        self._tiles = {}
+        self._inflight = set()
+        self._drag = None
+        self._in_redraw = False
+        self._pin = (width / 2.0, height / 2.0)
+        self._tip = (width / 2.0, height / 2.0)
+
+        self.canvas = tk.Canvas(self, width=width, height=height, bg="#0e1622",
+                                highlightthickness=1, highlightbackground=LINE,
+                                cursor="fleur")
+        self.canvas.pack(fill="x")
+        self.canvas.bind("<Button-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._motion)
+        self.canvas.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag", None))
+
+        row = tk.Frame(self, bg=BG)
+        row.pack(fill="x", pady=(4, 0))
+        tk.Button(row, text="＋", command=lambda: self._zoom(1), width=2, bg="#141c28",
+                  fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 10, "bold"),
+                  activebackground="#1b2432", activeforeground=INK).pack(side="left")
+        tk.Button(row, text="－", command=lambda: self._zoom(-1), width=2, bg="#141c28",
+                  fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 10, "bold"),
+                  activebackground="#1b2432", activeforeground=INK
+                  ).pack(side="left", padx=(4, 10))
+        self.locbtn = tk.Button(row, text="\U0001f4cd  Use my location",
+                                command=self._use_location, bg="#141c28", fg=INK,
+                                relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                                activebackground="#1b2432", activeforeground=INK)
+        self.locbtn.pack(side="left")
+        self.hint = tk.Label(self, text="Drag the dot to place it, drag the arrow tip to "
+                             "aim. + / − to zoom.", bg=BG, fg=DIM,
+                             font=("Segoe UI", 8), anchor="w", wraplength=440,
+                             justify="left")
+        self.hint.pack(fill="x", pady=(2, 0))
+
+        ex = tk.Frame(self, bg=BG)
+        ex.pack(fill="x", pady=(2, 0))
+        self._mkscale(ex, "How wide °", 10, 120, "fov")
+        ex2 = tk.Frame(self, bg=BG)
+        ex2.pack(fill="x")
+        self._mkscale(ex2, "How far m", 15, 200, "reach")
+
+        self.after(0, self.redraw)
+
+    # -- values ----------------------------------------------------------
+    def get(self):
+        return {"lat": self.lat, "lon": self.lon, "heading": round(self.heading, 1),
+                "fov": round(self.fov), "reach": round(self.reach),
+                "has_fix": self._has_fix}
+
+    def _emit(self):
+        if self.on_change:
+            try:
+                self.on_change(self.get())
+            except Exception:
+                pass
+
+    def set_camera(self, lat, lon, recenter=True):
+        self.lat, self.lon = float(lat), float(lon)
+        self._has_fix = True
+        if recenter:
+            self.clat, self.clon = self.lat, self.lon
+            if self.zoom < 15:
+                self.zoom = 17
+        self.redraw()
+        self._emit()
+
+    def set_heading(self, h):
+        self.heading = float(h) % 360
+        self.redraw()
+        self._emit()
+
+    def _mkscale(self, row, label, lo, hi, attr):
+        tk.Label(row, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9), width=11,
+                 anchor="w").pack(side="left")
+        var = tk.DoubleVar(value=getattr(self, attr))
+
+        def on(_v):
+            setattr(self, attr, float(var.get()))
+            self.redraw()
+            self._emit()
+        tk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=var, command=on,
+                 bg=BG, fg=INK, troughcolor="#0a0e15", highlightthickness=0,
+                 relief="flat", showvalue=True).pack(side="left", fill="x", expand=True)
+
+    # -- projection (web mercator, pixels at self.zoom) ------------------
+    def _proj(self, lat, lon):
+        n = 2.0 ** self.zoom
+        x = (lon + 180.0) / 360.0 * n * 256.0
+        s = math.sin(math.radians(max(-85.0, min(85.0, lat))))
+        y = (0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi)) * n * 256.0
+        return x, y
+
+    def _unproj(self, px, py):
+        n = 2.0 ** self.zoom
+        lon = px / (n * 256.0) * 360.0 - 180.0
+        ty = py / (n * 256.0)
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * ty))))
+        return lat, lon
+
+    # -- drawing ---------------------------------------------------------
+    def redraw(self):
+        if self._in_redraw:
+            return
+        self._in_redraw = True
+        try:
+            c = self.canvas
+            c.delete("all")
+            cw, ch = self.cw, self.ch
+            cworld = self._proj(self.clat, self.clon)
+            ox = cworld[0] - cw / 2.0
+            oy = cworld[1] - ch / 2.0
+            n = int(2 ** self.zoom)
+            ftx = int(math.floor(ox / 256.0))
+            fty = int(math.floor(oy / 256.0))
+            tx = ftx
+            while tx * 256 - ox < cw:
+                ty = fty
+                while ty * 256 - oy < ch:
+                    sx, sy = tx * 256 - ox, ty * 256 - oy
+                    if 0 <= ty < n:
+                        key = (self.zoom, tx % n, ty)
+                        img = self._tiles.get(key)
+                        if img is not None:
+                            c.create_image(sx, sy, anchor="nw", image=img)
+                        else:
+                            c.create_rectangle(sx, sy, sx + 256, sy + 256,
+                                               fill="#0e1622", outline="")
+                            self._fetch(key)
+                    ty += 1
+                tx += 1
+            c.create_text(cw - 3, ch - 3, anchor="se", text="© OpenStreetMap",
+                          fill=DIM, font=("Segoe UI", 7))
+            # the camera: field-of-view wedge, facing arrow, and two grab points
+            pwx, pwy = self._proj(self.lat, self.lon)
+            pinx, piny = pwx - ox, pwy - oy
+            self._pin = (pinx, piny)
+            mpp = 156543.03392 * math.cos(math.radians(self.lat)) / (2 ** self.zoom)
+            conelen = max(24.0, (self.reach / mpp) if mpp > 0 else 40.0)
+            half = self.fov / 2.0
+            pts = [pinx, piny]
+            a = self.heading - half
+            while a <= self.heading + half + 0.001:
+                pts += [pinx + conelen * math.sin(math.radians(a)),
+                        piny - conelen * math.cos(math.radians(a))]
+                a += 4
+            if len(pts) >= 6:
+                c.create_polygon(pts, fill=GREEN, stipple="gray25", outline="")
+            tipx = pinx + conelen * math.sin(math.radians(self.heading))
+            tipy = piny - conelen * math.cos(math.radians(self.heading))
+            self._tip = (tipx, tipy)
+            c.create_line(pinx, piny, tipx, tipy, fill=GREEN, width=2, arrow="last")
+            c.create_oval(tipx - 7, tipy - 7, tipx + 7, tipy + 7, fill="#0b0e13",
+                          outline=GREEN, width=2)
+            c.create_oval(pinx - 8, piny - 8, pinx + 8, piny + 8, fill=GREEN,
+                          outline="#07120c", width=2)
+            c.create_oval(pinx - 2, piny - 2, pinx + 2, piny + 2, fill="#07120c",
+                          outline="")
+            if not self._has_fix:
+                c.create_text(cw / 2.0, 13, text="Place it: Find an address, Use my "
+                              "location, or drag the dot", fill=AMBER,
+                              font=("Segoe UI", 8))
+        finally:
+            self._in_redraw = False
+
+    def _fetch(self, key):
+        if key in self._inflight or key in self._tiles:
+            return
+        self._inflight.add(key)
+        z, x, y = key
+        url = TILE_URL.format(z=z, x=x, y=y)
+
+        def work():
+            data = None
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": TILE_UA})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    data = r.read()
+            except Exception:
+                data = None
+
+            def done():
+                self._inflight.discard(key)
+                if data:
+                    try:
+                        self._tiles[key] = tk.PhotoImage(
+                            data=base64.b64encode(data).decode())
+                        self.redraw()
+                    except Exception:
+                        pass
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- interaction -----------------------------------------------------
+    def _press(self, ev):
+        tx, ty = self._tip
+        px, py = self._pin
+        if (ev.x - tx) ** 2 + (ev.y - ty) ** 2 <= 196:
+            self._drag = "repoint"
+        elif (ev.x - px) ** 2 + (ev.y - py) ** 2 <= 256:
+            self._drag = "move"
+        else:
+            self._drag = ("pan", ev.x, ev.y, self.clat, self.clon)
+
+    def _motion(self, ev):
+        d = self._drag
+        if not d:
+            return
+        if d == "repoint":
+            px, py = self._pin
+            dx, dy = ev.x - px, ev.y - py
+            if dx or dy:
+                self.heading = math.degrees(math.atan2(dx, -dy)) % 360
+                self.redraw()
+                self._emit()
+        elif d == "move":
+            cworld = self._proj(self.clat, self.clon)
+            ox = cworld[0] - self.cw / 2.0
+            oy = cworld[1] - self.ch / 2.0
+            self.lat, self.lon = self._unproj(ev.x + ox, ev.y + oy)
+            self._has_fix = True
+            self.redraw()
+            self._emit()
+        elif isinstance(d, tuple) and d[0] == "pan":
+            _, sx, sy, clat, clon = d
+            sw = self._proj(clat, clon)
+            self.clat, self.clon = self._unproj(sw[0] - (ev.x - sx),
+                                                sw[1] - (ev.y - sy))
+            self.redraw()
+
+    def _zoom(self, dz):
+        self.zoom = max(3, min(19, self.zoom + dz))
+        self.redraw()
+
+    def _use_location(self):
+        self.locbtn.configure(state="disabled", text="\U0001f4cd  Locating…")
+
+        def done(lat, lon, err):
+            self.locbtn.configure(state="normal", text="\U0001f4cd  Use my location")
+            if err or lat is None:
+                self.hint.configure(text="Could not get your location (" + (err or "off")
+                                    + "). Use the address Find instead.", fg=AMBER)
+                return
+            self.set_camera(lat, lon)
+            self.hint.configure(text="Placed at your location. Drag the dot to "
+                                "fine-tune, drag the arrow tip to aim.", fg=GREEN)
+        self.app._win_location(done)
+
+
+# --------------------------------------------------------------------------
 # the window
 # --------------------------------------------------------------------------
 class App(tk.Tk):
@@ -385,7 +667,12 @@ class App(tk.Tk):
         nav.pack(fill="x", side="bottom")
         for label, path in (("Map", "/"), ("Driving", "/drive"), ("Review", "/rv"),
                             ("Aim", "/aim"), ("Status", "/status")):
-            cmd = self._aim_nav if path == "/aim" else (lambda p=path: self._open(p))
+            if path == "/aim":
+                cmd = self._aim_nav
+            elif path == "/rv":
+                cmd = self._review_dialog
+            else:
+                cmd = (lambda p=path: self._open(p))
             tk.Button(nav, text=label, command=cmd,
                       bg=PANEL, fg=GREEN, relief="flat", cursor="hand2",
                       font=("Segoe UI", 9, "bold"), activebackground="#1b2432",
@@ -847,8 +1134,12 @@ class App(tk.Tk):
                         fields[key].insert(0, f"{float(v):.6f}")
                 for w in hitsf.winfo_children():
                     w.destroy()
-                addrstat.configure(text="✓ Location set below - you can still nudge "
-                                        "it, or set the facing later in Aim.", fg=GREEN)
+                try:
+                    amap.set_camera(float(r.get("lat")), float(r.get("lon")))
+                except (TypeError, ValueError):
+                    pass
+                addrstat.configure(text="✓ Placed on the map below - drag the dot to "
+                                        "fine-tune and the arrow to aim it.", fg=GREEN)
             threading.Thread(target=work, daemon=True).start()
         findbtn = tk.Button(body, text="Find", command=find, bg="#141c28", fg=INK,
                             relief="flat", cursor="hand2", font=("Segoe UI", 9),
@@ -871,6 +1162,43 @@ class App(tk.Tk):
             e.pack(fill="x", ipady=4)
             fields[key] = e
 
+        # 3 · Aim it - the same drag-to-place / drag-to-aim map the website has,
+        # right here before Add. Drag the dot to move, the arrow tip to repoint.
+        tk.Label(body, text="3 · Aim it", bg=BG, fg=INK,
+                 font=("Segoe UI", 11, "bold"), anchor="w").pack(
+                     fill="x", padx=16, pady=(6, 0))
+        tk.Label(body, text="Point the arrow the way the camera looks. Place it first "
+                 "(Find, Use my location, or drag the dot).", bg=BG, fg=DIM,
+                 font=("Segoe UI", 9), anchor="w", justify="left", wraplength=470
+                 ).pack(fill="x", padx=16, pady=(0, 4))
+
+        def on_map(st):
+            # keep the lat/lon fields in step with the dot, so do_add and a later
+            # edit both read the same spot.
+            if st.get("lat") is not None:
+                for key, v in (("lat", st["lat"]), ("lon", st["lon"])):
+                    fields[key].delete(0, "end")
+                    fields[key].insert(0, f"{float(v):.6f}")
+
+        _la = fields["lat"].get().strip()
+        _lo = fields["lon"].get().strip()
+        try:
+            _la, _lo = float(_la), float(_lo)
+        except ValueError:
+            _la, _lo = None, None
+        amap = AimMap(body, self, _la, _lo, on_change=on_map, width=470, height=250)
+        amap.pack(fill="x", padx=16, pady=(0, 10))
+
+        def latlon_typed(_=None):
+            try:
+                amap.set_camera(float(fields["lat"].get().strip()),
+                                float(fields["lon"].get().strip()))
+            except ValueError:
+                pass
+        for key in ("lat", "lon"):
+            fields[key].bind("<Return>", latlon_typed)
+            fields[key].bind("<FocusOut>", latlon_typed)
+
         # ADD: enrol with the server HERE, store the keys silently, start watching.
         def do_add():
             src = srcentry.get().strip()
@@ -878,17 +1206,13 @@ class App(tk.Tk):
                 addstat.configure(text="Pick a camera or type its address first.", fg=AMBER)
                 return
             name = fields["name"].get().strip() or f"Camera {len(self.cameras) + 1}"
-            latv, lonv = fields["lat"].get().strip(), fields["lon"].get().strip()
-            if not (latv and lonv):
-                addstat.configure(text="Find where the camera is first (step 2), so it "
-                                       "has a spot on the map.", fg=AMBER)
+            m = amap.get()
+            if not m["has_fix"]:
+                addstat.configure(text="Place the camera on the map first (step 3) - "
+                                       "Find, Use my location, or drag the dot.", fg=AMBER)
                 return
-            try:
-                lat, lon = float(latv), float(lonv)
-            except ValueError:
-                addstat.configure(text="Latitude and longitude must be numbers - use Find.",
-                                  fg=AMBER)
-                return
+            lat, lon = m["lat"], m["lon"]
+            heading, fov, reach = m["heading"], m["fov"], m["reach"]
             addbtn.configure(state="disabled", text="Adding…")
             addstat.configure(text="Registering the camera with SparrowMap…", fg=AMBER)
 
@@ -900,7 +1224,8 @@ class App(tk.Tk):
                     return
                 cam = {"id": _new_id(self.cameras), "name": name, "source": src,
                        "node": res.get("id", ""), "token": res.get("token", ""),
-                       "lat": lat, "lon": lon}
+                       "lat": lat, "lon": lon, "heading": heading, "fov": fov,
+                       "reach_m": reach}
                 self.cameras.append(cam)
                 if res.get("review_token"):
                     self.cfg.setdefault("review_tokens", {})[cam["id"]] = res["review_token"]
@@ -913,7 +1238,8 @@ class App(tk.Tk):
                     "and on the map at %.5f, %.5f.\n\n"
                     "Nothing was copied or pasted - its keys are kept inside the app."
                     % (lat, lon))
-            self._enroll_node(name, lat, lon, done)
+            self._enroll_node(name, lat, lon, done, heading=heading, fov=fov,
+                              reach_m=reach)
         addbtn.configure(command=do_add)
 
     def _scan_candidates(self):
@@ -1132,6 +1458,40 @@ class App(tk.Tk):
             self.after(0, lambda: cb(hit, err))
         threading.Thread(target=work, daemon=True).start()
 
+    def _win_location(self, cb):
+        """Ask Windows where this PC is (the OS shows its own permission prompt).
+        Used ONLY to drop the map pin; the coordinate never leaves the PC. Falls
+        back cleanly when location is off or the prompt is declined."""
+        def work():
+            lat = lon = None
+            err = None
+            try:
+                ps = (
+                    "Add-Type -AssemblyName System.Device;"
+                    "$w=New-Object System.Device.Location.GeoCoordinateWatcher;"
+                    "$w.Start();$n=0;"
+                    "while($w.Status -ne 'Ready' -and $n -lt 60 -and "
+                    "$w.Position.Location.IsUnknown){Start-Sleep -Milliseconds 100;$n++};"
+                    "$c=$w.Position.Location;"
+                    "if($c.IsUnknown){'UNKNOWN'}else{'{0},{1}' -f "
+                    "$c.Latitude,$c.Longitude};$w.Stop()"
+                )
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                    capture_output=True, text=True, timeout=30,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+                lines = [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+                val = lines[0] if lines else ""
+                if val and val != "UNKNOWN" and "," in val:
+                    a, b = val.split(",", 1)
+                    lat, lon = float(a), float(b)
+                else:
+                    err = "location is off or was not allowed"
+            except Exception as ex:
+                err = ex.__class__.__name__
+            self.after(0, lambda: cb(lat, lon, err))
+        threading.Thread(target=work, daemon=True).start()
+
     def _settings_dialog(self, cid):
         """Aim the camera and change its every setting IN THE APP - no browser.
         Re-saves the SAME node (rename, move, re-aim) through /api/enroll with the
@@ -1222,6 +1582,7 @@ class App(tk.Tk):
                     return
                 late.delete(0, "end"), late.insert(0, "%.6f" % hit["lat"])
                 lone.delete(0, "end"), lone.insert(0, "%.6f" % hit["lon"])
+                mapw.set_camera(hit["lat"], hit["lon"])
                 setstat.configure(text="Found: " + hit.get("name", q), fg=GREEN)
             self._geocode(q, got)
         tk.Button(loc, text="Find", command=findloc, bg="#141c28", fg=INK, relief="flat",
@@ -1231,128 +1592,40 @@ class App(tk.Tk):
                  "one on the map.", bg=BG, fg=DIM, font=("Segoe UI", 8),
                  anchor="w", wraplength=460, justify="left").pack(fill="x", pady=(0, 10))
 
-        # --- Aim --------------------------------------------------------
+        # --- Aim it on the map -----------------------------------------
         tk.Label(body, text="Aim your camera", bg=BG, fg=INK,
                  font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
-        tk.Label(body, text="Which way it looks, how wide, and how far. The server finds "
-                 "the stretch of road under that.", bg=BG, fg=DIM, font=("Segoe UI", 8),
+        tk.Label(body, text="Drag the dot to where the camera is, drag the arrow tip to "
+                 "point it down the road. The server finds the stretch of road under "
+                 "that wedge.", bg=BG, fg=DIM, font=("Segoe UI", 8),
                  anchor="w", wraplength=460, justify="left").pack(fill="x", pady=(0, 4))
 
-        aim = tk.Frame(body, bg=BG)
-        aim.pack(fill="x")
-        comp = tk.Canvas(aim, width=120, height=120, bg="#0a0e15", highlightthickness=1,
-                         highlightbackground=LINE)
-        comp.pack(side="left", padx=(0, 10))
-        prev = tk.Label(aim, bg="#000000", fg=DIM, text="● preview…",
-                        font=("Segoe UI", 9), width=28, height=7)
-        prev.pack(side="left", fill="both", expand=True)
+        hold = {"prev": None}
 
-        state = {"heading": float(cam.get("heading", 0) or 0),
-                 "fov": float(cam.get("fov", 60) or 60),
-                 "reach": float(cam.get("reach_m", 45) or 45),
-                 "prevkeep": None}
+        def on_map(st):
+            # Keep the typed lat/lon in step with the pin, so Save and the boxes
+            # always agree with where the dot sits.
+            late.delete(0, "end"), late.insert(0, "%.6f" % st["lat"])
+            lone.delete(0, "end"), lone.insert(0, "%.6f" % st["lon"])
 
-        def draw_compass():
-            comp.delete("all")
-            cx, cy, R = 60, 60, 48
-            comp.create_oval(cx - R, cy - R, cx + R, cy + R, outline=LINE)
-            for lab, ang in (("N", 0), ("E", 90), ("S", 180), ("W", 270)):
-                ax = cx + (R - 9) * math.sin(math.radians(ang))
-                ay = cy - (R - 9) * math.cos(math.radians(ang))
-                comp.create_text(ax, ay, text=lab, fill=DIM, font=("Segoe UI", 8))
-            h = state["heading"]
-            # Field-of-view wedge, then the facing arrow on top.
-            half = state["fov"] / 2.0
-            pts = [cx, cy]
-            a = h - half
-            while a <= h + half + 0.01:
-                pts += [cx + R * math.sin(math.radians(a)),
-                        cy - R * math.cos(math.radians(a))]
-                a += 6
-            if len(pts) >= 6:
-                comp.create_polygon(pts, fill="#14314a", outline="")
-            comp.create_line(cx, cy, cx + R * math.sin(math.radians(h)),
-                             cy - R * math.cos(math.radians(h)), fill=GREEN, width=3,
-                             arrow="last")
-            comp.create_text(cx, cy + R + 8, text="%d°" % round(h), fill=INK,
-                             font=("Segoe UI", 9, "bold"))
+        mapw = AimMap(body, self, cam.get("lat"), cam.get("lon"),
+                      heading=cam.get("heading", 0) or 0, fov=cam.get("fov", 60) or 60,
+                      reach=cam.get("reach_m", 45) or 45, on_change=on_map)
+        mapw.pack(fill="x", pady=(2, 6))
 
-        def set_heading_from(ev):
-            dx, dy = ev.x - 60, ev.y - 60
-            if dx == 0 and dy == 0:
-                return
-            state["heading"] = (math.degrees(math.atan2(dx, -dy))) % 360
-            draw_compass()
-        comp.bind("<Button-1>", set_heading_from)
-        comp.bind("<B1-Motion>", set_heading_from)
-
-        sld = tk.Frame(body, bg=BG)
-        sld.pack(fill="x", pady=(8, 2))
-
-        def mkscale(row, label, lo, hi, key, unit):
-            tk.Label(row, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9), width=12,
-                     anchor="w").pack(side="left")
-            var = tk.DoubleVar(value=state[key])
-
-            def on(_v):
-                state[key] = float(var.get())
-                draw_compass()
-            s = tk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=var,
-                         command=on, bg=BG, fg=INK, troughcolor="#0a0e15",
-                         highlightthickness=0, relief="flat", showvalue=True)
-            s.pack(side="left", fill="x", expand=True)
-
-        r1 = tk.Frame(body, bg=BG)
-        r1.pack(fill="x")
-        mkscale(r1, "Facing °", 0, 359, "heading", "°")
-        r2 = tk.Frame(body, bg=BG)
-        r2.pack(fill="x")
-        mkscale(r2, "How wide °", 10, 120, "fov", "°")
-        r3 = tk.Frame(body, bg=BG)
-        r3.pack(fill="x")
-        mkscale(r3, "How far m", 15, 200, "reach", "m")
-
-        # "Point it down the road": a place at the far end of the view -> a bearing
-        # from the camera to there, so aiming needs no compass guesswork.
-        dr = tk.Frame(body, bg=BG)
-        dr.pack(fill="x", pady=(6, 0))
-        drq = tk.Entry(dr, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
-                       font=("Segoe UI", 9), highlightthickness=1, highlightbackground=LINE)
-        drq.pack(side="left", fill="x", expand=True, ipady=3)
-
-        def point_down():
-            q = drq.get().strip()
-            if not q:
-                setstat.configure(text="Type what is at the far end of the view, then "
-                                  "Point.", fg=AMBER)
-                return
+        def latlon_typed(_e=None):
             try:
-                la, lo = float(late.get()), float(lone.get())
+                mapw.set_camera(float(late.get()), float(lone.get()))
             except ValueError:
-                setstat.configure(text="Set the camera's own lat/lon first.", fg=AMBER)
-                return
+                pass
+        for _ent in (late, lone):
+            _ent.bind("<Return>", latlon_typed)
+            _ent.bind("<FocusOut>", latlon_typed)
 
-            def got(hit, err):
-                if not hit:
-                    setstat.configure(text=err or "no match", fg=RED)
-                    return
-                dla = math.radians(hit["lat"] - la)
-                dlo = math.radians(hit["lon"] - lo)
-                y = math.sin(dlo) * math.cos(math.radians(hit["lat"]))
-                x = (math.cos(math.radians(la)) * math.sin(math.radians(hit["lat"]))
-                     - math.sin(math.radians(la)) * math.cos(math.radians(hit["lat"]))
-                     * math.cos(dlo))
-                state["heading"] = (math.degrees(math.atan2(y, x))) % 360
-                draw_compass()
-                setstat.configure(text="Aimed toward " + hit.get("name", q), fg=GREEN)
-            self._geocode(q, got)
-        tk.Button(dr, text="Point", command=point_down, bg="#141c28", fg=INK,
-                  relief="flat", cursor="hand2", font=("Segoe UI", 9),
-                  activebackground="#1b2432", activeforeground=INK
-                  ).pack(side="left", padx=(6, 0), ipadx=6, ipady=2)
-        tk.Label(body, text="e.g. the shop or cross street the camera looks toward",
-                 bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w").pack(fill="x",
-                                                                       pady=(1, 10))
+        # Live preview of what the camera sees right now, so aiming is not blind.
+        prev = tk.Label(body, bg="#000000", fg=DIM, text="● preview…",
+                        font=("Segoe UI", 9), height=4)
+        prev.pack(fill="x", pady=(0, 8))
 
         # --- Share on the public map -----------------------------------
         shvar = tk.BooleanVar(value=bool(cam.get("publish_span")))
@@ -1364,9 +1637,6 @@ class App(tk.Tk):
                  "published either way.", bg=BG, fg=DIM, font=("Segoe UI", 8),
                  anchor="w", wraplength=460, justify="left").pack(fill="x")
 
-        draw_compass()
-
-        # Live preview of what the camera sees right now, so aiming is not blind.
         def grab_prev():
             src = cam.get("source")
             if not src:
@@ -1404,8 +1674,8 @@ class App(tk.Tk):
                 def show():
                     if b64[0]:
                         try:
-                            state["prevkeep"] = tk.PhotoImage(data=b64[0])
-                            prev.configure(image=state["prevkeep"], text="")
+                            hold["prev"] = tk.PhotoImage(data=b64[0])
+                            prev.configure(image=hold["prev"], text="")
                         except Exception:
                             pass
                     else:
@@ -1416,12 +1686,12 @@ class App(tk.Tk):
 
         def do_save():
             name = namee.get().strip() or cam.get("name") or "Camera"
-            try:
-                lat, lon = float(late.get()), float(lone.get())
-            except ValueError:
-                setstat.configure(text="Latitude and longitude must be numbers - use Find.",
-                                  fg=AMBER)
+            m = mapw.get()
+            if not m["has_fix"]:
+                setstat.configure(text="Place the camera first - drag the dot, Find an "
+                                  "address, or Use my location.", fg=AMBER)
                 return
+            lat, lon = m["lat"], m["lon"]
             savebtn.configure(state="disabled", text="Saving…")
             setstat.configure(text="Saving the aim and settings…", fg=AMBER)
 
@@ -1433,9 +1703,9 @@ class App(tk.Tk):
                     return
                 cam["name"] = name
                 cam["lat"], cam["lon"] = lat, lon
-                cam["heading"] = round(state["heading"], 1)
-                cam["fov"] = round(state["fov"])
-                cam["reach_m"] = round(state["reach"])
+                cam["heading"] = m["heading"]
+                cam["fov"] = m["fov"]
+                cam["reach_m"] = m["reach"]
                 # A big move mints a new node; adopt its id + token or we post as a
                 # camera that no longer exists where it claims to.
                 if res.get("moved_from") and res.get("id"):
@@ -1468,8 +1738,8 @@ class App(tk.Tk):
                 else:
                     finish("")
             self._enroll_node(name, lat, lon, after_enroll, node=cam.get("node"),
-                              token=cam.get("token"), heading=round(state["heading"], 1),
-                              fov=round(state["fov"]), reach_m=round(state["reach"]))
+                              token=cam.get("token"), heading=m["heading"],
+                              fov=m["fov"], reach_m=m["reach"])
         savebtn.configure(command=do_save)
 
     def _persist(self):
@@ -1493,6 +1763,188 @@ class App(tk.Tk):
             self._settings_dialog(self.view[1])
             return
         messagebox.showinfo(APP, "Click a camera, then “Aim & settings” to aim it.")
+
+    def _review_dialog(self):
+        """Review flagged passes IN THE APP - no browser. A camera you add here
+        gets its own reviewer token automatically (saved in the config, never
+        shown), so the queue below is yours. Crops are fetched with that token,
+        shown, never written to disk; your verdict posts straight back."""
+        tokens = dict(self.cfg.get("review_tokens", {}))
+        dlg = tk.Toplevel(self)
+        dlg.title("Review - patrol-car checks")
+        dlg.configure(bg=BG)
+        dlg.geometry("560x720")
+        dlg.transient(self)
+
+        head = tk.Frame(dlg, bg=PANEL)
+        head.pack(side="top", fill="x")
+        tk.Label(head, text="Review", bg=PANEL, fg=INK, font=("Segoe UI", 13, "bold"),
+                 anchor="w").pack(fill="x", padx=14, pady=(10, 0))
+        sub = tk.Label(head, text="Checking your queue…", bg=PANEL, fg=DIM,
+                       font=("Segoe UI", 9), anchor="w", wraplength=520,
+                       justify="left")
+        sub.pack(fill="x", padx=14, pady=(2, 10))
+
+        canv = tk.Canvas(dlg, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(dlg, orient="vertical", command=canv.yview)
+        inner = tk.Frame(canv, bg=BG)
+        inner.bind("<Configure>",
+                   lambda e: canv.configure(scrollregion=canv.bbox("all")))
+        canv.create_window((0, 0), window=inner, anchor="nw", width=540)
+        canv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canv.pack(side="left", fill="both", expand=True)
+
+        if not tokens:
+            sub.configure(text="")
+            tk.Label(inner, text="No reviewer access yet.\n\nAdd a camera in this app "
+                     "and it gets its own reviewer token automatically - then the "
+                     "passes it flags show up here for you to confirm. Nothing to "
+                     "copy or paste.", bg=BG, fg=DIM, font=("Segoe UI", 10),
+                     justify="left", wraplength=500, anchor="w"
+                     ).pack(fill="x", padx=16, pady=20)
+            return
+
+        self._rv_imgs = {}
+        hub = self._hub().rstrip("/")
+
+        def decode(data):
+            try:
+                if HAVE_PIL:
+                    import io
+                    return ImageTk.PhotoImage(
+                        PILImage.open(io.BytesIO(data)).convert("RGB"))
+                import cv2
+                import numpy as np
+                arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if arr is None:
+                    return None
+                rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                good, buf = cv2.imencode(".png", rgb)
+                if good:
+                    return tk.PhotoImage(data=base64.b64encode(buf).decode())
+            except Exception:
+                return None
+            return None
+
+        def fetch_crop(it, imglab):
+            url = hub + (it.get("crop") or "")
+            tok = it["_tok"]
+
+            def work():
+                photo = None
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"Authorization": "Bearer " + tok})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        photo = decode(r.read())
+                except Exception:
+                    photo = None
+
+                def fin():
+                    if photo is not None:
+                        self._rv_imgs[id(imglab)] = photo
+                        imglab.configure(image=photo, text="")
+                    else:
+                        imglab.configure(text="(could not load the image)")
+                try:
+                    self.after(0, fin)
+                except Exception:
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+
+        def verdict(it, v, row):
+            tok = it["_tok"]
+
+            def work():
+                ok = False
+                try:
+                    body = json.dumps({"id": it.get("id"), "verdict": v}).encode()
+                    req = urllib.request.Request(
+                        hub + "/api/rv/verdict", data=body,
+                        headers={"Content-Type": "application/json",
+                                 "Authorization": "Bearer " + tok})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        r.read()
+                    ok = True
+                except Exception:
+                    ok = False
+
+                def fin():
+                    if ok:
+                        for w in row.winfo_children():
+                            w.destroy()
+                        label = {"cop": "patrol car", "gov": "government",
+                                 "not": "not one"}.get(v, v)
+                        tk.Label(row, text="✓ Marked " + label, bg="#0d1219",
+                                 fg=GREEN, font=("Segoe UI", 9), anchor="w"
+                                 ).pack(fill="x", padx=8, pady=8)
+                    else:
+                        sub.configure(text="That verdict did not go through - "
+                                           "try again.", fg=AMBER)
+                try:
+                    self.after(0, fin)
+                except Exception:
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+
+        def render_list(items, err):
+            if err and not items:
+                sub.configure(text="Could not load your review queue: " + err)
+                return
+            if not items:
+                sub.configure(text="Nothing waiting - you are all caught up.")
+                return
+            sub.configure(text="%d flagged pass%s waiting. Is it a patrol car?"
+                          % (len(items), "" if len(items) == 1 else "es"))
+            for it in items:
+                row = tk.Frame(inner, bg="#0d1219", highlightthickness=1,
+                               highlightbackground=LINE)
+                row.pack(fill="x", padx=12, pady=6)
+                imglab = tk.Label(row, bg="#0d1219", text="loading…", fg=DIM,
+                                  font=("Segoe UI", 9))
+                imglab.pack(fill="x", padx=6, pady=6)
+                meta = "%s · score %s" % (
+                    it.get("node_name") or it.get("node_id") or "camera",
+                    it.get("score", "?"))
+                tk.Label(row, text=meta, bg="#0d1219", fg=DIM,
+                         font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=8)
+                btns = tk.Frame(row, bg="#0d1219")
+                btns.pack(fill="x", padx=6, pady=(4, 8))
+                for lab, vv, col in (("Patrol car", "cop", GREEN),
+                                     ("Government", "gov", AMBER),
+                                     ("Not one", "not", "#8794a8")):
+                    tk.Button(btns, text=lab,
+                              command=lambda it=it, vv=vv, row=row: verdict(it, vv, row),
+                              bg="#141c28", fg=col, relief="flat", cursor="hand2",
+                              font=("Segoe UI", 9, "bold"), activebackground="#1b2432",
+                              activeforeground=INK).pack(side="left", expand=True,
+                                                         fill="x", padx=3, ipady=3)
+                fetch_crop(it, imglab)
+
+        def load():
+            seen, merged, err = set(), [], None
+            for tok in tokens.values():
+                try:
+                    req = urllib.request.Request(
+                        hub + "/api/rv/queue?scope=mine",
+                        headers={"Authorization": "Bearer " + tok})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        d = json.loads(r.read().decode())
+                    for it in (d.get("items") or []):
+                        iid = it.get("id")
+                        if iid in seen:
+                            continue
+                        seen.add(iid)
+                        it["_tok"] = tok
+                        merged.append(it)
+                except Exception as e:
+                    err = str(e)
+            try:
+                self.after(0, lambda: render_list(merged, err))
+            except Exception:
+                pass
+        threading.Thread(target=load, daemon=True).start()
 
     def _open(self, path):
         webbrowser.open(self._hub().rstrip("/") + path)

@@ -31,7 +31,15 @@ DIST = ROOT / "desktop" / "dist"
 # a development-only dependency that has no business in a shop's download.
 EXCLUDE = ["torch", "torchvision", "ultralytics", "transformers", "open_clip",
            "open_clip_torch", "scipy", "pandas", "matplotlib", "PIL.ImageQt",
-           "PyQt5", "PySide2", "IPython", "notebook", "sklearn", "sympy"]
+           "PyQt5", "PySide2", "IPython", "notebook", "sklearn", "sympy",
+           # Pulled into the build venv when tkintermapview was tried, but the app
+           # self-renders OSM tiles on a Tk canvas (native PNG decode) and talks to
+           # the hub with urllib - none of these belong in the light download. PIL
+           # is excluded on purpose so HAVE_PIL stays False and the exe decodes
+           # crops with the cv2 it already ships, as it always has.
+           "PIL", "Pillow", "tkintermapview", "customtkinter", "geopy", "geocoder",
+           "geographiclib", "requests", "urllib3", "charset_normalizer", "certifi",
+           "idna", "darkdetect", "pyperclip", "ratelim", "future"]
 
 
 def main() -> int:
