@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -56,6 +57,23 @@ CFG = Path.home() / ".sparrowmap" / "desktop.json"
 BG, PANEL, INK, DIM, LINE = "#0a0d12", "#111621", "#e6ecf5", "#8794a8", "#2a3547"
 RED, GREEN, AMBER = "#ff3b47", "#3ddc97", "#f5b73d"
 BOX_BGR = (97, 220, 61)                 # the green used for tracking boxes
+
+
+def _resource(name: str) -> str:
+    """Absolute path to a bundled asset, in the exe (sys._MEIPASS) or the repo.
+
+    Lets the window wear the real SparrowMap mark whether it runs from source or
+    from the PyInstaller bundle (favicon.ico / icon-192.png are added to datas)."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        p = Path(base) / name
+        if p.exists():
+            return str(p)
+    here = Path(__file__).resolve().parent
+    for cand in (here / name, here.parent / "public" / name):
+        if cand.exists():
+            return str(cand)
+    return name
 
 # 🚨 IMPORTED, NOT SHELLED OUT TO. Bundled by PyInstaller into one exe, there is
 # no `python -m detect.relay` to run: the interpreter IS this program.
@@ -250,6 +268,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP)
+        self._set_icon()
         self.configure(bg=BG)
         self.geometry("1000x720")
         self.minsize(760, 520)
@@ -267,6 +286,19 @@ class App(tk.Tk):
         self.after(150, self._pump)
         self.protocol("WM_DELETE_WINDOW", self._close)
         threading.Thread(target=self._load_model, daemon=True).start()
+
+    def _set_icon(self):
+        """Wear the SparrowMap sparrow-in-a-pin, not Tk's default feather."""
+        try:
+            self.iconbitmap(default=_resource("favicon.ico"))
+        except Exception:
+            pass
+        try:                              # taskbar/alt-tab on top of the title bar
+            if HAVE_PIL:
+                self._icon_img = ImageTk.PhotoImage(PILImage.open(_resource("icon-192.png")))
+                self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
 
     # -- model -----------------------------------------------------------
     def _load_model(self):
@@ -461,16 +493,19 @@ class App(tk.Tk):
         d = tk.Toplevel(self)
         d.title("Add a camera")
         d.configure(bg=BG)
-        d.geometry("440x400")
+        d.geometry("460x660")
         d.transient(self)
+        try:
+            d.iconbitmap(default=_resource("favicon.ico"))
+        except Exception:
+            pass
+
+        # A scrollable body so the form fits any window without clipping the
+        # Add button off the bottom (the old dialog had no visible submit for a
+        # taller screen - the whole point of this rewrite).
         fields = {}
-        rows = [("name", "Name (e.g. Front door)"),
-                ("source", "Stream address  (rtsp://…  or  0 for a USB webcam)"),
-                ("node", "Camera id   (optional - needed only to post to the map)"),
-                ("token", "Token   (optional)"),
-                ("lat", "Latitude   (optional)"),
-                ("lon", "Longitude  (optional)")]
-        for key, label in rows:
+
+        def _field(key, label):
             tk.Label(d, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9),
                      anchor="w").pack(fill="x", padx=16, pady=(10, 2))
             e = tk.Entry(d, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
@@ -478,28 +513,183 @@ class App(tk.Tk):
                          highlightbackground=LINE, highlightcolor="#3d8cff")
             e.pack(fill="x", padx=16, ipady=4)
             fields[key] = e
+            return e
+
+        _field("name", "Name (e.g. Front door)")
+        _field("source", "Stream address  (rtsp://…  or  0 for a USB webcam)")
+
+        # Test connection: open the stream right here so you KNOW it works before
+        # you save it, instead of finding out from a red tile on the wall.
+        teststat = tk.Label(d, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                            anchor="w", wraplength=420, justify="left")
+
+        def test():
+            src = fields["source"].get().strip()
+            if not src:
+                teststat.configure(text="Enter the stream address first.", fg=AMBER)
+                return
+            testbtn.configure(state="disabled", text="Testing…")
+            teststat.configure(text="Opening the stream… a bubble/ONVIF camera can "
+                                    "take ~10s on the first connect.", fg=AMBER)
+
+            def work():
+                ok = False
+                try:
+                    from detect import relay
+                    s = int(src) if src.isdigit() else src
+                    cap = relay.open_stream(s)
+                    ok = cap is not None
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                except Exception:
+                    ok = False
+
+                def done():
+                    testbtn.configure(state="normal", text="Test connection")
+                    if ok:
+                        teststat.configure(text="✓ Camera opened - the stream is good.",
+                                           fg=GREEN)
+                    else:
+                        teststat.configure(text="✗ Could not open it. Check the address, "
+                                                "and that the camera (or its bridge) is "
+                                                "running.", fg=RED)
+                self.after(0, done)
+            threading.Thread(target=work, daemon=True).start()
+
+        testbtn = tk.Button(d, text="Test connection", command=test, bg="#141c28",
+                            fg=INK, relief="flat", cursor="hand2",
+                            font=("Segoe UI", 9), activebackground="#1b2432",
+                            activeforeground=INK)
+        testbtn.pack(fill="x", padx=16, pady=(8, 0), ipady=3)
+        teststat.pack(fill="x", padx=16, pady=(4, 2))
+
+        # Place it on the map by ADDRESS, so there's no typing raw lat/lon. The
+        # lookup is proxied by our own hub (/api/geocode) - the search never
+        # leaves through the browser, same privacy rule as the website.
+        _field("address", "Where is it?  Type an address or place, then Find")
+        addrstat = tk.Label(d, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                            anchor="w", wraplength=420, justify="left")
+        hitsf = tk.Frame(d, bg=BG)
+
+        def find():
+            qy = fields["address"].get().strip()
+            if len(qy) < 3:
+                addrstat.configure(text="Type a bit more of the address.", fg=AMBER)
+                return
+            findbtn.configure(state="disabled", text="Finding…")
+            addrstat.configure(text="Searching…", fg=AMBER)
+
+            def work():
+                results, err = [], None
+                try:
+                    url = (self._hub().rstrip("/") + "/api/geocode?q="
+                           + urllib.parse.quote(qy))
+                    with urllib.request.urlopen(url, timeout=15) as r:
+                        data = json.loads(r.read().decode())
+                    results = data.get("results") or []
+                    err = data.get("error")
+                except Exception:
+                    err = "Could not search just now. Type lat/lon below by hand."
+                self.after(0, lambda: show(results, err))
+
+            def show(results, err):
+                findbtn.configure(state="normal", text="Find")
+                for w in hitsf.winfo_children():
+                    w.destroy()
+                if err:
+                    addrstat.configure(text=err, fg=AMBER)
+                    return
+                if not results:
+                    addrstat.configure(text="Nothing found. Try street + town without a "
+                                            "unit number, or type lat/lon below.", fg=AMBER)
+                    return
+                addrstat.configure(text="Pick the right one:", fg=DIM)
+                for r in results[:6]:
+                    tk.Button(hitsf, text=r.get("name", ""), anchor="w", bg="#0a0e15",
+                              fg=INK, relief="flat", cursor="hand2", justify="left",
+                              font=("Segoe UI", 9), activebackground="#1b2432",
+                              activeforeground=INK,
+                              command=lambda rr=r: pick(rr)
+                              ).pack(fill="x", padx=2, pady=1, ipady=2)
+
+            def pick(r):
+                for key, v in (("lat", r.get("lat")), ("lon", r.get("lon"))):
+                    fields[key].delete(0, "end")
+                    if v is not None:
+                        fields[key].insert(0, f"{float(v):.6f}")
+                for w in hitsf.winfo_children():
+                    w.destroy()
+                addrstat.configure(text="✓ Location filled in below - you can still "
+                                        "nudge it, or set the facing later in Aim.",
+                                   fg=GREEN)
+            threading.Thread(target=work, daemon=True).start()
+
+        findbtn = tk.Button(d, text="Find", command=find, bg="#141c28", fg=INK,
+                            relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                            activebackground="#1b2432", activeforeground=INK)
+        findbtn.pack(fill="x", padx=16, pady=(8, 0), ipady=3)
+        addrstat.pack(fill="x", padx=16, pady=(4, 2))
+        hitsf.pack(fill="x", padx=16)
+
+        # Lat/lon stay visible and editable - the address Find fills them, but a
+        # hand-typed pair still works.
+        latlon = tk.Frame(d, bg=BG)
+        latlon.pack(fill="x", padx=16, pady=(6, 2))
+        for key, lab in (("lat", "Latitude"), ("lon", "Longitude")):
+            col = tk.Frame(latlon, bg=BG)
+            col.pack(side="left", expand=True, fill="x", padx=(0, 8) if key == "lat" else 0)
+            tk.Label(col, text=lab, bg=BG, fg=DIM, font=("Segoe UI", 9),
+                     anchor="w").pack(fill="x")
+            e = tk.Entry(col, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+                         font=("Consolas", 10), highlightthickness=1,
+                         highlightbackground=LINE, highlightcolor="#3d8cff")
+            e.pack(fill="x", ipady=4)
+            fields[key] = e
+
+        _field("node", "Camera id   (optional - only needed to post to the map)")
+        _field("token", "Token   (optional)")
 
         def save():
+            src = fields["source"].get().strip()
+            if not src:
+                return messagebox.showerror(APP, "Enter the camera's stream address "
+                                                 "(rtsp://…  or  0 for a USB webcam).")
+            try:
+                lat = float(fields["lat"].get()) if fields["lat"].get().strip() else 0.0
+                lon = float(fields["lon"].get()) if fields["lon"].get().strip() else 0.0
+            except ValueError:
+                return messagebox.showerror(APP, "Latitude and longitude must be numbers, "
+                                                 "or left blank. Use Find to fill them in.")
             cam = {
                 "id": _new_id(self.cameras),
                 "name": fields["name"].get().strip() or f"Camera {len(self.cameras)+1}",
-                "source": fields["source"].get().strip(),
+                "source": src,
                 "node": fields["node"].get().strip(),
                 "token": fields["token"].get().strip(),
-                "lat": float(fields["lat"].get() or 0) if fields["lat"].get().strip() else 0.0,
-                "lon": float(fields["lon"].get() or 0) if fields["lon"].get().strip() else 0.0,
+                "lat": lat,
+                "lon": lon,
             }
-            if not cam["source"]:
-                return messagebox.showerror(APP, "Enter the camera's stream address.")
             self.cameras.append(cam)
             self._persist()
             d.destroy()
             self._show_grid()
             self._start_one(cam)
+            where = (f"On the map at {lat:.5f}, {lon:.5f}." if (lat or lon)
+                     else "No map spot yet - open Aim to place it and set its facing.")
+            messagebox.showinfo(APP, f'Added "{cam["name"]}".\n\n'
+                                     f"It is connecting now and will show up on the wall.\n"
+                                     f"{where}")
 
-        tk.Button(d, text="Add", command=save, bg=GREEN, fg="#0b0e13", relief="flat",
-                  cursor="hand2", font=("Segoe UI", 10, "bold")
-                  ).pack(fill="x", padx=16, pady=16, ipady=6)
+        tk.Button(d, text="＋  Add camera", command=save, bg=GREEN, fg="#0b0e13",
+                  relief="flat", cursor="hand2", font=("Segoe UI", 11, "bold"),
+                  activebackground="#5fe8ae"
+                  ).pack(fill="x", padx=16, pady=(14, 8), ipady=8)
+        tk.Button(d, text="Cancel", command=d.destroy, bg=BG, fg=DIM, relief="flat",
+                  cursor="hand2", font=("Segoe UI", 9), activebackground=BG,
+                  activeforeground=INK).pack(pady=(0, 10))
 
     def _remove(self, cid):
         cam = next((c for c in self.cameras if c["id"] == cid), None)

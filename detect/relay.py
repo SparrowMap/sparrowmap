@@ -130,7 +130,15 @@ GONE_S = 0.9        # unseen this long and the pass is over
 SEND_EVERY_S = 5.0  # at most one crop per this often, per camera
 VEHICLE = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
-OPEN_TIMEOUT_MS = 8000
+# 🚨 15s, not 8s: a go2rtc/ffmpeg RE-STREAM (the local bridge in front of an
+# EseeCloud/bubble or ONVIF camera) spends ~6-8s establishing the upstream
+# producer before it answers the first RTSP read. Measured against teru151:
+# cold opens landed at 6.2-7.8s, right on the old 8000ms edge, so a slightly
+# slow cold open returned None and the camera "could not be opened" even though
+# VLC played the identical URL. Give the handshake real headroom; a genuinely
+# dead host is still bounded (it blocks at most this long, then open_stream
+# retries once and gives up), and the worker reconnects on its own after that.
+OPEN_TIMEOUT_MS = 15000
 READ_TIMEOUT_MS = 8000
 HLS_READ_TIMEOUT_MS = 30000   # longer than any HLS segment; see open_stream
 UA = "SparrowMap-relay/0.1"
@@ -193,9 +201,15 @@ def open_stream(url: str):
     # measured, a "drop" and a reopen every ~8 s. Give a playlist a timeout longer
     # than any segment; an RTSP camera keeps the short one.
     read_ms = HLS_READ_TIMEOUT_MS if ".m3u8" in url else READ_TIMEOUT_MS
-    cap.open(url, cv2.CAP_FFMPEG,
-             [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
-              cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms])
+    # Try twice: the first open against a cold re-streamer (go2rtc bubble/ONVIF
+    # bridge) is what pays the ~6-8s producer spin-up; if it still misses, the
+    # producer is now warm and a second attempt connects in well under a second.
+    for attempt in range(2):
+        cap.open(url, cv2.CAP_FFMPEG,
+                 [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
+                  cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_ms])
+        if cap.isOpened():
+            break
     if not cap.isOpened():
         return None
     # A camera streams whether or not anyone is reading, so a slow consumer

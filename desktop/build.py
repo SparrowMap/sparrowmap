@@ -17,6 +17,7 @@ download into something nobody will install. The exclusion is the feature.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,13 @@ def main() -> int:
     ico = ROOT / "public" / "favicon.ico"
     if ico.exists():
         cmd += ["--icon", str(ico)]
+    # Bundle the mark so the running WINDOW/taskbar wears the SparrowMap sparrow
+    # (App._set_icon loads these via sys._MEIPASS). --icon alone only stamps the
+    # .exe file icon; iconbitmap/iconphoto need the files present at runtime.
+    for asset in ("favicon.ico", "icon-192.png"):
+        p = ROOT / "public" / asset
+        if p.exists():
+            cmd += ["--add-data", f"{p}{os.pathsep}."]
     cmd.append(str(APP))
 
     print("building…")
