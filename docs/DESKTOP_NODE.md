@@ -32,8 +32,8 @@ the government-vehicle calls for a whole instance.
 
 ⚠️ **Two installers, and they are not versions of each other.**
 `SparrowMapCameraSetup.exe` is *this* guide's node: a webcam, the full models,
-about 2.5 GB. The **Add an IP Camera** app (still filed as `SparrowMap4Biz.exe`
-on the release) is the light relay for an IP camera. Neither
+about 2.5 GB. The **Add an IP Camera** app (`SparrowMap.exe`, renamed from
+`SparrowMap4Biz.exe`) is the light relay for an IP camera. Neither
 replaces the other — see [Which download?](https://github.com/SparrowMap/sparrowmap/releases/tag/v0.1.0)
 
 Everything still holds to the same rule: **recognition happens on your machine,
