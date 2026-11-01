@@ -151,6 +151,26 @@
     <p class="note"><b>Use the SUB stream</b> where the camera offers one. A 4K
        main stream is wasted here and much harder to decode; the vehicle only
        needs to be a few hundred pixels across.</p>
+
+    <!-- 🚨 WYZE: a cheap, common camera a shop may already own, and a long-time
+         user confirmed it works here. Only the models with OFFICIAL RTSP are
+         named. The Gwell-based OG / OG Telephoto / Pan v4 have no RTSP route, so
+         they are called out so nobody buys one expecting it to work.
+         Re-verified against Wyze's 2026-02-02 firmware announcement on
+         2026-11-01: Cam v3 + Pan v3 = official RTSP (app 3.9+); Cam v4 = beta. -->
+    <div class="note" style="border-left-color:var(--cam)">
+      <b style="color:var(--cam);display:block;margin-bottom:4px">Have a Wyze camera? It works.</b>
+      The <b>Cam v3</b> and <b>Pan v3</b> have official RTSP, and the
+      <b>Cam v4</b> is adding it in beta. (The OG, OG Telephoto and Pan v4 do not
+      offer RTSP and will not work.) To turn it on:
+      <ol style="margin:8px 0 0;padding-left:18px;line-height:1.75">
+        <li>Update the camera's firmware and the Wyze app (3.9 or newer), then in
+            the camera's <b>Settings &rarr; Advanced Settings &rarr; RTSP</b>,
+            switch it on and set a username and password.</li>
+        <li>Copy the <code style="color:#b9c6d8">rtsp://</code> address the app shows you.</li>
+        <li>Paste it into the <b>Stream URL</b> box above (or into the app).</li>
+      </ol>
+    </div>
   </div>
 
   <!-- ---------------------------------------------------------------- 4 -->
