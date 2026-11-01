@@ -361,11 +361,14 @@ class App(tk.Tk):
         self._clear_body()
         if not self.cameras:
             tk.Label(self.body, text="No cameras yet.", bg=BG, fg=DIM,
-                     font=("Segoe UI", 12)).pack(pady=(40, 6))
-            tk.Button(self.body, text="Set one up  →", command=lambda: self._open("/IPCamera"),
-                      bg="#141c28", fg=INK, relief="flat", cursor="hand2",
-                      font=("Segoe UI", 10), activebackground="#1b2432",
-                      activeforeground=INK).pack()
+                     font=("Segoe UI", 12)).pack(pady=(40, 4))
+            tk.Label(self.body, text="One button finds your cameras, places them, and "
+                     "sets them up here. No website, no copying.", bg=BG, fg=DIM,
+                     font=("Segoe UI", 9), wraplength=420, justify="center").pack(pady=(0, 10))
+            tk.Button(self.body, text="Set up a camera  →", command=self._add_dialog,
+                      bg=GREEN, fg="#0b0e13", relief="flat", cursor="hand2",
+                      font=("Segoe UI", 11, "bold"), activebackground="#5fe8ae"
+                      ).pack(ipadx=8, ipady=4)
             return
         n = len(self.cameras)
         cols = 1 if n == 1 else (2 if n <= 4 else 3)
@@ -490,47 +493,190 @@ class App(tk.Tk):
 
     # -- add / remove ----------------------------------------------------
     def _add_dialog(self):
+        """The WHOLE camera setup, inside the app - no website, no copy/paste.
+        Find cameras on the network (the local relay's streams + RTSP hosts),
+        pick one with a live thumbnail, place it by address, test, and Add. Add
+        enrols the camera with the server right here and stores its keys
+        silently; they are never shown for copying."""
         d = tk.Toplevel(self)
-        d.title("Add a camera")
+        d.title("Set up a camera")
         d.configure(bg=BG)
-        d.geometry("460x660")
+        d.geometry("500x760")
+        d.minsize(440, 560)
         d.transient(self)
         try:
             d.iconbitmap(default=_resource("favicon.ico"))
         except Exception:
             pass
 
-        # A scrollable body so the form fits any window without clipping the
-        # Add button off the bottom (the old dialog had no visible submit for a
-        # taller screen - the whole point of this rewrite).
+        picked = {"source": ""}
+
+        # Add / Cancel sit in a bottom bar packed FIRST, so they stay on screen
+        # however tall the found-cameras list grows (the old dialog could push
+        # its submit button off the bottom - the bug this whole rewrite fixes).
+        bottom = tk.Frame(d, bg=PANEL)
+        bottom.pack(side="bottom", fill="x")
+        addstat = tk.Label(bottom, text="", bg=PANEL, fg=DIM, font=("Segoe UI", 9),
+                           anchor="w", wraplength=460, justify="left")
+        addstat.pack(fill="x", padx=16, pady=(6, 0))
+        addbtn = tk.Button(bottom, text="＋  Add this camera", bg=GREEN, fg="#0b0e13",
+                           relief="flat", cursor="hand2", font=("Segoe UI", 11, "bold"),
+                           activebackground="#5fe8ae")
+        addbtn.pack(fill="x", padx=16, pady=(6, 6), ipady=8)
+        tk.Button(bottom, text="Cancel", command=d.destroy, bg=PANEL, fg=DIM,
+                  relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                  activebackground=PANEL, activeforeground=INK).pack(pady=(0, 8))
+
+        # A scrollable middle, so the found list + preview + address never clip.
+        canvas = tk.Canvas(d, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(d, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        def close():
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            d.destroy()
+        d.protocol("WM_DELETE_WINDOW", close)
+
         fields = {}
 
-        def _field(key, label):
-            tk.Label(d, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9),
+        def _field(parent, key, label):
+            tk.Label(parent, text=label, bg=BG, fg=DIM, font=("Segoe UI", 9),
                      anchor="w").pack(fill="x", padx=16, pady=(10, 2))
-            e = tk.Entry(d, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
+            e = tk.Entry(parent, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
                          font=("Consolas", 10), highlightthickness=1,
                          highlightbackground=LINE, highlightcolor="#3d8cff")
             e.pack(fill="x", padx=16, ipady=4)
             fields[key] = e
             return e
 
-        _field("name", "Name (e.g. Front door)")
-        _field("source", "Stream address  (rtsp://…  or  0 for a USB webcam)")
+        _field(body, "name", "Name it  (e.g. Front door)")
 
-        # Test connection: open the stream right here so you KNOW it works before
-        # you save it, instead of finding out from a red tile on the wall.
-        teststat = tk.Label(d, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
-                            anchor="w", wraplength=420, justify="left")
+        # 1) FIND. One button scans the LAN for RTSP cameras and asks the local
+        # relay (go2rtc) for its ready-made streams, then lists them to pick.
+        tk.Label(body, text="1 · Find your camera", bg=BG, fg=INK,
+                 font=("Segoe UI", 10, "bold"), anchor="w"
+                 ).pack(fill="x", padx=16, pady=(14, 2))
+        scanbtn = tk.Button(body, text="\U0001f50d  Scan my network", bg="#141c28", fg=INK,
+                            relief="flat", cursor="hand2", font=("Segoe UI", 10),
+                            activebackground="#1b2432", activeforeground=INK)
+        scanbtn.pack(fill="x", padx=16, ipady=4)
+        scanstat = tk.Label(body, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                            anchor="w", wraplength=460, justify="left")
+        scanstat.pack(fill="x", padx=16, pady=(4, 2))
+        candf = tk.Frame(body, bg=BG)
+        candf.pack(fill="x", padx=16)
 
-        def test():
-            src = fields["source"].get().strip()
-            if not src:
-                teststat.configure(text="Enter the stream address first.", fg=AMBER)
+        srcentry = _field(body, "source",
+                          "Stream address  (filled by a pick above, or type rtsp://… / 0 for USB)")
+
+        thumbwrap = tk.Label(body, bg="#000000", fg=DIM, text="", font=("Segoe UI", 9))
+
+        def set_thumb(b64):
+            if not b64:
+                thumbwrap.configure(image="", text="(no picture yet - check the login/path)",
+                                    height=4, fg=AMBER)
+                thumbwrap.pack(fill="x", padx=16, pady=(8, 2))
                 return
+            try:
+                img = tk.PhotoImage(data=b64)
+                d._thumb = img
+                thumbwrap.configure(image=img, text="", height=0)
+                thumbwrap.pack(fill="x", padx=16, pady=(8, 2))
+            except Exception:
+                pass
+
+        def grab_thumb(src):
+            thumbwrap.configure(image="", text="● opening a preview…", height=4, fg=DIM)
+            thumbwrap.pack(fill="x", padx=16, pady=(8, 2))
+
+            def work():
+                b64 = None
+                try:
+                    import cv2
+                    from detect import relay
+                    s = int(src) if str(src).strip().isdigit() else src
+                    cap = relay.open_stream(s)
+                    if cap is not None:
+                        ok, frame = False, None
+                        for _ in range(4):
+                            ok, frame = cap.read()
+                            if ok:
+                                break
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        if ok and frame is not None:
+                            h, w = frame.shape[:2]
+                            tw = 320
+                            th = max(1, int(h * tw / w))
+                            frame = cv2.resize(frame, (tw, th))
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            good, buf = cv2.imencode(".png", rgb)
+                            if good:
+                                b64 = base64.b64encode(buf).decode()
+                except Exception:
+                    b64 = None
+                self.after(0, lambda: set_thumb(b64))
+            threading.Thread(target=work, daemon=True).start()
+
+        def pick(cand):
+            picked["source"] = cand["source"]
+            srcentry.delete(0, "end")
+            srcentry.insert(0, cand["source"])
+            if not fields["name"].get().strip() and cand.get("name"):
+                fields["name"].insert(0, cand["name"])
+            grab_thumb(cand["source"])
+
+        def show_cands(cands):
+            for w in candf.winfo_children():
+                w.destroy()
+            if not cands:
+                scanstat.configure(text="Nothing found automatically. Type the stream "
+                                        "address below, or 0 for a USB webcam.", fg=AMBER)
+                return
+            scanstat.configure(text="Pick your camera (a preview opens below):", fg=DIM)
+            for c in cands:
+                tk.Button(candf, text=c["label"], anchor="w", bg="#0a0e15", fg=INK,
+                          relief="flat", cursor="hand2", justify="left",
+                          font=("Segoe UI", 9), activebackground="#1b2432",
+                          activeforeground=INK, command=lambda cc=c: pick(cc)
+                          ).pack(fill="x", padx=2, pady=1, ipady=3)
+
+        def scan():
+            scanbtn.configure(state="disabled", text="Scanning…")
+            scanstat.configure(text="Looking for cameras on your network and local "
+                                    "relay… (a few seconds)", fg=AMBER)
+
+            def work():
+                cands = self._scan_candidates()
+                self.after(0, lambda: (scanbtn.configure(state="normal",
+                           text="\U0001f50d  Scan again"), show_cands(cands)))
+            threading.Thread(target=work, daemon=True).start()
+        scanbtn.configure(command=scan)
+
+        # An explicit Test too (the thumbnail already proves a pick, but a
+        # hand-typed address wants a check before Add).
+        def test():
+            src = srcentry.get().strip()
+            if not src:
+                teststat.configure(text="Pick a camera above or type its address first.",
+                                   fg=AMBER)
+                return
+            grab_thumb(src)
             testbtn.configure(state="disabled", text="Testing…")
-            teststat.configure(text="Opening the stream… a bubble/ONVIF camera can "
-                                    "take ~10s on the first connect.", fg=AMBER)
+            teststat.configure(text="Opening the stream… a relay/ONVIF camera can take "
+                                    "~10s the first time.", fg=AMBER)
 
             def work():
                 ok = False
@@ -549,30 +695,29 @@ class App(tk.Tk):
 
                 def done():
                     testbtn.configure(state="normal", text="Test connection")
-                    if ok:
-                        teststat.configure(text="✓ Camera opened - the stream is good.",
-                                           fg=GREEN)
-                    else:
-                        teststat.configure(text="✗ Could not open it. Check the address, "
-                                                "and that the camera (or its bridge) is "
-                                                "running.", fg=RED)
+                    teststat.configure(
+                        text=("✓ It opened - the stream is good." if ok else
+                              "✗ Could not open it. Check the login/path, or that the "
+                              "camera (or its relay) is on."),
+                        fg=(GREEN if ok else RED))
                 self.after(0, done)
             threading.Thread(target=work, daemon=True).start()
-
-        testbtn = tk.Button(d, text="Test connection", command=test, bg="#141c28",
-                            fg=INK, relief="flat", cursor="hand2",
-                            font=("Segoe UI", 9), activebackground="#1b2432",
-                            activeforeground=INK)
+        testbtn = tk.Button(body, text="Test connection", command=test, bg="#141c28",
+                            fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                            activebackground="#1b2432", activeforeground=INK)
         testbtn.pack(fill="x", padx=16, pady=(8, 0), ipady=3)
+        teststat = tk.Label(body, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                            anchor="w", wraplength=460, justify="left")
         teststat.pack(fill="x", padx=16, pady=(4, 2))
 
-        # Place it on the map by ADDRESS, so there's no typing raw lat/lon. The
-        # lookup is proxied by our own hub (/api/geocode) - the search never
-        # leaves through the browser, same privacy rule as the website.
-        _field("address", "Where is it?  Type an address or place, then Find")
-        addrstat = tk.Label(d, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
-                            anchor="w", wraplength=420, justify="left")
-        hitsf = tk.Frame(d, bg=BG)
+        # 2) PLACE IT by address (geocode proxied by our hub, same as the site).
+        tk.Label(body, text="2 · Where is it?", bg=BG, fg=INK,
+                 font=("Segoe UI", 10, "bold"), anchor="w"
+                 ).pack(fill="x", padx=16, pady=(14, 2))
+        _field(body, "address", "Type an address or place, then Find")
+        addrstat = tk.Label(body, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                            anchor="w", wraplength=460, justify="left")
+        hitsf = tk.Frame(body, bg=BG)
 
         def find():
             qy = fields["address"].get().strip()
@@ -611,36 +756,32 @@ class App(tk.Tk):
                     tk.Button(hitsf, text=r.get("name", ""), anchor="w", bg="#0a0e15",
                               fg=INK, relief="flat", cursor="hand2", justify="left",
                               font=("Segoe UI", 9), activebackground="#1b2432",
-                              activeforeground=INK,
-                              command=lambda rr=r: pick(rr)
+                              activeforeground=INK, command=lambda rr=r: pickloc(rr)
                               ).pack(fill="x", padx=2, pady=1, ipady=2)
 
-            def pick(r):
+            def pickloc(r):
                 for key, v in (("lat", r.get("lat")), ("lon", r.get("lon"))):
                     fields[key].delete(0, "end")
                     if v is not None:
                         fields[key].insert(0, f"{float(v):.6f}")
                 for w in hitsf.winfo_children():
                     w.destroy()
-                addrstat.configure(text="✓ Location filled in below - you can still "
-                                        "nudge it, or set the facing later in Aim.",
-                                   fg=GREEN)
+                addrstat.configure(text="✓ Location set below - you can still nudge "
+                                        "it, or set the facing later in Aim.", fg=GREEN)
             threading.Thread(target=work, daemon=True).start()
-
-        findbtn = tk.Button(d, text="Find", command=find, bg="#141c28", fg=INK,
+        findbtn = tk.Button(body, text="Find", command=find, bg="#141c28", fg=INK,
                             relief="flat", cursor="hand2", font=("Segoe UI", 9),
                             activebackground="#1b2432", activeforeground=INK)
         findbtn.pack(fill="x", padx=16, pady=(8, 0), ipady=3)
         addrstat.pack(fill="x", padx=16, pady=(4, 2))
         hitsf.pack(fill="x", padx=16)
 
-        # Lat/lon stay visible and editable - the address Find fills them, but a
-        # hand-typed pair still works.
-        latlon = tk.Frame(d, bg=BG)
-        latlon.pack(fill="x", padx=16, pady=(6, 2))
+        latlon = tk.Frame(body, bg=BG)
+        latlon.pack(fill="x", padx=16, pady=(6, 10))
         for key, lab in (("lat", "Latitude"), ("lon", "Longitude")):
             col = tk.Frame(latlon, bg=BG)
-            col.pack(side="left", expand=True, fill="x", padx=(0, 8) if key == "lat" else 0)
+            col.pack(side="left", expand=True, fill="x",
+                     padx=(0, 8) if key == "lat" else 0)
             tk.Label(col, text=lab, bg=BG, fg=DIM, font=("Segoe UI", 9),
                      anchor="w").pack(fill="x")
             e = tk.Entry(col, bg="#0a0e15", fg=INK, insertbackground=INK, relief="flat",
@@ -649,47 +790,131 @@ class App(tk.Tk):
             e.pack(fill="x", ipady=4)
             fields[key] = e
 
-        _field("node", "Camera id   (optional - only needed to post to the map)")
-        _field("token", "Token   (optional)")
-
-        def save():
-            src = fields["source"].get().strip()
+        # ADD: enrol with the server HERE, store the keys silently, start watching.
+        def do_add():
+            src = srcentry.get().strip()
             if not src:
-                return messagebox.showerror(APP, "Enter the camera's stream address "
-                                                 "(rtsp://…  or  0 for a USB webcam).")
+                addstat.configure(text="Pick a camera or type its address first.", fg=AMBER)
+                return
+            name = fields["name"].get().strip() or f"Camera {len(self.cameras) + 1}"
+            latv, lonv = fields["lat"].get().strip(), fields["lon"].get().strip()
+            if not (latv and lonv):
+                addstat.configure(text="Find where the camera is first (step 2), so it "
+                                       "has a spot on the map.", fg=AMBER)
+                return
             try:
-                lat = float(fields["lat"].get()) if fields["lat"].get().strip() else 0.0
-                lon = float(fields["lon"].get()) if fields["lon"].get().strip() else 0.0
+                lat, lon = float(latv), float(lonv)
             except ValueError:
-                return messagebox.showerror(APP, "Latitude and longitude must be numbers, "
-                                                 "or left blank. Use Find to fill them in.")
-            cam = {
-                "id": _new_id(self.cameras),
-                "name": fields["name"].get().strip() or f"Camera {len(self.cameras)+1}",
-                "source": src,
-                "node": fields["node"].get().strip(),
-                "token": fields["token"].get().strip(),
-                "lat": lat,
-                "lon": lon,
-            }
-            self.cameras.append(cam)
-            self._persist()
-            d.destroy()
-            self._show_grid()
-            self._start_one(cam)
-            where = (f"On the map at {lat:.5f}, {lon:.5f}." if (lat or lon)
-                     else "No map spot yet - open Aim to place it and set its facing.")
-            messagebox.showinfo(APP, f'Added "{cam["name"]}".\n\n'
-                                     f"It is connecting now and will show up on the wall.\n"
-                                     f"{where}")
+                addstat.configure(text="Latitude and longitude must be numbers - use Find.",
+                                  fg=AMBER)
+                return
+            addbtn.configure(state="disabled", text="Adding…")
+            addstat.configure(text="Registering the camera with SparrowMap…", fg=AMBER)
 
-        tk.Button(d, text="＋  Add camera", command=save, bg=GREEN, fg="#0b0e13",
-                  relief="flat", cursor="hand2", font=("Segoe UI", 11, "bold"),
-                  activebackground="#5fe8ae"
-                  ).pack(fill="x", padx=16, pady=(14, 8), ipady=8)
-        tk.Button(d, text="Cancel", command=d.destroy, bg=BG, fg=DIM, relief="flat",
-                  cursor="hand2", font=("Segoe UI", 9), activebackground=BG,
-                  activeforeground=INK).pack(pady=(0, 10))
+            def done(res, err):
+                if err or not res:
+                    addbtn.configure(state="normal", text="＋  Add this camera")
+                    addstat.configure(text="Could not register it: "
+                                      + (err or "no reply") + ". Try Add again.", fg=RED)
+                    return
+                cam = {"id": _new_id(self.cameras), "name": name, "source": src,
+                       "node": res.get("id", ""), "token": res.get("token", ""),
+                       "lat": lat, "lon": lon}
+                self.cameras.append(cam)
+                if res.get("review_token"):
+                    self.cfg.setdefault("review_tokens", {})[cam["id"]] = res["review_token"]
+                self._persist()
+                close()
+                self._show_grid()
+                self._start_one(cam)
+                messagebox.showinfo(APP, 'Added "' + name + '".\n\n'
+                    "It is registered, connecting now, and will show up on the wall "
+                    "and on the map at %.5f, %.5f.\n\n"
+                    "Nothing was copied or pasted - its keys are kept inside the app."
+                    % (lat, lon))
+            self._enroll_node(name, lat, lon, done)
+        addbtn.configure(command=do_add)
+
+    def _scan_candidates(self):
+        """Cameras we can offer without the user knowing an address: the local
+        relay's (go2rtc) ready-made streams, a USB webcam, and any host on the
+        LAN answering on an RTSP port. Runs off the UI thread (called in one)."""
+        import socket
+        import ipaddress
+        from concurrent.futures import ThreadPoolExecutor
+        cands = []
+        # go2rtc / local relay streams - fully-formed URLs, so previews work at
+        # once (this is how teru151 / doorbell show up on his own machine).
+        for host in ("127.0.0.1",):
+            try:
+                with urllib.request.urlopen("http://%s:1984/api/streams" % host,
+                                            timeout=1.5) as r:
+                    streams = json.loads(r.read().decode())
+                for nm in (streams or {}):
+                    cands.append({"label": "\U0001f3a5  %s   (local relay)" % nm,
+                                  "name": nm, "source": "rtsp://%s:8554/%s" % (host, nm)})
+            except Exception:
+                pass
+        # a USB webcam, always worth offering on a shop PC
+        cands.append({"label": "\U0001f4f7  USB webcam on this PC", "name": "Webcam",
+                      "source": "0"})
+        # RTSP cameras on the LAN (host only; a login/path may still be needed)
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            myip = s.getsockname()[0]
+            s.close()
+            net = ipaddress.ip_network(myip + "/24", strict=False)
+            hosts = [str(h) for h in net.hosts()]
+
+            def probe(h):
+                for port in (554, 8554):
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as k:
+                            k.settimeout(0.4)
+                            if k.connect_ex((h, port)) == 0:
+                                return h, port
+                    except OSError:
+                        pass
+                return None
+            with ThreadPoolExecutor(max_workers=128) as ex:
+                for res in ex.map(probe, hosts):
+                    if res:
+                        h, port = res
+                        cands.append({
+                            "label": "\U0001f4f9  %s:%d   (RTSP camera - may need login/path)"
+                                     % (h, port),
+                            "name": "", "source": "rtsp://%s:%d/" % (h, port)})
+        except Exception:
+            pass
+        return cands
+
+    def _enroll_node(self, name, lat, lon, cb):
+        """Register the camera with the hub from inside the app and hand back its
+        id + token. The token never appears in the UI - it goes straight into the
+        saved config and is used only to post this camera's own sightings."""
+        def work():
+            res, err = None, None
+            try:
+                payload = json.dumps({"name": name, "lat": lat, "lng": lon, "lon": lon,
+                                      "kind": "fixed"}).encode()
+                req = urllib.request.Request(
+                    self._hub().rstrip("/") + "/api/enroll", data=payload,
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    res = json.loads(r.read().decode())
+                if isinstance(res, dict) and res.get("error"):
+                    err, res = res["error"], None
+            except urllib.error.HTTPError as e:
+                try:
+                    err = json.loads(e.read() or b"{}").get("error", "")
+                except Exception:
+                    err = ""
+                err = err or ("the server said %d" % e.code)
+            except Exception as ex:
+                err = "could not reach SparrowMap (%s)" % ex.__class__.__name__
+            self.after(0, lambda: cb(res, err))
+        threading.Thread(target=work, daemon=True).start()
 
     def _remove(self, cid):
         cam = next((c for c in self.cameras if c["id"] == cid), None)
