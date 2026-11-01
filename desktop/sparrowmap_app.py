@@ -75,6 +75,49 @@ def _resource(name: str) -> str:
             return str(cand)
     return name
 
+# Cloud / Wi-Fi cameras that offer no RTSP still announce their maker in the MAC
+# address. BRAND_HINTS turns a maker into a plain next step. kind: "enable" = you
+# can turn RTSP on in the camera's own app and then Scan again; "cloud" = there
+# is no local RTSP, it needs RTSP AnyCam (coming). Hints are drawn from
+# D:/LLM/rtsp-anycam/BRANDS.md (researched 2026-11-01).
+BRAND_HINTS = {
+    "wyze":      ("enable", "Wyze camera: turn on RTSP in the Wyze app (Cam v3 / Pan v3, firmware 2/2026+), then Scan again. OG / Pan v4 have no RTSP."),
+    "ring":      ("cloud",  "Ring camera: no local RTSP. Needs RTSP AnyCam (coming), through your Ring login."),
+    "nest":      ("cloud",  "Google Nest camera: no local RTSP. Needs RTSP AnyCam (coming), Google's camera API."),
+    "google":    ("cloud",  "Google / Nest device: if it is a Nest camera, RTSP needs AnyCam (coming)."),
+    "arlo":      ("cloud",  "Arlo camera: no RTSP. Needs RTSP AnyCam (coming), cloud login."),
+    "blink":     ("cloud",  "Blink camera (Amazon): no RTSP. Needs RTSP AnyCam (coming), cloud login."),
+    "amazon":    ("cloud",  "Amazon device: could be a Ring or Blink camera (or an Echo). A Ring/Blink cam needs RTSP AnyCam (coming)."),
+    "eufy":      ("enable", "Eufy / Anker camera: wired / HomeBase models can turn on RTSP in the app (under storage); battery models need AnyCam (coming)."),
+    "tplink":    ("enable", "TP-Link camera (Tapo/Kasa): wired Tapo - turn on a Camera Account in the Tapo app for RTSP; Kasa needs AnyCam (coming)."),
+    "reolink":   ("enable", "Reolink camera: turn on RTSP/ONVIF in the Reolink app (wired/PoE), then Scan again; battery needs a Hub/NVR."),
+    "hikvision": ("enable", "Hikvision camera: turn on RTSP (port 554) in the camera, then Scan again."),
+    "ezviz":     ("enable", "EZVIZ camera: turn on RTSP under LAN Live View in the EZVIZ app, then Scan again."),
+    "dahua":     ("enable", "Dahua camera: turn on RTSP (port 554) in the camera, then Scan again."),
+    "amcrest":   ("enable", "Amcrest camera: RTSP is usually on (port 554). Scan again, or type rtsp://admin:pass@IP:554/cam/realmonitor?channel=1&subtype=0."),
+    "ubiquiti":  ("enable", "UniFi Protect: turn on RTSP(S) per camera in the console, then add the rtsps:// URL."),
+    "xiaomi":    ("cloud",  "Xiaomi (Mi Home) camera: no local RTSP. Needs RTSP AnyCam (coming)."),
+    "tuya":      ("cloud",  "Tuya / Smart Life camera: no local RTSP. Needs RTSP AnyCam (coming)."),
+    "zmodo":     ("enable", "Zmodo device: some older models offer RTSP (port 10554); newer firmware disables it."),
+    "swann":     ("enable", "Swann camera: RTSP on selected models only - check the manual, then Scan again."),
+    "lorex":     ("enable", "Lorex camera: wired models often expose RTSP (port 554); Wi-Fi models may not."),
+    "roku":      ("cloud",  "Roku camera: no confirmed RTSP route yet; AnyCam (coming) will try."),
+}
+
+_OUI_CACHE = None
+
+def _camera_ouis() -> dict:
+    """The MAC-prefix -> brand map (camera_ouis.json), loaded once. Empty if the
+    file is missing, so the scan degrades to RTSP-only rather than crashing."""
+    global _OUI_CACHE
+    if _OUI_CACHE is None:
+        try:
+            with open(_resource("camera_ouis.json"), encoding="utf-8") as f:
+                _OUI_CACHE = json.load(f)
+        except Exception:
+            _OUI_CACHE = {}
+    return _OUI_CACHE
+
 # 🚨 IMPORTED, NOT SHELLED OUT TO. Bundled by PyInstaller into one exe, there is
 # no `python -m detect.relay` to run: the interpreter IS this program.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -642,6 +685,8 @@ class App(tk.Tk):
             for w in candf.winfo_children():
                 w.destroy()
             # A short note on where each kind came from, so a pick is not a mystery.
+            pickable = [c for c in cands if c.get("where") != "hint"]
+            brandcams = [c for c in cands if c.get("where") == "hint"]
             nrelay = sum(1 for c in cands if c.get("where") == "relay")
             nnet = sum(1 for c in cands if c.get("where") == "network")
             ncam = sum(1 for c in cands if c.get("where") == "webcam")
@@ -652,18 +697,37 @@ class App(tk.Tk):
                 parts.append("%d on your network" % nnet)
             parts.append("%d webcam%s" % (ncam, "" if ncam == 1 else "s")
                          if ncam else "no webcam found")
+            if brandcams:
+                parts.append("%d brand camera%s that need a step"
+                             % (len(brandcams), "" if len(brandcams) == 1 else "s"))
             note = "Found: " + ", ".join(parts) + "."
             if not cands:
                 scanstat.configure(text=note + " Type the stream address below, or plug "
                                         "in a webcam and scan again.", fg=AMBER)
                 return
-            scanstat.configure(text=note + "  Pick one (a preview opens below):", fg=DIM)
-            for c in cands:
+            if pickable:
+                scanstat.configure(text=note + "  Pick one (a preview opens below):",
+                                   fg=DIM)
+            else:
+                scanstat.configure(text=note + "  Each needs a step first, then Scan "
+                                        "again:", fg=DIM)
+            for c in pickable:
                 tk.Button(candf, text=c["label"], anchor="w", bg="#0a0e15", fg=INK,
                           relief="flat", cursor="hand2", justify="left",
                           font=("Segoe UI", 9), activebackground="#1b2432",
                           activeforeground=INK, command=lambda cc=c: pick(cc)
                           ).pack(fill="x", padx=2, pady=1, ipady=3)
+            # Cameras we recognised by maker but that give no RTSP yet: show the
+            # step to take, not a dead "pick" that cannot open.
+            if brandcams:
+                tk.Label(candf, text="These are cameras, but need a step first:",
+                         bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w"
+                         ).pack(fill="x", padx=2, pady=(8, 1))
+                for c in brandcams:
+                    fg = AMBER if c.get("kind") == "cloud" else "#9fe6c4"
+                    tk.Label(candf, text=c["label"], anchor="w", bg="#0a0e15", fg=fg,
+                             justify="left", font=("Segoe UI", 8), wraplength=430
+                             ).pack(fill="x", padx=2, pady=1, ipady=2)
 
         def scan():
             scanbtn.configure(state="disabled", text="Scanning…")
@@ -924,9 +988,48 @@ class App(tk.Tk):
                                      % (h, port),
                             "name": "", "where": "network",
                             "source": "rtsp://%s:%d/" % (h, port)})
+            # The port sweep above has now ARP-resolved every live host, so the
+            # ARP table names them by MAC. Cloud / Wi-Fi cameras that gave no RTSP
+            # are still recognisable by their maker's OUI - list each with a step.
+            known = {c["source"].split("//", 1)[-1].split(":")[0]
+                     for c in cands if c.get("where") == "network"}
+            known.add(myip)
+            cands.extend(self._scan_lan_vendors(known))
         except Exception:
             pass
         return cands
+
+    def _scan_lan_vendors(self, known_ips):
+        """Read the ARP table and, for each device whose MAC maker is a known
+        camera brand, return a hint row (where='hint', not pickable) with a plain
+        next step. Skips anything already found as an RTSP camera. Never leaves
+        the PC - ARP is local, the OUI lookup is a bundled file."""
+        import re
+        import subprocess
+        hints, seen = [], set()
+        try:
+            flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+            out = subprocess.run(["arp", "-a"], capture_output=True, text=True,
+                                 timeout=6, creationflags=flags).stdout
+        except Exception:
+            return hints
+        ouis = _camera_ouis()
+        for ip, mac in re.findall(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})", out):
+            if ip in known_ips or ip in seen or ip.endswith(".255") or ip.startswith("224."):
+                continue
+            prefix = re.sub(r"[-:]", "", mac).upper()[:6]
+            if prefix in ("FFFFFF", "000000"):
+                continue
+            brand = ouis.get(prefix)
+            hint = BRAND_HINTS.get(brand) if brand else None
+            if not hint:
+                continue
+            seen.add(ip)
+            kind, text = hint
+            icon = "\U0001f527" if kind == "enable" else "☁️"  # wrench / cloud
+            hints.append({"where": "hint", "kind": kind, "source": "",
+                          "label": "%s  %s  (at %s)" % (icon, text, ip)})
+        return hints
 
     def _enroll_node(self, name, lat, lon, cb):
         """Register the camera with the hub from inside the app and hand back its

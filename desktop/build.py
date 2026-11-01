@@ -65,6 +65,11 @@ def main() -> int:
         p = ROOT / "public" / asset
         if p.exists():
             cmd += ["--add-data", f"{p}{os.pathsep}."]
+    # The camera-brand OUI map, so the network scan can name a cloud camera by
+    # its MAC vendor (Wyze/Ring/Nest/...) even when it offers no RTSP.
+    ouis = ROOT / "desktop" / "camera_ouis.json"
+    if ouis.exists():
+        cmd += ["--add-data", f"{ouis}{os.pathsep}."]
     cmd.append(str(APP))
 
     print("building…")
