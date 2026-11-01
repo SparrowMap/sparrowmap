@@ -641,11 +641,23 @@ class App(tk.Tk):
         def show_cands(cands):
             for w in candf.winfo_children():
                 w.destroy()
+            # A short note on where each kind came from, so a pick is not a mystery.
+            nrelay = sum(1 for c in cands if c.get("where") == "relay")
+            nnet = sum(1 for c in cands if c.get("where") == "network")
+            ncam = sum(1 for c in cands if c.get("where") == "webcam")
+            parts = []
+            if nrelay:
+                parts.append("%d on the relay" % nrelay)
+            if nnet:
+                parts.append("%d on your network" % nnet)
+            parts.append("%d webcam%s" % (ncam, "" if ncam == 1 else "s")
+                         if ncam else "no webcam found")
+            note = "Found: " + ", ".join(parts) + "."
             if not cands:
-                scanstat.configure(text="Nothing found automatically. Type the stream "
-                                        "address below, or 0 for a USB webcam.", fg=AMBER)
+                scanstat.configure(text=note + " Type the stream address below, or plug "
+                                        "in a webcam and scan again.", fg=AMBER)
                 return
-            scanstat.configure(text="Pick your camera (a preview opens below):", fg=DIM)
+            scanstat.configure(text=note + "  Pick one (a preview opens below):", fg=DIM)
             for c in cands:
                 tk.Button(candf, text=c["label"], anchor="w", bg="#0a0e15", fg=INK,
                           relief="flat", cursor="hand2", justify="left",
@@ -851,13 +863,39 @@ class App(tk.Tk):
                                             timeout=1.5) as r:
                     streams = json.loads(r.read().decode())
                 for nm in (streams or {}):
-                    cands.append({"label": "\U0001f3a5  %s   (local relay)" % nm,
-                                  "name": nm, "source": "rtsp://%s:8554/%s" % (host, nm)})
+                    cands.append({"label": "\U0001f3a5  %s   (on the local relay)" % nm,
+                                  "name": nm, "where": "relay",
+                                  "source": "rtsp://%s:8554/%s" % (host, nm)})
             except Exception:
                 pass
-        # a USB webcam, always worth offering on a shop PC
-        cands.append({"label": "\U0001f4f7  USB webcam on this PC", "name": "Webcam",
-                      "source": "0"})
+        # USB webcam(s) actually PLUGGED IN: open each index and read one frame.
+        # DirectShow fails fast on an absent/unplugged device, so this does not
+        # hang when there is no camera (the point of the probe).
+        try:
+            import cv2
+            for i in range(4):
+                cap = None
+                try:
+                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                    ok = bool(cap and cap.isOpened())
+                    frame = None
+                    if ok:
+                        ok, frame = cap.read()
+                    if ok and frame is not None:
+                        cands.append({
+                            "label": "\U0001f4f7  USB webcam on this PC (camera %d)" % i,
+                            "name": "Webcam %d" % i if i else "Webcam",
+                            "where": "webcam", "source": str(i)})
+                except Exception:
+                    pass
+                finally:
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         # RTSP cameras on the LAN (host only; a login/path may still be needed)
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -882,9 +920,10 @@ class App(tk.Tk):
                     if res:
                         h, port = res
                         cands.append({
-                            "label": "\U0001f4f9  %s:%d   (RTSP camera - may need login/path)"
+                            "label": "\U0001f4f9  %s:%d   (on your network, RTSP - may need login/path)"
                                      % (h, port),
-                            "name": "", "source": "rtsp://%s:%d/" % (h, port)})
+                            "name": "", "where": "network",
+                            "source": "rtsp://%s:%d/" % (h, port)})
         except Exception:
             pass
         return cands
