@@ -1258,6 +1258,12 @@ class App(tk.Tk):
                                             timeout=1.5) as r:
                     streams = json.loads(r.read().decode())
                 for nm in (streams or {}):
+                    # Only offer a relay stream whose SOURCE answers right now.
+                    # go2rtc keeps a configured stream in the list even when its
+                    # camera is unplugged; listing one we cannot reach is the
+                    # same lie as a stale ARP entry.
+                    if not self._relay_source_live(streams.get(nm)):
+                        continue
                     cands.append({"label": "\U0001f3a5  %s   (on the local relay)" % nm,
                                   "name": nm, "where": "relay",
                                   "source": "rtsp://%s:8554/%s" % (host, nm)})
@@ -1355,12 +1361,79 @@ class App(tk.Tk):
             hint = BRAND_HINTS.get(brand) if brand else None
             if not hint:
                 continue
+            # The ARP table keeps a device for minutes after it leaves the
+            # network, so a known-brand MAC here is NOT proof it is on. Only
+            # hint at one that answers a fresh probe RIGHT NOW - otherwise the
+            # scan shows cameras that are unplugged (e.g. his Roku cams, off).
+            if not self._host_live_now(ip):
+                continue
             seen.add(ip)
             kind, text = hint
             icon = "\U0001f527" if kind == "enable" else "☁️"  # wrench / cloud
             hints.append({"where": "hint", "kind": kind, "source": "",
                           "label": "%s  %s  (at %s)" % (icon, text, ip)})
         return hints
+
+    def _host_live_now(self, ip):
+        """True only if the host at ip answers RIGHT NOW. ARP keeps an entry
+        for a device for minutes after it drops off the network, so a MAC in
+        the table is not proof of presence. A quick TCP knock on the ports a
+        camera usually opens catches most; one ICMP echo catches the ones that
+        keep every port closed. Short timeouts so a scan stays snappy."""
+        import socket
+        import subprocess
+        for port in (80, 554, 443, 8554, 8080):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as k:
+                    k.settimeout(0.3)
+                    if k.connect_ex((ip, port)) == 0:
+                        return True
+            except OSError:
+                pass
+        try:
+            flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+            if sys.platform == "win32":
+                cmd = ["ping", "-n", "1", "-w", "500", ip]
+            else:
+                cmd = ["ping", "-c", "1", "-W", "1", ip]
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=3, creationflags=flags).stdout
+            return "TTL=" in (out or "").upper()
+        except Exception:
+            return False
+
+    def _relay_source_live(self, info):
+        """True if a go2rtc stream's own source is reachable right now. go2rtc
+        leaves a configured stream in /api/streams even when its camera is off,
+        so trusting the list alone offers dead cameras. Probe the first
+        producer's host:port with a fresh, short TCP connect. A source we
+        cannot parse is left listed (fail open) rather than wrongly hidden; a
+        local shim source resolves to 127.0.0.1, which answers while it runs."""
+        import socket
+        prods = (info or {}).get("producers") or []
+        if not prods:
+            return False
+        url = prods[0].get("url") or ""
+        host, port = None, 554
+        try:
+            if "://" in url:
+                auth = url.split("://", 1)[1].split("/", 1)[0]
+                auth = auth.split("?", 1)[0].split("#", 1)[0].rsplit("@", 1)[-1]
+                if ":" in auth:
+                    host, ps = auth.rsplit(":", 1)
+                    port = int(ps)
+                else:
+                    host = auth
+        except Exception:
+            host = None
+        if not host:
+            return True  # cannot parse the source - do not hide what we cannot test
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as k:
+                k.settimeout(0.6)
+                return k.connect_ex((host, port)) == 0
+        except OSError:
+            return False
 
     def _enroll_node(self, name, lat, lon, cb, node=None, token=None,
                      heading=None, fov=None, reach_m=None):
