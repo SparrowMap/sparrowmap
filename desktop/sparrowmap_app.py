@@ -53,7 +53,11 @@ except Exception:
     HAVE_PIL = False
 
 APP = "SparrowMap"
+APP_VERSION = "1.0.0"
 HUB_DEFAULT = "https://map.sparrowmap.com"
+# The version file the app checks at start and once a day. SPARROW_UPDATE_URL
+# lets a test point it at a local server; in the shipped exe it is the hub.
+UPDATE_URL = os.environ.get("SPARROW_UPDATE_URL") or (HUB_DEFAULT + "/app/version.json")
 CFG = Path.home() / ".sparrowmap" / "desktop.json"
 BG, PANEL, INK, DIM, LINE = "#0a0d12", "#111621", "#e6ecf5", "#8794a8", "#2a3547"
 RED, GREEN, AMBER = "#ff3b47", "#3ddc97", "#f5b73d"
@@ -75,6 +79,129 @@ def _resource(name: str) -> str:
         if cand.exists():
             return str(cand)
     return name
+
+
+# --------------------------------------------------------------------------
+# version check + in-place updater
+#
+# The app asks the hub for a small version.json (version, notes, url, sha256) at
+# start and once a day. When it is newer than this build it offers an update;
+# nothing downloads or swaps without a click. "Update now" fetches the exe over
+# HTTPS, VERIFIES the sha256 before trusting a byte of it, then a tiny .bat waits
+# for SparrowMap to exit, copies the new exe over the SAME path (so his Defender
+# path-allow still covers it) and relaunches it hidden in the tray with the
+# cameras resuming. These are module-level and side-effect-free so they can be
+# tested end to end without the window.
+# --------------------------------------------------------------------------
+def _version_tuple(s):
+    """'v1.2.3' -> (1, 2, 3); junk parts become 0 so a bad string never wins."""
+    out = []
+    for part in str(s).strip().lstrip("vV").split("."):
+        digits = ""
+        for ch in part:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        out.append(int(digits) if digits else 0)
+    return tuple(out) or (0,)
+
+
+def _version_newer(remote, local):
+    try:
+        return _version_tuple(remote) > _version_tuple(local)
+    except Exception:
+        return False
+
+
+def fetch_version_info(url=UPDATE_URL, timeout=12):
+    """Return the parsed version.json dict, or None on any failure. Never raises -
+    a down server must not break startup."""
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "SparrowMap/%s" % APP_VERSION})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        if isinstance(data, dict) and data.get("version"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def download_and_verify(url, sha256_hex, dest, timeout=180):
+    """Download url to dest, then check sha256. Returns (ok, message). On ANY
+    mismatch or error the partial file is deleted - an unverified binary is never
+    left where the swap helper could pick it up."""
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "SparrowMap/%s" % APP_VERSION})
+        with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+                f.write(chunk)
+    except Exception as ex:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return False, "download failed (%s)" % ex.__class__.__name__
+    got = h.hexdigest()
+    if sha256_hex and got.lower() != str(sha256_hex).lower():
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return False, "checksum did not match - update refused"
+    return True, got
+
+
+def write_swap_helper(new_file, target, relaunch=True):
+    """Write a .bat that waits for `target` to unlock (the running exe to exit),
+    copies new_file over it IN PLACE, relaunches it hidden in the tray, then
+    deletes the temp file and itself. No PID is used: copy simply fails while the
+    exe holds the file, so it retries until the file is free - PID reuse can never
+    make it swap the wrong thing. It gives up after ~2 min and relaunches whatever
+    is at `target` (new if the copy landed, old if not) so the app is never left
+    closed. `relaunch=False` is for tests only (skips the start line)."""
+    bat = str(Path(new_file).with_suffix(".swap.bat"))
+    start_line = ('start "" "%s" --tray\r\n' % target) if relaunch else ""
+    script = (
+        "@echo off\r\n"
+        "setlocal enabledelayedexpansion\r\n"
+        "set /a n=0\r\n"
+        ":loop\r\n"
+        'copy /y "%s" "%s" >nul 2>&1\r\n' % (new_file, target) +
+        "if not errorlevel 1 goto done\r\n"
+        "set /a n+=1\r\n"
+        "if !n! geq 120 goto done\r\n"
+        "ping -n 2 127.0.0.1 >nul\r\n"
+        "goto loop\r\n"
+        ":done\r\n" +
+        start_line +
+        'del /q "%s" >nul 2>&1\r\n' % new_file +
+        '(goto) 2>nul & del "%~f0"\r\n'
+    )
+    with open(bat, "w", encoding="ascii") as f:
+        f.write(script)
+    return bat
+
+
+def _spawn_detached(cmd):
+    """Launch cmd so it outlives this process and shows no console window - the
+    swap helper must keep running after the app exits."""
+    import subprocess
+    flags = 0
+    kw = {}
+    if os.name == "nt":
+        flags = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+        kw["close_fds"] = True
+    return subprocess.Popen(cmd, creationflags=flags, **kw)
 
 # Cloud / Wi-Fi cameras that offer no RTSP still announce their maker in the MAC
 # address. BRAND_HINTS turns a maker into a plain next step. kind: "enable" = you
@@ -152,6 +279,7 @@ def _migrate(d: dict) -> dict:
     d.setdefault("run_at_login", False)   # the "Start with Windows" checkbox
     d.setdefault("settings_win", "")      # remembered Aim & settings size "WxH"
     d.setdefault("tray_notice_shown", False)
+    d.setdefault("last_update_check", "")  # ISO date of the last version check
     d.setdefault("hub", HUB_DEFAULT)
     return d
 
@@ -759,7 +887,7 @@ class _Tray:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP)
+        self.title("%s %s" % (APP, APP_VERSION))
         self._set_icon()
         self.configure(bg=BG)
         self.geometry("1000x720")
@@ -784,6 +912,10 @@ class App(tk.Tk):
         self.after(1500, self._poll_live)
         self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
         threading.Thread(target=self._load_model, daemon=True).start()
+        if getattr(sys, "frozen", False) or os.environ.get("SPARROW_UPDATE_TARGET"):
+            # Only a real installed exe can swap itself; running from source has
+            # nothing to replace. SPARROW_UPDATE_TARGET lets a test opt in.
+            threading.Thread(target=self._check_update, daemon=True).start()
         if self._launch_tray and self.tray:
             # Started with Windows: come up hidden in the tray, cameras resume
             # once the detector has loaded (see the "ready" case in _pump).
@@ -901,6 +1033,90 @@ class App(tk.Tk):
             except Exception:
                 pass
         self.destroy()
+
+    # -- updates ---------------------------------------------------------
+    def _check_update(self, force=False):
+        """Ask the hub for version.json; offer an update if it is newer. Runs off
+        the UI thread. `force` is the manual 'Check for updates' button and skips
+        the once-a-day guard."""
+        import datetime
+        today = datetime.date.today().isoformat()
+        if not force and self.cfg.get("last_update_check") == today:
+            return
+        info = fetch_version_info()
+        self.cfg["last_update_check"] = today
+        try:
+            save_cfg(self.cfg)
+        except Exception:
+            pass
+        if info and _version_newer(info.get("version"), APP_VERSION):
+            self.q.put(("update", None, info))
+        elif force:
+            self.q.put(("banner", None, "SparrowMap is up to date (%s)." % APP_VERSION))
+
+    def _show_update_banner(self, info):
+        if getattr(self, "_update_bar", None):
+            try:
+                self._update_bar.destroy()
+            except Exception:
+                pass
+        bar = tk.Frame(self, bg="#15324a")
+        self._update_bar = bar
+        notes = (info.get("notes") or "A new version is available.").strip()
+        ver = info.get("version", "")
+        tk.Label(bar, text="Update available (%s): %s" % (ver, notes), bg="#15324a",
+                 fg=INK, font=("Segoe UI", 9), anchor="w").pack(side="left", padx=12, pady=6)
+        tk.Button(bar, text="Later", command=bar.destroy, bg="#15324a", fg=DIM,
+                  relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                  activebackground="#1b3a55", activeforeground=INK
+                  ).pack(side="right", padx=(0, 10))
+        self._update_btn = tk.Button(bar, text="Update now",
+                                     command=lambda: self._do_update(info), bg=GREEN,
+                                     fg="#0b0e13", relief="flat", cursor="hand2",
+                                     font=("Segoe UI", 9, "bold"),
+                                     activebackground="#5fe8ae")
+        self._update_btn.pack(side="right", padx=8, pady=5, ipadx=4)
+        bar.pack(fill="x", after=self.banner)
+
+    def _do_update(self, info):
+        url = info.get("url")
+        if not url:
+            self.banner.configure(text="This update has no download link.")
+            return
+        if getattr(self, "_update_btn", None):
+            try:
+                self._update_btn.configure(state="disabled", text="Updating…")
+            except Exception:
+                pass
+        threading.Thread(target=self._run_update,
+                         args=(url, info.get("sha256")), daemon=True).start()
+
+    def _run_update(self, url, sha):
+        import tempfile
+        target = os.environ.get("SPARROW_UPDATE_TARGET") or sys.executable
+        dest = os.path.join(tempfile.gettempdir(), "SparrowMap.update.exe")
+        ok, msg = download_and_verify(url, sha, dest)
+        if not ok:
+            self.q.put(("banner", None, "Update stopped: " + msg))
+            self.after(0, self._reenable_update)
+            return
+        try:
+            bat = write_swap_helper(dest, target)
+            _spawn_detached(["cmd", "/c", bat])
+        except Exception as ex:
+            self.q.put(("banner", None,
+                        "Update could not start (%s)." % ex.__class__.__name__))
+            self.after(0, self._reenable_update)
+            return
+        # Quit so the exe unlocks; the helper swaps it and relaunches to the tray.
+        self.after(0, self._quit)
+
+    def _reenable_update(self):
+        if getattr(self, "_update_btn", None):
+            try:
+                self._update_btn.configure(state="normal", text="Update now")
+            except Exception:
+                pass
 
     # -- model -----------------------------------------------------------
     def _load_model(self):
@@ -1904,6 +2120,22 @@ class App(tk.Tk):
                        anchor="w", font=("Segoe UI", 10)).pack(fill="x")
         note.pack(fill="x", pady=(10, 0))
 
+        tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(14, 10))
+        ver = tk.Frame(body, bg=BG)
+        ver.pack(fill="x")
+        tk.Label(ver, text="SparrowMap %s" % APP_VERSION, bg=BG, fg=DIM,
+                 font=("Segoe UI", 9), anchor="w").pack(side="left")
+
+        def check_now():
+            note.configure(text="Checking for updates…", fg=DIM)
+            threading.Thread(target=lambda: self._check_update(force=True),
+                             daemon=True).start()
+
+        tk.Button(ver, text="Check for updates", command=check_now, bg="#141c28",
+                  fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 9),
+                  activebackground="#1b2432", activeforeground=INK
+                  ).pack(side="right", ipadx=4)
+
         tk.Button(body, text="Close", command=dlg.destroy, bg="#141c28", fg=INK,
                   relief="flat", cursor="hand2", font=("Segoe UI", 10),
                   activebackground="#1b2432", activeforeground=INK
@@ -2481,6 +2713,8 @@ class App(tk.Tk):
                 elif kind == "ready":
                     if self.cfg.get("autostart") or self._launch_tray:
                         self._toggle_all()
+                elif kind == "update":
+                    self._show_update_banner(val)
                 elif kind == "live":
                     self.live[cid] = val
                     # Only speak for a camera this app is not running itself; a
