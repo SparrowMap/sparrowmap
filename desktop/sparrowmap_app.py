@@ -149,6 +149,9 @@ def _migrate(d: dict) -> dict:
             })
         d["cameras"] = cams
     d.setdefault("autostart", False)
+    d.setdefault("run_at_login", False)   # the "Start with Windows" checkbox
+    d.setdefault("settings_win", "")      # remembered Aim & settings size "WxH"
+    d.setdefault("tray_notice_shown", False)
     d.setdefault("hub", HUB_DEFAULT)
     return d
 
@@ -587,6 +590,170 @@ class AimMap(tk.Frame):
 
 
 # --------------------------------------------------------------------------
+# the system tray (pure ctypes - no extra package in the light download)
+# --------------------------------------------------------------------------
+class _Tray:
+    """A tray icon with a right-click menu, driven from the main thread. A
+    message-only window receives the icon's callbacks; App.pump() drains them
+    every tick, so there is no second thread touching Tk. Windows only; any
+    failure is caught by the caller, which then just closes normally."""
+
+    def __init__(self, icon_path, tip, on_open, on_toggle, on_quit):
+        import ctypes
+        from ctypes import wintypes
+        self.ct, self.wt = ctypes, wintypes
+        self.on_open, self.on_toggle, self.on_quit = on_open, on_toggle, on_quit
+        self.u = ctypes.windll.user32
+        self.k = ctypes.windll.kernel32
+        self.s = ctypes.windll.shell32
+
+        LRESULT = ctypes.c_ssize_t
+        HWND, UINT, WPARAM, LPARAM = wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        DWORD, HICON, LPCWSTR = wintypes.DWORD, wintypes.HICON, wintypes.LPCWSTR
+        WCHAR = ctypes.c_wchar
+
+        # res/argtypes matter on 64-bit: a handle returned OR passed as the
+        # default c_int is truncated, and every call on it then fails.
+        vp = ctypes.c_void_p
+        self.k.GetModuleHandleW.restype = wintypes.HMODULE
+        self.u.DefWindowProcW.restype = LRESULT
+        self.u.DefWindowProcW.argtypes = [HWND, UINT, WPARAM, LPARAM]
+        self.u.CreateWindowExW.restype = HWND
+        self.u.CreateWindowExW.argtypes = [DWORD, LPCWSTR, LPCWSTR, DWORD,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, HWND, vp, vp, vp]
+        self.u.LoadImageW.restype = wintypes.HANDLE
+        self.u.LoadImageW.argtypes = [vp, LPCWSTR, UINT, ctypes.c_int, ctypes.c_int, UINT]
+        self.u.CreatePopupMenu.restype = wintypes.HMENU
+        self.u.AppendMenuW.argtypes = [vp, UINT, vp, LPCWSTR]
+        self.u.TrackPopupMenu.argtypes = [vp, UINT, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int, vp, vp]
+        self.u.DestroyMenu.argtypes = [vp]
+        self.u.SetForegroundWindow.argtypes = [vp]
+        self.u.PostMessageW.argtypes = [vp, UINT, vp, vp]
+        self.u.GetCursorPos.argtypes = [vp]
+        self.u.PeekMessageW.argtypes = [vp, vp, UINT, UINT, UINT]
+        self.s.Shell_NotifyIconW.argtypes = [DWORD, vp]
+
+        self.WM_TRAY = 0x0400 + 1
+        self.ID_OPEN, self.ID_TOGGLE, self.ID_QUIT = 1, 2, 3
+
+        self.WNDPROCTYPE = ctypes.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
+        self._proc_ref = self.WNDPROCTYPE(self._wndproc)
+
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", UINT), ("lpfnWndProc", self.WNDPROCTYPE),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HMODULE), ("hIcon", HICON),
+                        ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HANDLE),
+                        ("lpszMenuName", LPCWSTR), ("lpszClassName", LPCWSTR)]
+
+        class NID(ctypes.Structure):
+            _fields_ = [("cbSize", DWORD), ("hWnd", HWND), ("uID", UINT),
+                        ("uFlags", UINT), ("uCallbackMessage", UINT), ("hIcon", HICON),
+                        ("szTip", WCHAR * 128), ("dwState", DWORD), ("dwStateMask", DWORD),
+                        ("szInfo", WCHAR * 256), ("uVersion", UINT),
+                        ("szInfoTitle", WCHAR * 64), ("dwInfoFlags", DWORD),
+                        ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", HICON)]
+        self._NID = NID
+
+        hinst = self.k.GetModuleHandleW(None)
+        self._wc = WNDCLASS()
+        self._wc.lpfnWndProc = self._proc_ref
+        self._wc.hInstance = hinst
+        self._wc.lpszClassName = "SparrowMapTrayWin"
+        self.u.RegisterClassW(ctypes.byref(self._wc))
+        HWND_MESSAGE = wintypes.HWND(-3)
+        self.hwnd = self.u.CreateWindowExW(0, "SparrowMapTrayWin", "SparrowMap",
+                                           0, 0, 0, 0, 0, HWND_MESSAGE, None, hinst, None)
+
+        IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE = 1, 0x10, 0x40
+        self.hicon = self.u.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0,
+                                       LR_LOADFROMFILE | LR_DEFAULTSIZE)
+
+        self.nid = NID()
+        self.nid.cbSize = ctypes.sizeof(NID)
+        self.nid.hWnd = self.hwnd
+        self.nid.uID = 1
+        self.nid.uFlags = 0x1 | 0x2 | 0x4          # MESSAGE | ICON | TIP
+        self.nid.uCallbackMessage = self.WM_TRAY
+        self.nid.hIcon = self.hicon
+        self.nid.szTip = tip[:127]
+        self.s.Shell_NotifyIconW(0, ctypes.byref(self.nid))   # NIM_ADD
+
+    def _wndproc(self, hwnd, msg, wp, lp):
+        try:
+            if msg == self.WM_TRAY:
+                low = lp & 0xFFFF
+                if low == 0x0202:              # WM_LBUTTONUP - open
+                    self.on_open()
+                elif low in (0x0205, 0x007B):  # WM_RBUTTONUP / WM_CONTEXTMENU - menu
+                    self._menu()
+                return 0
+        except Exception:
+            pass
+        return self.u.DefWindowProcW(hwnd, msg, wp, lp)
+
+    def _menu(self):
+        ct = self.ct
+        running = False
+        try:
+            running = bool(self.on_toggle(peek=True))
+        except Exception:
+            pass
+        hmenu = self.u.CreatePopupMenu()
+        MF_STRING = 0x0
+        self.u.AppendMenuW(hmenu, MF_STRING, self.ID_OPEN, "Open SparrowMap")
+        self.u.AppendMenuW(hmenu, MF_STRING, self.ID_TOGGLE,
+                           "Stop all cameras" if running else "Start all cameras")
+        self.u.AppendMenuW(hmenu, 0x800, 0, None)      # MF_SEPARATOR
+        self.u.AppendMenuW(hmenu, MF_STRING, self.ID_QUIT, "Quit")
+
+        class POINT(ct.Structure):
+            _fields_ = [("x", ct.c_long), ("y", ct.c_long)]
+        pt = POINT()
+        self.u.GetCursorPos(ct.byref(pt))
+        self.u.SetForegroundWindow(self.hwnd)
+        # TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY
+        cmd = self.u.TrackPopupMenu(hmenu, 0x2 | 0x100 | 0x80, pt.x, pt.y, 0, self.hwnd, None)
+        self.u.PostMessageW(self.hwnd, 0, 0, 0)        # WM_NULL - dismiss quirk
+        self.u.DestroyMenu(hmenu)
+        if cmd == self.ID_OPEN:
+            self.on_open()
+        elif cmd == self.ID_TOGGLE:
+            self.on_toggle()
+        elif cmd == self.ID_QUIT:
+            self.on_quit()
+
+    def notify(self, title, text):
+        ct = self.ct
+        self.nid.uFlags = 0x1 | 0x2 | 0x4 | 0x10       # + NIF_INFO
+        self.nid.szInfo = text[:255]
+        self.nid.szInfoTitle = title[:63]
+        self.nid.dwInfoFlags = 0x1                      # NIIF_INFO
+        self.s.Shell_NotifyIconW(1, ct.byref(self.nid))  # NIM_MODIFY
+        self.nid.uFlags = 0x1 | 0x2 | 0x4
+
+    def pump(self):
+        ct = self.ct
+        msg = self.wt.MSG()
+        # Only our own window's messages, so Tk's loop is untouched.
+        while self.u.PeekMessageW(ct.byref(msg), self.hwnd, 0, 0, 1):
+            self.u.TranslateMessage(ct.byref(msg))
+            self.u.DispatchMessageW(ct.byref(msg))
+
+    def remove(self):
+        try:
+            self.s.Shell_NotifyIconW(2, self.ct.byref(self.nid))   # NIM_DELETE
+        except Exception:
+            pass
+        try:
+            self.u.DestroyWindow(self.hwnd)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
 # the window
 # --------------------------------------------------------------------------
 class App(tk.Tk):
@@ -606,11 +773,39 @@ class App(tk.Tk):
         self.imgs: dict = {}          # keep PhotoImage refs alive
         self.view = ("grid", None)
         self.model_ready = False
+        self.live = {}                       # cid -> is the source live right now
+        self._probing = False
+        self.tray = None
+        self._launch_tray = ("--tray" in sys.argv)
         self._build_chrome()
         self._show_grid()
+        self._init_tray()
         self.after(150, self._pump)
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.after(1500, self._poll_live)
+        self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
         threading.Thread(target=self._load_model, daemon=True).start()
+        if self._launch_tray and self.tray:
+            # Started with Windows: come up hidden in the tray, cameras resume
+            # once the detector has loaded (see the "ready" case in _pump).
+            self.after(200, self.withdraw)
+
+    def _init_tray(self):
+        """Put the sparrow in the system tray so the X can hide-not-quit and the
+        app can live there when it starts with Windows. Any failure leaves
+        self.tray None and the X closes the app the old way."""
+        if sys.platform != "win32":
+            return
+        try:
+            def toggle(peek=False):
+                if peek:
+                    return any(w.is_alive() for w in self.workers.values())
+                self.after(0, self._toggle_all)
+            self.tray = _Tray(_resource("favicon.ico"), "SparrowMap",
+                              on_open=lambda: self.after(0, self._show_window),
+                              on_toggle=toggle,
+                              on_quit=lambda: self.after(0, self._quit))
+        except Exception:
+            self.tray = None
 
     def _set_icon(self):
         """Wear the SparrowMap sparrow-in-a-pin, not Tk's default feather."""
@@ -624,6 +819,88 @@ class App(tk.Tk):
                 self.iconphoto(True, self._icon_img)
         except Exception:
             pass
+
+    # -- window / tray ---------------------------------------------------
+    def _workarea(self):
+        """Usable size of the monitor this window is on (minus the taskbar), so
+        a dialog never opens bigger than the screen - his touch screen is only
+        1024x600. Falls back to the whole screen if the monitor query fails."""
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                from ctypes import wintypes
+                u = ctypes.windll.user32
+                u.MonitorFromWindow.restype = ctypes.c_void_p
+                u.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_long]
+
+                class RECT(ctypes.Structure):
+                    _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                                ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+                class MI(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT),
+                                ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
+                hmon = u.MonitorFromWindow(ctypes.c_void_p(self.winfo_id()), 2)   # NEAREST
+                mi = MI()
+                mi.cbSize = ctypes.sizeof(MI)
+                u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                if u.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    w = mi.rcWork.right - mi.rcWork.left
+                    h = mi.rcWork.bottom - mi.rcWork.top
+                    if w > 0 and h > 0:
+                        return int(w * 0.96), int(h * 0.94)
+        except Exception:
+            pass
+        return (max(360, self.winfo_screenwidth() - 80),
+                max(360, self.winfo_screenheight() - 120))
+
+    def _dialog_geometry(self, prefer_w, prefer_h, key):
+        """A 'WxH' string: the remembered size if there is one, else the
+        preferred size, always clamped to the monitor it opens on."""
+        rw, rh = prefer_w, prefer_h
+        saved = (self.cfg.get(key) or "").split("x")
+        if len(saved) == 2:
+            try:
+                rw, rh = int(saved[0]), int(saved[1])
+            except ValueError:
+                rw, rh = prefer_w, prefer_h
+        aw, ah = self._workarea()
+        return "%dx%d" % (max(360, min(rw, aw)), max(360, min(rh, ah)))
+
+    def _show_window(self):
+        self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _hide_to_tray(self):
+        """The X hides to the tray and leaves the cameras running. With no tray
+        (a tray that failed to start, or non-Windows) it closes for real so the
+        X is never a dead button."""
+        if not self.tray:
+            return self._quit()
+        self.withdraw()
+        if not self.cfg.get("tray_notice_shown"):
+            self.cfg["tray_notice_shown"] = True
+            save_cfg(self.cfg)
+            try:
+                self.tray.notify("SparrowMap is still watching",
+                                 "Your cameras keep running. Right-click the tray "
+                                 "icon to open it again or quit.")
+            except Exception:
+                pass
+
+    def _quit(self):
+        for w in self.workers.values():
+            w.stop.set()
+        if self.tray:
+            try:
+                self.tray.remove()
+            except Exception:
+                pass
+        self.destroy()
 
     # -- model -----------------------------------------------------------
     def _load_model(self):
@@ -656,6 +933,10 @@ class App(tk.Tk):
                   fg=INK, relief="flat", cursor="hand2", font=("Segoe UI", 10),
                   activebackground="#1b2432", activeforeground=INK
                   ).pack(side="right", padx=6, pady=11, ipadx=4)
+        tk.Button(head, text="⚙  Settings", command=self._app_settings_dialog,
+                  bg="#141c28", fg=INK, relief="flat", cursor="hand2",
+                  font=("Segoe UI", 10), activebackground="#1b2432",
+                  activeforeground=INK).pack(side="right", padx=6, pady=11, ipadx=4)
         self.banner = tk.Label(self, text="", bg=PANEL, fg=AMBER,
                                font=("Segoe UI", 9), anchor="w")
         self.banner.pack(fill="x")
@@ -726,8 +1007,9 @@ class App(tk.Tk):
         name = tk.Label(bar, text=cam.get("name", cid), bg=PANEL, fg=INK,
                         font=("Segoe UI", 9, "bold"), anchor="w")
         name.pack(side="left", padx=8, pady=5)
-        status = tk.Label(bar, text="stopped", bg=PANEL, fg=DIM,
-                          font=("Segoe UI", 9), anchor="e")
+        on = (cid in self.workers and self.workers[cid].is_alive()) or bool(self.live.get(cid))
+        status = tk.Label(bar, text="running" if on else "stopped", bg=PANEL,
+                          fg=GREEN if on else DIM, font=("Segoe UI", 9), anchor="e")
         status.pack(side="right", padx=8)
         self.tiles[cid] = {"img": img, "status": status, "w": 300}
         if cid in self.workers and self.workers[cid].is_alive():
@@ -1565,6 +1847,68 @@ class App(tk.Tk):
             self.after(0, lambda: cb(lat, lon, err))
         threading.Thread(target=work, daemon=True).start()
 
+    def _app_settings_dialog(self):
+        """The app's own settings (not a camera's): Start with Windows, and start
+        the cameras on launch. 'Start with Windows' just writes a Run entry - it
+        is here, in plain sight, usable any time, because the setup wizard was
+        the only place it ever lived and nobody could find it again."""
+        dlg = tk.Toplevel(self)
+        dlg.title("SparrowMap settings")
+        dlg.configure(bg=BG)
+        dlg.geometry(self._dialog_geometry(460, 360, "app_settings_win"))
+        dlg.minsize(360, 300)
+        dlg.transient(self)
+
+        body = tk.Frame(dlg, bg=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        tk.Label(body, text="Settings", bg=BG, fg=INK,
+                 font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x", pady=(0, 10))
+
+        loginvar = tk.BooleanVar(value=bool(self.cfg.get("run_at_login")))
+        autovar = tk.BooleanVar(value=bool(self.cfg.get("autostart")))
+        note = tk.Label(body, text="", bg=BG, fg=DIM, font=("Segoe UI", 9),
+                        anchor="w", wraplength=400, justify="left")
+
+        def on_login():
+            want = bool(loginvar.get())
+            try:
+                msg = set_autostart(want)
+            except Exception as ex:
+                loginvar.set(not want)
+                note.configure(text="Could not change that: " + ex.__class__.__name__,
+                               fg=RED)
+                return
+            self.cfg["run_at_login"] = want
+            if want:
+                self.cfg["autostart"] = True   # login start implies cameras resume
+                autovar.set(True)
+            save_cfg(self.cfg)
+            note.configure(text=msg + ".", fg=GREEN)
+
+        def on_auto():
+            self.cfg["autostart"] = bool(autovar.get())
+            save_cfg(self.cfg)
+
+        tk.Checkbutton(body, text="Start SparrowMap with Windows",
+                       variable=loginvar, command=on_login, bg=BG, fg=INK,
+                       selectcolor="#0a0e15", activebackground=BG, activeforeground=INK,
+                       anchor="w", font=("Segoe UI", 10)).pack(fill="x", pady=(2, 0))
+        tk.Label(body, text="Comes up hidden in the system tray and starts your "
+                 "cameras, so the computer watches them the moment it is on.",
+                 bg=BG, fg=DIM, font=("Segoe UI", 8), anchor="w",
+                 wraplength=400, justify="left").pack(fill="x", pady=(0, 12))
+
+        tk.Checkbutton(body, text="Start all cameras when the app opens",
+                       variable=autovar, command=on_auto, bg=BG, fg=INK,
+                       selectcolor="#0a0e15", activebackground=BG, activeforeground=INK,
+                       anchor="w", font=("Segoe UI", 10)).pack(fill="x")
+        note.pack(fill="x", pady=(10, 0))
+
+        tk.Button(body, text="Close", command=dlg.destroy, bg="#141c28", fg=INK,
+                  relief="flat", cursor="hand2", font=("Segoe UI", 10),
+                  activebackground="#1b2432", activeforeground=INK
+                  ).pack(side="bottom", fill="x", pady=(14, 0), ipady=4)
+
     def _settings_dialog(self, cid):
         """Aim the camera and change its every setting IN THE APP - no browser.
         Re-saves the SAME node (rename, move, re-aim) through /api/enroll with the
@@ -1579,14 +1923,27 @@ class App(tk.Tk):
         dlg = tk.Toplevel(self)
         dlg.title("Aim & settings - " + cam.get("name", cid))
         dlg.configure(bg=BG)
-        dlg.geometry("500x760")
+        # Open at the remembered size, else a sensible default, but NEVER taller
+        # or wider than the monitor it lands on - his touch screen is 1024x600.
+        dlg.geometry(self._dialog_geometry(500, 820, "settings_win"))
+        dlg.minsize(360, 400)
         dlg.transient(self)
 
         def close():
             try:
+                self.cfg["settings_win"] = "%dx%d" % (dlg.winfo_width(), dlg.winfo_height())
+                save_cfg(self.cfg)
+            except Exception:
+                pass
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            try:
                 dlg.destroy()
             except Exception:
                 pass
+        dlg.protocol("WM_DELETE_WINDOW", close)
 
         # Bottom action bar first, so Save never gets clipped by a tall body.
         bar = tk.Frame(dlg, bg=PANEL)
@@ -1602,8 +1959,21 @@ class App(tk.Tk):
                   cursor="hand2", font=("Segoe UI", 9), activebackground=PANEL
                   ).pack(side="top", pady=(2, 8))
 
-        body = tk.Frame(dlg, bg=BG)
-        body.pack(side="top", fill="both", expand=True, padx=14, pady=12)
+        # Everything below scrolls, so a small screen never clips a control and
+        # Save stays pinned to the bottom bar above.
+        canvas = tk.Canvas(dlg, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="top", fill="both", expand=True)
+        body = tk.Frame(canvas, bg=BG)
+        _win = canvas.create_window((14, 12), window=body, anchor="nw")
+        body.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(_win, width=e.width - 28))
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
 
         # --- Name -------------------------------------------------------
         tk.Label(body, text="Name", bg=BG, fg=INK, font=("Segoe UI", 10, "bold"),
@@ -2043,7 +2413,62 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _poll_live(self):
+        """The tile said 'stopped' for cameras that were plainly on, because it
+        only knew about workers THIS app had started - his cameras are watched
+        by a detector running outside the app. So, for any camera this app is
+        not itself running, ask the real question: is the video source live
+        right now? One bounded probe per camera, off the UI thread, every 20s."""
+        if not self._probing:
+            self._probing = True
+            cams = [dict(c) for c in self.cameras
+                    if not (c["id"] in self.workers and self.workers[c["id"]].is_alive())]
+
+            def work():
+                for c in cams:
+                    live = self._source_live(c.get("source"))
+                    try:
+                        self.q.put(("live", c["id"], live))
+                    except Exception:
+                        pass
+                self._probing = False
+            threading.Thread(target=work, daemon=True).start()
+        self.after(20000, self._poll_live)
+
+    def _source_live(self, src):
+        """True if the camera's stream hands us a frame right now. Mirrors how a
+        worker opens it, so 'live' here means the same thing the worker would
+        see. Bounded: a few reads then release, whatever happens."""
+        if not src:
+            return False
+        try:
+            import cv2  # noqa: F401
+            import detect.relay as relay
+            s = int(src) if str(src).strip().isdigit() else src
+            cap = relay.open_stream(s)
+            if cap is None:
+                return False
+            ok = False
+            try:
+                for _ in range(4):
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        break
+            finally:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            return bool(ok)
+        except Exception:
+            return False
+
     def _pump(self):
+        if self.tray:
+            try:
+                self.tray.pump()
+            except Exception:
+                pass
         frames = {}                       # keep only the newest frame per camera
         try:
             while True:
@@ -2054,8 +2479,17 @@ class App(tk.Tk):
                 if kind == "banner":
                     self.banner.configure(text=val or "")
                 elif kind == "ready":
-                    if self.cfg.get("autostart"):
+                    if self.cfg.get("autostart") or self._launch_tray:
                         self._toggle_all()
+                elif kind == "live":
+                    self.live[cid] = val
+                    # Only speak for a camera this app is not running itself; a
+                    # live worker owns its own status line.
+                    if cid in self.tiles and not (
+                            cid in self.workers and self.workers[cid].is_alive()):
+                        t = self.tiles[cid]
+                        t["status"].configure(text="running" if val else "stopped",
+                                              fg=GREEN if val else DIM)
                 elif cid in self.tiles:
                     t = self.tiles[cid]
                     if kind == "state":
@@ -2073,9 +2507,8 @@ class App(tk.Tk):
         self.after(33, self._pump)      # ~30 fps UI repaint
 
     def _close(self):
-        for w in self.workers.values():
-            w.stop.set()
-        self.destroy()
+        # kept for anything that still calls it; the X now hides to the tray.
+        self._hide_to_tray()
 
 
 # --------------------------------------------------------------------------
@@ -2083,7 +2516,10 @@ class App(tk.Tk):
 # --------------------------------------------------------------------------
 def set_autostart(on: bool) -> str:
     target = sys.executable
-    args = "" if getattr(sys, "frozen", False) else f' "{Path(__file__).resolve()}"'
+    # --tray: a login launch comes up hidden in the tray with cameras running,
+    # so starting with Windows is not a window popping open on every boot.
+    extra = " --tray"
+    args = extra if getattr(sys, "frozen", False) else f' "{Path(__file__).resolve()}"{extra}'
     cmd = f'"{target}"{args}'
     if os.name == "nt":
         import winreg

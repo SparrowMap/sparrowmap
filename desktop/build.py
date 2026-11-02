@@ -25,7 +25,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "desktop" / "sparrowmap_app.py"
-DIST = ROOT / "desktop" / "dist"
+# SPARROW_DIST lets a rebuild land somewhere other than desktop/dist when the
+# live SparrowMap.exe is open and the real target is locked - build to a temp
+# folder, then swap the file in once it is closed.
+DIST = Path(os.environ.get("SPARROW_DIST") or (ROOT / "desktop" / "dist"))
 
 # Everything the light node must never drag in. Each of these is either huge, or
 # a development-only dependency that has no business in a shop's download.

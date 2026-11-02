@@ -116,6 +116,7 @@ keys/
 # of derived artefact. The app is built from desktop/build.py on demand.
 desktop/build/
 desktop/dist/
+desktop/dist_new/
 desktop/*.spec
 
 # The CPU-only virtualenv used to build the desktop app. Third-party
