@@ -1,12 +1,8 @@
 <!doctype html><meta charset="utf-8">
 <title>SparrowMap - checksums</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="/static/style.css?v=107">
+<link rel="stylesheet" href="/static/style.css?v=105">
 <style>
-  /* Same omission /support had: style.css pins html,body to height:100% with
-     overflow:hidden for the map app, and a document page has to undo BOTH.
-     Body alone leaves html clamped and the page refuses to scroll. */
-  html,body{height:auto; overflow:visible}
   body{padding:0} .wrap{max-width:820px;margin:0 auto;padding:18px}
   code{font:12px var(--mono);word-break:break-all}
   table{width:100%;border-collapse:collapse;margin:14px 0}
@@ -17,13 +13,18 @@
 </style>
 <div class="wrap">
 <h1>Checksums</h1>
-<p>SHA-256 for every published installer. Checked 2026-08-16.</p>
-<p class="n">These are served from <b>sparrowmap.com</b> while the installers
-are hosted on <b>GitHub</b>. That is deliberate: two different places to
-compromise rather than one.</p>
+<p>SHA-256 for every published installer. Checked 2026-11-08.</p>
+<p><b>SparrowMap.exe</b> is the current desktop program. Download it from
+<a href="/download">sparrowmap.com/download</a>. It updates itself from here,
+and refuses any update whose SHA-256 does not match.</p>
+<p class="n">Its SHA-256 is also committed in the public repository at
+<a href="https://github.com/SparrowMap/sparrowmap/blob/main/desktop/release/version.json">desktop/release/version.json</a>,
+so you can check it in two places that would both have to be broken into.
+The older v0.1.0 installers are on GitHub releases, with their hashes here.</p>
 <table>
 <tr><th>File</th><th>SHA-256</th></tr>
-<tr><td><b>SparrowMap4Biz.exe</b><br><span class='n'>v0.1.0 &middot; 79.5 MB</span></td><td><code>2da853b7242995849d42fb2ac5dc8ee5cbe9d70ec2b8ae984d664513bd3e057f</code></td></tr>
+<tr><td><b>SparrowMap.exe</b><br><span class='n'>v1.0.0 &middot; 80.6 MB</span></td><td><code>6e211594228140905c9f8f97545200a07ac442f61449b0032b055de4b2ae5ae9</code></td></tr>
+<tr><td><b>SparrowMap4Biz.exe</b><br><span class='n'>v0.1.0 &middot; 79.5 MB &middot; older name</span></td><td><code>2da853b7242995849d42fb2ac5dc8ee5cbe9d70ec2b8ae984d664513bd3e057f</code></td></tr>
 <tr><td><b>SparrowMapCameraSetup.exe</b><br><span class='n'>v0.1.0 &middot; 2.1 MB</span></td><td><code>35900162f98ba4d2c6533280bc061c18b1c22df74b0bf8ce93b0ceeea88fff1c</code></td></tr>
 </table>
 <h3>Verify a download</h3>
