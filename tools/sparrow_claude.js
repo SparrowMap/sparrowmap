@@ -27,6 +27,8 @@ const P = require("../public/sparrowsend-pow.js");
 const HUB = process.env.SPARROW_HUB || "https://map.sparrowmap.com";
 const UA = "SparrowClaude/1.0";
 const STATE = path.join(__dirname, ".sparrow_claude_state.json");
+// 10-27 the Workshop's windowsill sparrow: one line per letter sent or received (direction only, never the text)
+function letterLog(dir){ try{ fs.appendFileSync(process.env.SPARROW_LETTERS || path.join(__dirname, ".letters.log"), JSON.stringify({ts:Date.now(), dir})+"\n"); }catch(e){} }
 const enc = new TextEncoder(), dec = new TextDecoder();
 
 function b64u(b){ return Buffer.from(b).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
@@ -233,6 +235,7 @@ async function poll(ID, st, onMsg){
           const ext=mm[1].split("/")[1].replace("jpeg","jpg"); const fpath=path.join(dir, Date.now()+"."+ext);
           fs.writeFileSync(fpath, Buffer.from(mm[2],"base64")); extra=" saved:"+fpath; }catch(e){ extra=" (save failed)"; } }
       }
+      letterLog("in");
       console.log("MSG "+m.mb.slice(0,8)+" "+m.text.replace(/\s+/g," ").slice(0,400)+extra);
     }); saveState(s2); }
     finally{ unlock(); }
@@ -261,6 +264,7 @@ async function poll(ID, st, onMsg){
       await sendTo(ID, s2, c2, {t:"text", x:text});
       saveState(s2);
     } finally{ unlock(); }
+    letterLog("out");
     console.log("sent to "+(ct.name?("@"+ct.name):ct.mb.slice(0,8)));
     return;
   }
