@@ -105,6 +105,74 @@ def scp(local: Path, remote: str, timeout: int = 300) -> subprocess.CompletedPro
         capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
+
+RELEASE_MANIFEST = ROOT / "desktop" / "release" / "version.json"
+RELEASE_DIR = f"{REMOTE}/app_release"
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _release_manifest(exe: Path):
+    """The committed manifest, if this exe is exactly the file it describes."""
+    import json
+    if not exe.is_file():
+        say("fail", f"{exe} does not exist")
+        return None
+    try:
+        m = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+    except Exception as exc:
+        say("fail", f"no readable {RELEASE_MANIFEST.name}: {exc}")
+        return None
+    got, size = _sha256(exe), exe.stat().st_size
+    if got != m.get("sha256") or size != m.get("size"):
+        say("fail", f"{exe.name} is not the build version.json describes "
+                    f"(sha {got[:12]} vs {str(m.get('sha256'))[:12]}) - rerun "
+                    f"tools/app_manifest.py and commit")
+        return None
+    say(" ok ", f"{exe.name} v{m['version']} matches the committed manifest "
+                f"({size:,} bytes, sha256 {got[:20]})")
+    return m
+
+
+def release_app(exe: Path) -> bool:
+    """Upload the exe beside the checkout, re-hash it ON THE BOX, and only then
+    move it into place. A partial or corrupted upload never becomes the file."""
+    m = _release_manifest(exe)
+    if not m:
+        return False
+    part = f"{RELEASE_DIR}/SparrowMap.exe.part"
+    r = ssh(f"mkdir -p {RELEASE_DIR}")
+    if r.returncode != 0:
+        say("fail", "could not create the release dir: " + (r.stderr or "")[-200:])
+        return False
+    t0 = time.time()
+    r = scp(exe, part, timeout=1800)
+    if r.returncode != 0:
+        say("fail", "upload failed: " + (r.stderr or "")[-300:])
+        return False
+    say(" ok ", f"uploaded in {time.time() - t0:.0f}s")
+    r = ssh(f"sha256sum {part}")
+    box_sha = (r.stdout or "").split()[0] if r.stdout else ""
+    if box_sha != m["sha256"]:
+        ssh(f"rm -f {part}")
+        say("fail", f"the box's copy hashes to {box_sha[:16] or '?'} - removed")
+        return False
+    r = ssh(f"chown sparrow:sparrow {part} && chmod 644 {part} && "
+            f"mv -f {part} {RELEASE_DIR}/SparrowMap.exe && echo moved")
+    if "moved" not in (r.stdout or ""):
+        say("fail", "could not move it into place: " + (r.stderr or "")[-200:])
+        return False
+    say(" ok ", f"box sha256 {box_sha[:20]} = manifest, now {RELEASE_DIR}/SparrowMap.exe")
+    return True
+
+
 BUNDLE_REMOTE = "/tmp/sparrowmap-deploy.bundle"
 
 
@@ -378,6 +446,10 @@ def main() -> None:
     ap.add_argument("--restart-camera", action="store_true",
                     help="also restart run_live/camctl here (they own the "
                          "camera; do it when you can reach it)")
+    ap.add_argument("--release-app", type=Path, metavar="EXE",
+                    help="also upload this desktop exe to the box as "
+                         "/app/SparrowMap.exe; it must match the COMMITTED "
+                         "desktop/release/version.json (tools/app_manifest.py)")
     ap.add_argument("--skip-preflight", action="store_true",
                     help="only for deploying a revert in an emergency")
     a = ap.parse_args()
@@ -413,6 +485,10 @@ def main() -> None:
         else:
             say("fail", "preflight FAILED - not deploying")
             print(r.stdout[-800:])
+
+    if a.release_app:
+        print("\n2b. desktop release, local check")
+        _release_manifest(a.release_app)
 
     if not ok:
         sys.exit("\n⛔ refusing to deploy")
@@ -488,6 +564,12 @@ def main() -> None:
     if a.dry_run:
         print("\ndry run - nothing sent.")
         return
+
+    if a.release_app:
+        print("\n3b. desktop release (before the pull, so the manifest the pull "
+              "brings never points at a missing exe)")
+        if not release_app(a.release_app):
+            sys.exit("\n⛔ refusing to deploy")
 
     print("\n4. pull (--ff-only: cannot silently rewrite the box)")
     # ⚠️ WHEN THE OBJECTS CAME BY BUNDLE, DO NOT REACH FOR GITHUB AGAIN.
@@ -590,6 +672,19 @@ def main() -> None:
                                 f"cameras online, {s.get('sightings_24h')} sightings/24h")
         except Exception as exc:
             say("fail", f"{path} -> {exc}")
+
+    if a.release_app:
+        try:
+            req = urllib.request.Request(SITE + "/app/version.json",
+                                         headers={"User-Agent": "SparrowMap/deploy"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                v = json.loads(resp.read())
+            want = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+            say(" ok " if v == want else "fail",
+                f"/app/version.json -> v{v.get('version')} sha256 "
+                f"{str(v.get('sha256'))[:20]}" + ("" if v == want else " (NOT the committed manifest)"))
+        except Exception as exc:
+            say("fail", f"/app/version.json -> {exc}")
 
     print("\n8. this machine")
     sync_local(a)

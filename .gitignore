@@ -118,6 +118,11 @@ desktop/build/
 desktop/dist/
 desktop/dist_new/
 desktop/*.spec
+# The released exe as served by the box at /app/SparrowMap.exe (uploaded by
+# tools/deploy.py --release-app). Its manifest desktop/release/version.json IS
+# committed; the binary is not.
+app_release/
+*.exe
 
 # The CPU-only virtualenv used to build the desktop app. Third-party
 # site-packages, not this project's code.

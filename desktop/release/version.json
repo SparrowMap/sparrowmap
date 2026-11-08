@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "notes": "First self-hosted release. Adds the version check and one-click updates, the tray icon, true camera status, and Start with Windows.",
+  "url": "https://map.sparrowmap.com/app/SparrowMap.exe?v=1.0.0",
+  "sha256": "6e211594228140905c9f8f97545200a07ac442f61449b0032b055de4b2ae5ae9",
+  "size": 80627728
+}

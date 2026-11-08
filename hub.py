@@ -840,11 +840,55 @@ def _resolve_hash(h: str) -> str:
 
 
 
-# The packaged desktop app. Hosted on GitHub releases rather than here - see the
-# /download route for why - and CHECKED rather than assumed: the button on
-# /IPCamera appears only when the asset really exists, so the page never offers
-# a download that 404s. Cached, because this is a third-party round trip on a
-# path a crowd may hit.
+# 🖥️ THE DESKTOP PROGRAM, SERVED FROM HERE SINCE v1.0.0 (2026-11-08).
+#
+# Two files, and ONLY these two, under /app/:
+#   /app/version.json   committed in the repo at desktop/release/version.json,
+#                       so the sha256 the app checks is ALSO public on GitHub:
+#                       two places to compromise rather than one, which is the
+#                       reason the old setup hosted the binary on GitHub.
+#   /app/SparrowMap.exe NOT in git (80 MB derived artefact with build paths);
+#                       tools/deploy.py --release-app uploads it to
+#                       <repo>/app_release/ on the box and checks its sha256
+#                       there before moving it into place.
+# The in-app updater reads version.json at start and once a day and refuses any
+# download whose sha256 does not match it.
+#
+# Why here and not GitHub: there is no way to cut a GitHub release from this
+# PC (no gh, no token), and the 13 Mbps / 2 vCPU worry in the /download route
+# belonged to the OLD box. The exe is sent with a public cache header and a
+# versioned URL (?v=), so Cloudflare's edge carries repeat downloads.
+APP_MANIFEST = PUBLIC.parent / "desktop" / "release" / "version.json"
+APP_EXE = PUBLIC.parent / "app_release" / "SparrowMap.exe"
+_APP_REL = {"key": None, "info": None}
+
+
+def _app_release() -> "dict | None":
+    """version.json as a dict when BOTH files are in place and the exe is the
+    size the manifest says, else None. Cached on the two files' mtimes and
+    sizes, so a deploy that swaps either is picked up without a restart."""
+    try:
+        ms, es = APP_MANIFEST.stat(), APP_EXE.stat()
+    except OSError:
+        return None
+    key = (ms.st_mtime, ms.st_size, es.st_mtime, es.st_size)
+    if _APP_REL["key"] == key:
+        return _APP_REL["info"]
+    info = None
+    try:
+        d = json.loads(APP_MANIFEST.read_text(encoding="utf-8"))
+        if (isinstance(d, dict) and d.get("version") and d.get("sha256")
+                and int(d.get("size") or -1) == es.st_size):
+            info = d
+    except Exception:
+        info = None
+    _APP_REL.update(key=key, info=info)
+    return info
+
+
+# Fallback for a box with no release placed: the old GitHub asset, CHECKED
+# rather than assumed, so /IPCamera never offers a download that 404s.
+# SparrowMap4Biz.exe stays on GitHub for anyone who saved that link.
 DOWNLOAD_URL = CONFIG.get(
     "download_url",
     "https://github.com/SparrowMap/sparrowmap/releases/latest/download/SparrowMap4Biz.exe")
@@ -854,6 +898,9 @@ _DL_TTL_S = 600.0
 
 def _download_url():
     """The URL if a build is actually published, else None."""
+    rel = _app_release()
+    if rel and rel.get("url"):
+        return rel["url"]
     if not DOWNLOAD_URL:
         return None
     if now() - _DL_CACHE["at"] < _DL_TTL_S:
@@ -1358,6 +1405,36 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._head_only = False
 
+    def _app_exe(self) -> None:
+        """Stream /app/SparrowMap.exe in 1 MB chunks (never read 80 MB into
+        memory per request). Public cache header so Cloudflare's edge carries
+        repeat downloads; the URL in version.json carries ?v=<version>, so a
+        new release is a new cache key and never a stale cached binary."""
+        rel = _app_release()
+        if not rel:
+            return self._err(404, "no desktop build is published yet")
+        size = APP_EXE.stat().st_size
+        self._status = 200
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.microsoft.portable-executable")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", 'attachment; filename="SparrowMap.exe"')
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        if getattr(self, "_head_only", False):
+            return
+        try:
+            with open(APP_EXE, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _tile(self, path: str) -> None:
         """Serve one basemap tile, from disk if we already have it.
 
@@ -1640,7 +1717,9 @@ class Handler(BaseHTTPRequestHandler):
     # and dualstack's thread ceiling plus the idle timeout still bound them.
     # Static files under /static and /vendor are disk reads served from cache
     # and a single page load pulls a dozen; gating those buys nothing either.
-    _UNGATED = ("/api/tile/", "/static/", "/vendor/")
+    # /app/ = the desktop exe and its manifest: an 80 MB download must not sit
+    # on a gate permit for minutes while the map's own requests queue behind it.
+    _UNGATED = ("/api/tile/", "/static/", "/vendor/", "/app/")
 
     def _gated(self, inner, label: str):
         """Run a handler holding one permit, and RECORD that it holds it.
@@ -2061,6 +2140,18 @@ class Handler(BaseHTTPRequestHandler):
             # OUT of git (it is a 60 MB derived artefact full of absolute build
             # paths - preflight caught exactly that), so this 404s cleanly until
             # somebody uploads one, and /IPCamera hides its button accordingly.
+            # The desktop program and its manifest. An exact allowlist of two
+            # names, never a path join on the request, so nothing else on disk
+            # is reachable through /app/.
+            if p == "/app/version.json":
+                rel = _app_release()
+                if not rel:
+                    return self._err(404, "no desktop build is published yet")
+                return self._send(200, json.dumps(rel).encode(),
+                                  "application/json",
+                                  {"Cache-Control": "public, max-age=60"})
+            if p == "/app/SparrowMap.exe":
+                return self._app_exe()
             if p == "/download":
                 # 🚨 REDIRECTED TO A GITHUB RELEASE, NOT SERVED FROM HERE.
                 # The app is 76 MB. This box is 2 vCPUs on a 13 Mbps uplink and

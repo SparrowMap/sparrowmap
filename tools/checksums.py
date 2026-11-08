@@ -33,6 +33,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT = ROOT / "public" / "checksums.html"
 API = "https://api.github.com/repos/SparrowMap/sparrowmap/releases"
 UA = {"User-Agent": "SparrowMap-checksums/1.0"}
+# Since v1.0.0 the desktop program is served from map.sparrowmap.com/app/ and
+# its sha256 is COMMITTED here, so the second place to check it is GitHub.
+MANIFEST = ROOT / "desktop" / "release" / "version.json"
 
 
 def _get(url: str) -> bytes:
@@ -51,6 +54,17 @@ def assets() -> list[dict]:
                         "size": a["size"], "url": a["browser_download_url"],
                         "published": r.get("published_at", "")})
     return out
+
+
+def self_hosted() -> list[dict]:
+    """The /app/ release from the committed manifest. Hashed from the PUBLIC
+    url like every other row, so the page says what a downloader really gets."""
+    if not MANIFEST.exists():
+        return []
+    m = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    return [{"tag": "v" + m["version"], "name": "SparrowMap.exe",
+             "size": m["size"], "url": m["url"], "published": "",
+             "want": m["sha256"]}]
 
 
 def hashed(a: dict) -> dict:
@@ -80,9 +94,13 @@ PAGE = """<!doctype html><meta charset="utf-8">
 <div class="wrap">
 <h1>Checksums</h1>
 <p>SHA-256 for every published installer. Checked {when}.</p>
-<p class="n">These are served from <b>sparrowmap.com</b> while the installers
-are hosted on <b>GitHub</b>. That is deliberate: two different places to
-compromise rather than one.</p>
+<p><b>SparrowMap.exe</b> is the current desktop program. Download it from
+<a href="/download">sparrowmap.com/download</a>. It updates itself from here,
+and refuses any update whose SHA-256 does not match.</p>
+<p class="n">Its SHA-256 is also committed in the public repository at
+<a href="https://github.com/SparrowMap/sparrowmap/blob/main/desktop/release/version.json">desktop/release/version.json</a>,
+so you can check it in two places that would both have to be broken into.
+The older v0.1.0 installers are on GitHub releases, with their hashes here.</p>
 <table>
 <tr><th>File</th><th>SHA-256</th></tr>
 {rows}
@@ -108,7 +126,12 @@ def main() -> int:
                     help="verify the page matches the live assets; exit 1 if not")
     a = ap.parse_args()
 
-    got = [hashed(x) for x in assets()]
+    got = [hashed(x) for x in self_hosted() + assets()]
+    for g in got:
+        if g.get("want") and g["sha256"] != g["want"]:
+            print(f"🚨 {g['name']} at {g['url']} hashes to {g['sha256']}, "
+                  f"the manifest says {g['want']}")
+            return 1
     if not got:
         print("no release assets found")
         return 1
@@ -131,7 +154,8 @@ def main() -> int:
 
     rows = "\n".join(
         f"<tr><td><b>{html.escape(g['name'])}</b><br>"
-        f"<span class='n'>{g['tag']} &middot; {g['size'] / 1e6:.1f} MB</span></td>"
+        f"<span class='n'>{g['tag']} &middot; {g['size'] / 1e6:.1f} MB"
+        f"{' &middot; older name' if g['name'] == 'SparrowMap4Biz.exe' else ''}</span></td>"
         f"<td><code>{g['sha256']}</code></td></tr>" for g in got)
     OUT.write_text(
         PAGE.format(when=time.strftime("%Y-%m-%d"), rows=rows), encoding="utf-8")
